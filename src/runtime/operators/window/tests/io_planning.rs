@@ -140,8 +140,10 @@ impl OperatorStore for RecordingWindowStore {
         &self,
         ns: &StateNamespace,
         state: &dyn OperatorTaskState,
+        task_id: &str,
+        labels: Option<&crate::runtime::metrics::MetricsLabels>,
     ) -> Result<()> {
-        self.inner.maintain(ns, state).await
+        self.inner.maintain(ns, state, task_id, labels).await
     }
 }
 

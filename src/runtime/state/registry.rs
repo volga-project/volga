@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::Result;
 use dashmap::DashMap;
 
+use crate::runtime::metrics::MetricsLabels;
 use crate::runtime::operators::OperatorKind;
 use crate::runtime::VertexId;
 
@@ -22,6 +23,8 @@ pub struct StateRegistry {
     stores: Mutex<HashMap<OperatorKind, Arc<dyn OperatorStore>>>,
     task_states: DashMap<VertexId, Arc<dyn OperatorTaskState>>,
     maintenance_enabled: AtomicBool,
+    /// Worker-scoped Prom/registry labels (pipeline + worker); task id is the DashMap key.
+    metrics_labels: Option<MetricsLabels>,
 }
 
 impl std::fmt::Debug for StateRegistry {
@@ -37,18 +40,23 @@ impl std::fmt::Debug for StateRegistry {
 
 impl Default for StateRegistry {
     fn default() -> Self {
-        Self::new(None, Arc::new(StateResourceTracker::new()))
+        Self::new(None, Arc::new(StateResourceTracker::new()), None)
     }
 }
 
 impl StateRegistry {
-    pub fn new(session: Option<StateSessionHandle>, tracker: Arc<StateResourceTracker>) -> Self {
+    pub fn new(
+        session: Option<StateSessionHandle>,
+        tracker: Arc<StateResourceTracker>,
+        metrics_labels: Option<MetricsLabels>,
+    ) -> Self {
         Self {
             session,
             tracker,
             stores: Mutex::new(HashMap::new()),
             task_states: DashMap::new(),
             maintenance_enabled: AtomicBool::new(true),
+            metrics_labels,
         }
     }
 
@@ -58,6 +66,10 @@ impl StateRegistry {
 
     pub fn tracker(&self) -> &Arc<StateResourceTracker> {
         &self.tracker
+    }
+
+    pub fn metrics_labels(&self) -> Option<&MetricsLabels> {
+        self.metrics_labels.as_ref()
     }
 
     pub fn set_maintenance_enabled(&self, enabled: bool) {
@@ -96,16 +108,17 @@ impl StateRegistry {
             .map(|entry| entry.value().clone())
     }
 
-    pub fn task_states(&self, kind: OperatorKind) -> Vec<Arc<dyn OperatorTaskState>> {
+    pub fn task_states(&self, kind: OperatorKind) -> Vec<(VertexId, Arc<dyn OperatorTaskState>)> {
         self.task_states
             .iter()
             .filter(|entry| entry.value().kind() == kind)
-            .map(|entry| entry.value().clone())
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
             .collect()
     }
 
     /// One cleaner tick: one parallel loop per op kind; within a kind, all task states join.
     pub async fn run_maintenance_once(&self) -> Result<()> {
+        let labels = self.metrics_labels.clone();
         let work: Vec<(OperatorKind, Arc<dyn OperatorStore>)> = self
             .stores
             .lock()
@@ -115,9 +128,15 @@ impl StateRegistry {
             .collect();
         let kind_futs = work.into_iter().map(|(kind, store)| {
             let states = self.task_states(kind);
+            let labels = labels.clone();
             async move {
-                let futs = states.iter().map(|state| {
-                    store.maintain(state.state_namespace(), state.as_ref())
+                let futs = states.iter().map(|(task_id, state)| {
+                    store.maintain(
+                        state.state_namespace(),
+                        state.as_ref(),
+                        task_id.as_ref(),
+                        labels.as_ref(),
+                    )
                 });
                 futures::future::try_join_all(futs).await
             }

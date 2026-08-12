@@ -134,7 +134,7 @@ impl Harness {
     pub async fn run_maintenance(&self) {
         let state = self.op.task_state();
         self.store
-            .maintain(state.namespace(), state.as_ref())
+            .maintain(state.namespace(), state.as_ref(), "test-task", None)
             .await
             .expect("maintain");
     }
@@ -271,7 +271,7 @@ impl WoWroHarness {
         let state = self.wo.task_state();
         state
             .store()
-            .maintain(state.namespace(), state.as_ref())
+            .maintain(state.namespace(), state.as_ref(), "test-task", None)
             .await
             .expect("maintain");
     }

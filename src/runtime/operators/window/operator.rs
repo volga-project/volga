@@ -19,6 +19,7 @@ use crate::runtime::operators::operator::{
 use crate::runtime::operators::window::config::{BuiltWindows, WindowConfig};
 use crate::runtime::operators::window::eval::advance_key;
 use crate::runtime::operators::window::frame_utils::{get_window_length_ms, require_range_frame};
+use crate::runtime::metrics::MetricsLabels;
 use crate::runtime::operators::window::metrics;
 use crate::runtime::operators::window::model::{Cursor, WindowId};
 use crate::runtime::operators::window::spec::WindowSpec;
@@ -83,6 +84,8 @@ pub struct WindowOperator {
     task_metadata: TaskMetadata,
     state_registry: Option<Arc<StateRegistry>>,
     vertex_id: Option<VertexId>,
+    /// Worker-scoped labels for hot-path metrics (task id is `vertex_id`).
+    metrics_labels: Option<MetricsLabels>,
 }
 
 impl fmt::Debug for WindowOperator {
@@ -131,6 +134,14 @@ impl WindowOperator {
             task_metadata: TaskMetadata::default(),
             state_registry: None,
             vertex_id: None,
+            metrics_labels: None,
+        }
+    }
+
+    fn metrics_target(&self) -> Option<(&str, &MetricsLabels)> {
+        match (&self.vertex_id, &self.metrics_labels) {
+            (Some(task_id), Some(labels)) => Some((task_id.as_ref(), labels)),
+            _ => None,
         }
     }
 
@@ -226,24 +237,21 @@ impl OperatorTrait for WindowOperator {
                     .expect("operator id must be configured for WindowOperator"),
                 context.task_index(),
             );
-            let mut state = WindowOperatorState::new(
+            let state = Arc::new(WindowOperatorState::new(
                 store,
                 ns,
                 self.ts_column_index,
                 self.window_configs.clone(),
                 self.lateness_ms,
                 self.max_window_length_ms,
-            );
-            if let Some(labels) = context.metrics_labels() {
-                state = state.with_metrics(context.vertex_id_arc(), labels);
-            }
-            let state = Arc::new(state);
+            ));
             registry.insert_task_state(
                 context.vertex_id_arc(),
                 state.clone() as Arc<dyn OperatorTaskState>,
             );
             self.state_registry = Some(registry.clone());
             self.vertex_id = Some(context.vertex_id_arc());
+            self.metrics_labels = context.metrics_labels();
             self.state = Some(state);
         }
 
@@ -306,8 +314,8 @@ impl OperatorTrait for WindowOperator {
                     );
                     self.task_metadata
                         .increment_u64(TASK_METADATA_ROWS_DROPPED_LATE, dropped as u64);
-                    if let Some((task_id, labels)) = state.metrics() {
-                        metrics::add_late_dropped(task_id.as_ref(), labels, dropped as u64);
+                    if let Some((task_id, labels)) = self.metrics_target() {
+                        metrics::add_late_dropped(task_id, labels, dropped as u64);
                     }
                     OperatorPollResult::Continue
                 }
@@ -328,9 +336,9 @@ impl OperatorTrait for WindowOperator {
                     {
                         let started = Instant::now();
                         let batch = self.process_due(advance_to).await;
-                        if let Some((task_id, labels)) = state.metrics() {
+                        if let Some((task_id, labels)) = self.metrics_target() {
                             metrics::record_wm_process_ms(
-                                task_id.as_ref(),
+                                task_id,
                                 labels,
                                 started.elapsed().as_secs_f64() * 1000.0,
                             );
@@ -339,7 +347,7 @@ impl OperatorTrait for WindowOperator {
                                 .as_any()
                                 .downcast_ref::<TimestampMillisecondArray>()
                             {
-                                metrics::record_result_freshness(task_id.as_ref(), labels, ts);
+                                metrics::record_result_freshness(task_id, labels, ts);
                             }
                         }
                         batch

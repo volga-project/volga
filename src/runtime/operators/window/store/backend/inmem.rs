@@ -81,13 +81,21 @@ impl InMemWindowStore {
         Self::default()
     }
 
-    /// Scan namespace store sizes and write gauges into the metrics registry.
-    fn report_namespace_sizes(
+    /// Scan namespace store footprint and write gauges into the metrics registry.
+    fn report_metrics(
         state: &InMemState,
         namespace: &[u8],
         task_id: &str,
         labels: &crate::runtime::metrics::MetricsLabels,
     ) {
+        use crate::runtime::metrics::set_task_gauge;
+        use metrics::{
+            METRIC_WO_STATE_KEY_STATES_BYTES, METRIC_WO_STATE_KEY_STATES_COUNT,
+            METRIC_WO_STATE_RAW_BYTES, METRIC_WO_STATE_RAW_COUNT, METRIC_WO_STATE_TILES_BYTES,
+            METRIC_WO_STATE_TILES_COUNT, METRIC_WO_STATE_TRIGGERS_BYTES,
+            METRIC_WO_STATE_TRIGGERS_COUNT,
+        };
+
         let mut raw_count = 0u64;
         let mut raw_bytes = 0u64;
         let mut tiles_count = 0u64;
@@ -121,18 +129,19 @@ impl InMemWindowStore {
             triggers_bytes =
                 triggers_bytes.saturating_add(bincode::serialized_size(trigger).unwrap_or(0));
         }
-        metrics::set_state_size_gauges(
-            task_id,
-            labels,
-            raw_count,
-            raw_bytes,
-            tiles_count,
-            tiles_bytes,
-            triggers_count,
-            triggers_bytes,
-            key_states_count,
-            key_states_bytes,
-        );
+        let labels = Some(labels);
+        for (name, value) in [
+            (METRIC_WO_STATE_RAW_COUNT, raw_count),
+            (METRIC_WO_STATE_RAW_BYTES, raw_bytes),
+            (METRIC_WO_STATE_TILES_COUNT, tiles_count),
+            (METRIC_WO_STATE_TILES_BYTES, tiles_bytes),
+            (METRIC_WO_STATE_TRIGGERS_COUNT, triggers_count),
+            (METRIC_WO_STATE_TRIGGERS_BYTES, triggers_bytes),
+            (METRIC_WO_STATE_KEY_STATES_COUNT, key_states_count),
+            (METRIC_WO_STATE_KEY_STATES_BYTES, key_states_bytes),
+        ] {
+            set_task_gauge(name, value as f64, task_id, labels);
+        }
     }
 
     /// Returns number of raw rows pruned.
@@ -446,6 +455,8 @@ impl OperatorStore for InMemWindowStore {
         &self,
         ns: &StateNamespace,
         state: &dyn OperatorTaskState,
+        task_id: &str,
+        labels: Option<&crate::runtime::metrics::MetricsLabels>,
     ) -> Result<()> {
         let Some(wo) = state.as_any().downcast_ref::<WindowOperatorState>() else {
             return Ok(());
@@ -456,15 +467,15 @@ impl OperatorStore for InMemWindowStore {
         let started = std::time::Instant::now();
         let mut store = self.state.write().await;
         let pruned_rows = Self::prune_namespace(&mut store, ns.bytes.as_slice(), watermark, floor);
-        if let Some((task_id, labels)) = wo.metrics() {
-            Self::report_namespace_sizes(&store, ns.bytes.as_slice(), task_id.as_ref(), labels);
+        if let Some(labels) = labels {
+            Self::report_metrics(&store, ns.bytes.as_slice(), task_id, labels);
             drop(store);
             metrics::record_maintain_ms(
-                task_id.as_ref(),
+                task_id,
                 labels,
                 started.elapsed().as_secs_f64() * 1000.0,
             );
-            metrics::add_pruned(task_id.as_ref(), labels, pruned_rows);
+            metrics::add_pruned(task_id, labels, pruned_rows);
         }
         Ok(())
     }
@@ -918,7 +929,7 @@ mod tests {
             .watermark_frontier
             .store(5_000, std::sync::atomic::Ordering::Release);
         store
-            .maintain(&namespace, &task_state)
+            .maintain(&namespace, &task_state, "test-task", None)
             .await
             .unwrap();
 

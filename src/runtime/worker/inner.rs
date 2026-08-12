@@ -10,6 +10,7 @@ use tokio::runtime::{Builder, Runtime};
 use crate::runtime::functions::source::request_source::extract_request_source_config;
 use crate::runtime::functions::source::request_source::RequestSourceProcessor;
 use crate::runtime::health::WorkerHealth;
+use crate::runtime::metrics::MetricsLabels;
 use crate::runtime::observability::snapshot_types::WorkerSnapshot;
 use crate::runtime::operators::source::SourceHandles;
 use crate::runtime::state::{StateRegistry, StateResourceTracker, StateSessionHandle};
@@ -77,6 +78,10 @@ impl WorkerInner {
         let state_registry = Arc::new(StateRegistry::new(
             session,
             Arc::new(StateResourceTracker::new()),
+            Some(MetricsLabels {
+                pipeline_id: config.pipeline_id.0.clone(),
+                worker_id: config.worker_id.clone(),
+            }),
         ));
         state_registry.set_maintenance_enabled(config.state_maintenance_enabled);
 

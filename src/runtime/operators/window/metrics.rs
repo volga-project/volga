@@ -1,16 +1,15 @@
 //! Window-operator metrics: write helpers + registry-backed API snapshot.
 //!
-//! Hot path writes go through shared task helpers into the metrics fanout
-//! (Prometheus + in-process registry). API snapshots are built by visiting
-//! that registry on poll.
+//! Hot path / maintain writes go through shared task helpers into the metrics
+//! fanout (Prometheus + in-process registry). API snapshots are built by
+//! visiting that registry on poll.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use arrow::array::TimestampMillisecondArray;
 
 use crate::runtime::metrics::{
-    collect_task_metric_values, increment_task_counter, record_task_histogram, set_task_gauge,
-    MetricsLabels,
+    collect_task_metric_values, increment_task_counter, record_task_histogram, MetricsLabels,
 };
 use serde::{Deserialize, Serialize};
 
@@ -71,34 +70,6 @@ pub fn record_wm_process_ms(task_id: &str, labels: &MetricsLabels, ms: f64) {
 
 pub fn record_maintain_ms(task_id: &str, labels: &MetricsLabels, ms: f64) {
     record_task_histogram(METRIC_WO_MAINTAIN_MS, ms, task_id, Some(labels));
-}
-
-/// Set store-size gauges (written during maintain; read back on poll into the API snapshot).
-pub fn set_state_size_gauges(
-    task_id: &str,
-    labels: &MetricsLabels,
-    raw_count: u64,
-    raw_bytes: u64,
-    tiles_count: u64,
-    tiles_bytes: u64,
-    triggers_count: u64,
-    triggers_bytes: u64,
-    key_states_count: u64,
-    key_states_bytes: u64,
-) {
-    let labels = Some(labels);
-    for (name, value) in [
-        (METRIC_WO_STATE_RAW_COUNT, raw_count),
-        (METRIC_WO_STATE_RAW_BYTES, raw_bytes),
-        (METRIC_WO_STATE_TILES_COUNT, tiles_count),
-        (METRIC_WO_STATE_TILES_BYTES, tiles_bytes),
-        (METRIC_WO_STATE_TRIGGERS_COUNT, triggers_count),
-        (METRIC_WO_STATE_TRIGGERS_BYTES, triggers_bytes),
-        (METRIC_WO_STATE_KEY_STATES_COUNT, key_states_count),
-        (METRIC_WO_STATE_KEY_STATES_BYTES, key_states_bytes),
-    ] {
-        set_task_gauge(name, value as f64, task_id, labels);
-    }
 }
 
 /// Record result freshness as min/mean/max over the batch (3 hist samples).
