@@ -6,14 +6,17 @@ use crate::{
         execution_graph::ExecutionGraph,
         health::{WorkerFatalReason, WorkerHealth},
         metrics::{
-            init_metrics, record_task_histogram, set_task_gauge, MetricsLabels,
-            LABEL_PIPELINE_ID, LABEL_TASK_ID, LABEL_WORKER_ID,
-            METRIC_STREAM_TASK_BYTES_RECV,
-            METRIC_STREAM_TASK_BYTES_SENT, METRIC_STREAM_TASK_CHECKPOINT_BARRIER_PROPAGATION_MS,
-            METRIC_STREAM_TASK_MESSAGES_RECV,
-            METRIC_STREAM_TASK_MESSAGES_SENT, METRIC_STREAM_TASK_PATH_LATENCY,
-            METRIC_STREAM_TASK_RECORDS_RECV, METRIC_STREAM_TASK_RECORDS_SENT,
-            METRIC_STREAM_TASK_WATERMARK_LAG_MS, METRIC_STREAM_TASK_WM_PROPAGATION_MS,
+            increment_task_counter, init_metrics, record_task_histogram, set_task_gauge,
+            MetricsLabels, LABEL_PIPELINE_ID, LABEL_TASK_ID, LABEL_WORKER_ID,
+            METRIC_STREAM_TASK_BYTES_RECV, METRIC_STREAM_TASK_BYTES_SENT,
+            METRIC_STREAM_TASK_CHECKPOINT_ALIGN_WAIT_MS,
+            METRIC_STREAM_TASK_CHECKPOINT_BARRIER_PROPAGATION_MS,
+            METRIC_STREAM_TASK_CHECKPOINT_DURATION_MS, METRIC_STREAM_TASK_CHECKPOINT_FAIL,
+            METRIC_STREAM_TASK_CHECKPOINT_PAYLOAD_BYTES, METRIC_STREAM_TASK_CHECKPOINT_SUCCESS,
+            METRIC_STREAM_TASK_MESSAGES_RECV, METRIC_STREAM_TASK_MESSAGES_SENT,
+            METRIC_STREAM_TASK_PATH_LATENCY, METRIC_STREAM_TASK_RECORDS_RECV,
+            METRIC_STREAM_TASK_RECORDS_SENT, METRIC_STREAM_TASK_WATERMARK_LAG_MS,
+            METRIC_STREAM_TASK_WM_PROPAGATION_MS,
         },
         observability::{TaskMetadata, TaskSnapshot, StreamTaskStatus},
         operators::operator::{
@@ -54,6 +57,7 @@ pub(crate) struct CheckpointAligner {
     seen_upstreams: HashSet<String>,
     /// Earliest create stamp among barriers for the current checkpoint (for propagation).
     inject_stamp: Option<u64>,
+    align_started: Option<Instant>,
     reader_control: DataReaderControl,
 }
 
@@ -64,16 +68,17 @@ impl CheckpointAligner {
             current_checkpoint: None,
             seen_upstreams: HashSet::new(),
             inject_stamp: None,
+            align_started: None,
             reader_control,
         }
     }
 
-    /// Returns `Some((checkpoint_id, inject_stamp))` when fully aligned.
+    /// Returns `Some((checkpoint_id, inject_stamp, align_wait_ms))` when fully aligned.
     fn on_barrier(
         &mut self,
         barrier: &crate::common::message::CheckpointBarrierMessage,
         expected_attempt_id: u64,
-    ) -> Result<Option<(u64, Option<u64>)>, String> {
+    ) -> Result<Option<(u64, Option<u64>, f64)>, String> {
         if barrier.execution_attempt_id != expected_attempt_id {
             // Orphan from a previous attempt — drop without failing the new attempt.
             println!(
@@ -94,6 +99,7 @@ impl CheckpointAligner {
         if self.current_checkpoint.is_none() {
             self.current_checkpoint = Some(checkpoint_id);
             self.inject_stamp = barrier.metadata.ingest_timestamp;
+            self.align_started = Some(Instant::now());
         } else if let (Some(existing), Some(stamp)) =
             (self.inject_stamp, barrier.metadata.ingest_timestamp)
         {
@@ -113,9 +119,14 @@ impl CheckpointAligner {
 
         if self.seen_upstreams.len() == self.upstream_count {
             let stamp = self.inject_stamp.take();
+            let align_wait_ms = self
+                .align_started
+                .take()
+                .map(|t| t.elapsed().as_secs_f64() * 1000.0)
+                .unwrap_or(0.0);
             self.current_checkpoint = None;
             self.seen_upstreams.clear();
-            return Ok(Some((checkpoint_id, stamp)));
+            return Ok(Some((checkpoint_id, stamp, align_wait_ms)));
         }
         Ok(None)
     }
@@ -444,7 +455,13 @@ impl StreamTask {
                     }
                     Message::CheckpointBarrier(barrier) => {
                         match aligner.on_barrier(barrier, execution_attempt_id) {
-                            Ok(Some((checkpoint_id, inject_stamp))) => {
+                            Ok(Some((checkpoint_id, inject_stamp, align_wait_ms))) => {
+                                Self::record_histogram(
+                                    METRIC_STREAM_TASK_CHECKPOINT_ALIGN_WAIT_MS,
+                                    align_wait_ms,
+                                    &vertex_id,
+                                    labels.as_ref(),
+                                );
                                 // Once fully aligned, yield a single barrier; preserve inject stamp.
                                 yield Message::CheckpointBarrier(
                                     crate::common::message::CheckpointBarrierMessage::new(
@@ -790,34 +807,73 @@ impl StreamTask {
                                     "[CHECKPOINT] {} checkpointing checkpoint_id={}",
                                     vertex_id, checkpoint_id
                                 );
-                                let checkpoint: SerializedCheckpoint =
-                                    operator.checkpoint(checkpoint_id).await?;
-                                let checkpoint_data = checkpoint.into_bytes();
+                                let started = Instant::now();
+                                let checkpoint_result = async {
+                                    let checkpoint: SerializedCheckpoint =
+                                        operator.checkpoint(checkpoint_id).await?;
+                                    let checkpoint_data = checkpoint.into_bytes();
+                                    let payload_len = checkpoint_data.len() as u64;
 
-                                let report_resp = master_client
-                                    .as_mut()
-                                    .expect("Master client not initialized")
-                                    .report_checkpoint(tonic::Request::new(
-                                        crate::runtime::master::server::master_service::ReportCheckpointRequest {
-                                            checkpoint_id,
-                                            vertex_id: vertex_id.as_ref().to_string(),
-                                            task_index: runtime_context.task_index(),
-                                            checkpoint_data,
-                                            execution_attempt_id,
-                                        },
-                                    ))
-                                    .await?
-                                    .into_inner();
-                                if !report_resp.success {
-                                    return Err(anyhow::anyhow!(
-                                        "report_checkpoint rejected: {}",
-                                        report_resp.error_message
-                                    ));
+                                    let report_resp = master_client
+                                        .as_mut()
+                                        .expect("Master client not initialized")
+                                        .report_checkpoint(tonic::Request::new(
+                                            crate::runtime::master::server::master_service::ReportCheckpointRequest {
+                                                checkpoint_id,
+                                                vertex_id: vertex_id.as_ref().to_string(),
+                                                task_index: runtime_context.task_index(),
+                                                checkpoint_data,
+                                                execution_attempt_id,
+                                            },
+                                        ))
+                                        .await?
+                                        .into_inner();
+                                    if !report_resp.success {
+                                        return Err(anyhow::anyhow!(
+                                            "report_checkpoint rejected: {}",
+                                            report_resp.error_message
+                                        ));
+                                    }
+                                    Ok::<u64, anyhow::Error>(payload_len)
                                 }
-                                println!(
-                                    "[CHECKPOINT] {} reported checkpoint_id={}",
-                                    vertex_id, checkpoint_id
-                                );
+                                .await;
+
+                                let duration_ms = started.elapsed().as_secs_f64() * 1000.0;
+                                match checkpoint_result {
+                                    Ok(payload_len) => {
+                                        Self::record_histogram(
+                                            METRIC_STREAM_TASK_CHECKPOINT_DURATION_MS,
+                                            duration_ms,
+                                            &vertex_id,
+                                            metrics_labels.as_ref(),
+                                        );
+                                        increment_task_counter(
+                                            METRIC_STREAM_TASK_CHECKPOINT_PAYLOAD_BYTES,
+                                            payload_len,
+                                            vertex_id.as_ref(),
+                                            metrics_labels.as_ref(),
+                                        );
+                                        increment_task_counter(
+                                            METRIC_STREAM_TASK_CHECKPOINT_SUCCESS,
+                                            1,
+                                            vertex_id.as_ref(),
+                                            metrics_labels.as_ref(),
+                                        );
+                                        println!(
+                                            "[CHECKPOINT] {} reported checkpoint_id={}",
+                                            vertex_id, checkpoint_id
+                                        );
+                                    }
+                                    Err(error) => {
+                                        increment_task_counter(
+                                            METRIC_STREAM_TASK_CHECKPOINT_FAIL,
+                                            1,
+                                            vertex_id.as_ref(),
+                                            metrics_labels.as_ref(),
+                                        );
+                                        return Err(error);
+                                    }
+                                }
                             }
 
                             // Resume input after checkpointing

@@ -63,8 +63,14 @@ impl CheckpointProtocol {
         Ok(checkpoint_id)
     }
 
-    pub(super) fn abort_in_flight(&mut self) -> Option<u64> {
-        self.in_flight.take().map(|c| c.checkpoint_id)
+    /// Returns `(checkpoint_id, duration_ms)` when an in-flight checkpoint is aborted.
+    pub(super) fn abort_in_flight(&mut self) -> Option<(u64, u64)> {
+        self.in_flight.take().map(|c| {
+            (
+                c.checkpoint_id,
+                c.started_at.elapsed().as_millis() as u64,
+            )
+        })
     }
 
     /// Record a state ack. Completes only when acks and aligns both match expected sets.
@@ -129,9 +135,10 @@ impl CheckpointProtocol {
         }
 
         if in_flight.acks == *expected_acks && in_flight.aligns == *expected_aligns {
+            let duration_ms = in_flight.started_at.elapsed().as_millis() as u64;
             self.in_flight = None;
             self.completed.insert(checkpoint_id);
-            CheckpointAckOutcome::Completed
+            CheckpointAckOutcome::Completed { duration_ms }
         } else {
             CheckpointAckOutcome::Pending
         }
@@ -179,10 +186,10 @@ mod tests {
     ) -> u64 {
         let id = protocol.start(acks, aligns).unwrap();
         assert_eq!(protocol.ack(id, t.clone(), acks, aligns), CheckpointAckOutcome::Pending);
-        assert_eq!(
+        assert!(matches!(
             protocol.align(id, t, acks, aligns),
-            CheckpointAckOutcome::Completed
-        );
+            CheckpointAckOutcome::Completed { .. }
+        ));
         id
     }
 
@@ -201,10 +208,10 @@ mod tests {
             protocol.align(id, task("src", 0), &acks, &aligns),
             CheckpointAckOutcome::Pending
         );
-        assert_eq!(
+        assert!(matches!(
             protocol.align(id, task("sink", 0), &acks, &aligns),
-            CheckpointAckOutcome::Completed
-        );
+            CheckpointAckOutcome::Completed { .. }
+        ));
         assert_eq!(protocol.latest_complete(), Some(id));
         assert!(protocol.in_flight_id().is_none());
     }
@@ -223,10 +230,10 @@ mod tests {
             protocol.ack(id, task("a", 0), &acks, &aligns),
             CheckpointAckOutcome::Pending
         );
-        assert_eq!(
+        assert!(matches!(
             protocol.align(id, task("a", 0), &acks, &aligns),
-            CheckpointAckOutcome::Completed
-        );
+            CheckpointAckOutcome::Completed { .. }
+        ));
         assert!(matches!(
             protocol.ack(id, task("a", 0), &acks, &aligns),
             CheckpointAckOutcome::Rejected(CheckpointAckReject::AlreadyComplete)
