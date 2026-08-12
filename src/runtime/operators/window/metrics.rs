@@ -72,29 +72,26 @@ pub fn record_maintain_ms(task_id: &str, labels: &MetricsLabels, ms: f64) {
     record_task_histogram(METRIC_WO_MAINTAIN_MS, ms, task_id, Some(labels));
 }
 
-/// Record result freshness as min/mean/max over the batch (3 hist samples).
+/// Max hist samples per emit batch (stride across rows; all rows if shorter).
+const RESULT_FRESHNESS_SAMPLE_COUNT: usize = 16;
+
+/// Record result freshness from a stride sample of the batch (≤16 hist samples).
 pub fn record_result_freshness(task_id: &str, labels: &MetricsLabels, ts: &TimestampMillisecondArray) {
-    let n = ts.len();
-    if n == 0 {
+    let len = ts.len();
+    if len == 0 {
         return;
     }
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64;
-    let mut min_f = i64::MAX;
-    let mut max_f = 0i64;
-    let mut sum = 0i64;
-    for i in 0..n {
-        let f = now_ms.saturating_sub(ts.value(i)).max(0);
-        min_f = min_f.min(f);
-        max_f = max_f.max(f);
-        sum = sum.saturating_add(f);
-    }
-    let mean = sum / n as i64;
+    let samples = RESULT_FRESHNESS_SAMPLE_COUNT.min(len);
     let labels = Some(labels);
-    for sample in [min_f, mean, max_f] {
-        record_task_histogram(METRIC_WO_RESULT_FRESHNESS_MS, sample as f64, task_id, labels);
+    let values = ts.values();
+    for k in 0..samples {
+        let i = k * len / samples;
+        let freshness = now_ms.saturating_sub(values[i]).max(0) as f64;
+        record_task_histogram(METRIC_WO_RESULT_FRESHNESS_MS, freshness, task_id, labels);
     }
 }
 
