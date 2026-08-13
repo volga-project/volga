@@ -43,6 +43,10 @@ path = "src/bin/volga-test-storage.rs"
 name = "generate-kube-pipeline-schema"
 path = "src/bin/generate-kube-pipeline-schema.rs"
 
+[[bin]]
+name = "volga-longrun"
+path = "src/bin/volga-longrun.rs"
+
 [build-dependencies]
 tonic-build = "0.12"
 

@@ -8,17 +8,17 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::api::PipelineSpec;
-use crate::common::ports::gen_unique_grpc_port;
-use crate::test_utils::harness::PipelineLaunchSpec;
-use crate::test_utils::harness::backend::ClusterBackend;
-use crate::test_utils::harness::FaultAction;
-use crate::storage::InMemoryStorageSnapshot;
-use crate::runtime::master::LifecycleEvent;
-use crate::runtime::master::LifecycleEventRecord;
 use crate::common::grpc::master::master_client;
 use crate::common::grpc::GrpcConfig;
+use crate::common::ports::gen_unique_grpc_port;
 use crate::runtime::master::server::master_service::GetLifecycleEventsRequest;
+use crate::runtime::master::LifecycleEvent;
+use crate::runtime::master::LifecycleEventRecord;
 use crate::storage::InMemoryStorageClient;
+use crate::storage::InMemoryStorageSnapshot;
+use crate::test_utils::harness::backend::ClusterBackend;
+use crate::test_utils::harness::FaultAction;
+use crate::test_utils::harness::PipelineLaunchSpec;
 use async_trait::async_trait;
 
 struct KubeResources {
@@ -104,10 +104,7 @@ impl ClusterBackend for KubeCluster {
             .await
     }
 
-    async fn lifecycle_events_since(
-        &mut self,
-        sequence: u64,
-    ) -> Result<Vec<LifecycleEventRecord>> {
+    async fn lifecycle_events_since(&mut self, sequence: u64) -> Result<Vec<LifecycleEventRecord>> {
         let master_port = self
             .resources
             .as_ref()
@@ -140,7 +137,10 @@ impl ClusterBackend for KubeCluster {
     }
 
     async fn apply_fault(&mut self, fault: FaultAction) -> Result<()> {
-        let resources = self.resources.as_ref().context("kube cluster is not launched")?;
+        let resources = self
+            .resources
+            .as_ref()
+            .context("kube cluster is not launched")?;
         match fault {
             FaultAction::KillWorker { worker_id, mode: _ }
             | FaultAction::RestartWorker { worker_id } => resources.delete_worker_pod(&worker_id),
@@ -373,14 +373,8 @@ fn wait_for_pipeline(pipeline_name: &str) -> Result<()> {
 fn wait_for_pipeline_deleted(pipeline_name: &str) -> Result<()> {
     let start = std::time::Instant::now();
     loop {
-        let pipeline_deleted = kubectl(&[
-            "-n",
-            "default",
-            "get",
-            "volgapipeline",
-            pipeline_name,
-        ])
-        .is_err();
+        let pipeline_deleted =
+            kubectl(&["-n", "default", "get", "volgapipeline", pipeline_name]).is_err();
         let pods_deleted = kubectl(&[
             "-n",
             "default",
@@ -422,7 +416,9 @@ fn wait_for_no_pods(label: &str) -> Result<()> {
             return Ok(());
         }
         if start.elapsed() > Duration::from_secs(120) {
-            return Err(anyhow!("timeout waiting for pods matching {label} to terminate"));
+            return Err(anyhow!(
+                "timeout waiting for pods matching {label} to terminate"
+            ));
         }
         std::thread::sleep(Duration::from_secs(1));
     }
@@ -477,8 +473,7 @@ async fn fetch_lifecycle_events(
     master_port: u16,
     sequence: u64,
 ) -> Result<Vec<LifecycleEventRecord>> {
-    let mut client =
-        master_client(&format!("127.0.0.1:{master_port}"), &GrpcConfig::new()).await?;
+    let mut client = master_client(&format!("127.0.0.1:{master_port}"), &GrpcConfig::new()).await?;
     client
         .get_lifecycle_events(tonic::Request::new(GetLifecycleEventsRequest {
             after_sequence: sequence,
@@ -488,8 +483,8 @@ async fn fetch_lifecycle_events(
         .events
         .into_iter()
         .map(|record| {
-            let event: LifecycleEvent = bincode::deserialize(&record.event_bytes)
-                .with_context(|| {
+            let event: LifecycleEvent =
+                bincode::deserialize(&record.event_bytes).with_context(|| {
                     format!(
                         "failed to decode lifecycle event sequence={} bytes={}",
                         record.sequence,
@@ -507,8 +502,7 @@ async fn fetch_lifecycle_events(
 async fn master_latest_pipeline_snapshot(
     master_port: u16,
 ) -> Result<Option<crate::runtime::observability::PipelineSnapshot>> {
-    let mut client =
-        master_client(&format!("127.0.0.1:{master_port}"), &GrpcConfig::new()).await?;
+    let mut client = master_client(&format!("127.0.0.1:{master_port}"), &GrpcConfig::new()).await?;
     let response = client
         .get_latest_pipeline_snapshot(tonic::Request::new(
             crate::runtime::master::server::master_service::GetLatestPipelineSnapshotRequest {},
@@ -522,8 +516,7 @@ async fn master_latest_pipeline_snapshot(
 }
 
 async fn master_stop_sources(master_port: u16) -> Result<()> {
-    let mut client =
-        master_client(&format!("127.0.0.1:{master_port}"), &GrpcConfig::new()).await?;
+    let mut client = master_client(&format!("127.0.0.1:{master_port}"), &GrpcConfig::new()).await?;
     let response = client
         .stop_sources(tonic::Request::new(
             crate::runtime::master::server::master_service::StopSourcesRequest {},

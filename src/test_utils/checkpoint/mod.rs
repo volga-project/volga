@@ -21,5 +21,5 @@ pub use mid_flight::{
 };
 pub use support::{
     wait_for_checkpoint_completed, wait_for_checkpoint_completed_id, wait_for_checkpoint_started,
-    wait_until_checkpoints_idle,
+    wait_until_attempt0_running, wait_until_attempt_running, wait_until_checkpoints_idle,
 };

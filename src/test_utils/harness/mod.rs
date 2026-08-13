@@ -29,6 +29,31 @@ pub enum RuntimeEnv {
     Kube,
 }
 
+impl RuntimeEnv {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Docker => "docker",
+            Self::Kube => "kube",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "local" => Some(Self::Local),
+            "docker" => Some(Self::Docker),
+            "kube" | "kubernetes" => Some(Self::Kube),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for RuntimeEnv {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// How a worker kill is simulated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WorkerKillMode {
@@ -52,7 +77,9 @@ pub enum FaultAction {
         worker_id: String,
         mode: WorkerKillMode,
     },
-    RestartWorker { worker_id: String },
+    RestartWorker {
+        worker_id: String,
+    },
     KillMaster,
     RestartMaster,
 }

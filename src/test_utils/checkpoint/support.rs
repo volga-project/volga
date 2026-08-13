@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use crate::runtime::master::LifecycleEvent;
 use crate::test_utils::harness::{LifecycleOracle, MasterHandle, RuntimeEnv, VolgaCluster};
 
-pub(super) async fn wait_until_attempt0_running(
+pub async fn wait_until_attempt0_running(
     master: &MasterHandle,
     cursor: &mut u64,
     timeout: Duration,
@@ -17,18 +17,13 @@ pub(super) async fn wait_until_attempt0_running(
         cursor,
         timeout,
         "AttemptRunning attempt=0",
-        |event| {
-            matches!(
-                event,
-                LifecycleEvent::AttemptRunning { attempt_id: 0, .. }
-            )
-        },
+        |event| matches!(event, LifecycleEvent::AttemptRunning { attempt_id: 0, .. }),
     )
     .await?;
     Ok(())
 }
 
-pub(super) async fn wait_until_attempt_running(
+pub async fn wait_until_attempt_running(
     master: &MasterHandle,
     cursor: &mut u64,
     timeout: Duration,
@@ -59,10 +54,7 @@ pub(super) async fn wait_until_attempt_running(
 /// The timeout budget resets whenever the in-flight set changes so a chain of
 /// interval checkpoints (2 → 3 → 4) each get a full settle window rather than
 /// sharing one deadline from the first open CP.
-pub async fn wait_until_checkpoints_idle(
-    master: &MasterHandle,
-    timeout: Duration,
-) -> Result<()> {
+pub async fn wait_until_checkpoints_idle(master: &MasterHandle, timeout: Duration) -> Result<()> {
     let mut started = Instant::now();
     let mut last_open = HashSet::new();
     loop {
@@ -87,7 +79,9 @@ pub async fn wait_until_checkpoints_idle(
             last_open = open.clone();
         }
         if started.elapsed() >= timeout {
-            return Err(anyhow!("timed out waiting for in-flight checkpoint(s) {open:?} to settle"));
+            return Err(anyhow!(
+                "timed out waiting for in-flight checkpoint(s) {open:?} to settle"
+            ));
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
