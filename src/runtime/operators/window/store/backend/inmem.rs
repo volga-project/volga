@@ -462,14 +462,13 @@ impl OperatorStore for InMemWindowStore {
         self.metrics_labels.as_ref()
     }
 
-    async fn maintain(&self, state: &dyn OperatorTaskState) -> Result<()> {
+    async fn maintain(&self, ns: &StateNamespace, state: &dyn OperatorTaskState) -> Result<()> {
         let Some(wo) = state.as_any().downcast_ref::<WindowOperatorState>() else {
             return Ok(());
         };
         let Some((watermark, floor)) = wo.retention_cutoff() else {
             return Ok(());
         };
-        let ns = state.state_namespace();
         let task_id = state.task_id();
         let mut store = self.state.write().await;
         let pruned_rows = Self::prune_namespace(&mut store, ns.bytes.as_slice(), watermark, floor);
@@ -930,7 +929,7 @@ mod tests {
         task_state
             .watermark_frontier
             .store(5_000, std::sync::atomic::Ordering::Release);
-        store.maintain(&task_state).await.unwrap();
+        store.maintain(&namespace, &task_state).await.unwrap();
 
         let mut due = store.stream_due(&namespace, None, Cursor::new(10_000, u64::MAX));
         let work = due.try_next().await.unwrap().unwrap();

@@ -128,7 +128,9 @@ impl StateRegistry {
         let kind_futs = work.into_iter().map(|(kind, store)| {
             let states = self.task_states(kind);
             async move {
-                let futs = states.iter().map(|state| store.maintain(state.as_ref()));
+                let futs = states
+                    .iter()
+                    .map(|state| store.maintain(state.state_namespace(), state.as_ref()));
                 futures::future::try_join_all(futs).await
             }
         });

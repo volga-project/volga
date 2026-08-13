@@ -140,8 +140,8 @@ impl OperatorStore for RecordingWindowStore {
         self.inner.metrics_labels()
     }
 
-    async fn maintain(&self, state: &dyn OperatorTaskState) -> Result<()> {
-        self.inner.maintain(state).await
+    async fn maintain(&self, ns: &StateNamespace, state: &dyn OperatorTaskState) -> Result<()> {
+        self.inner.maintain(ns, state).await
     }
 }
 

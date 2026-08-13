@@ -6,6 +6,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::runtime::metrics::MetricsLabels;
+use crate::runtime::operators::window::model::StateNamespace;
 
 use super::task_state::OperatorTaskState;
 
@@ -23,6 +24,6 @@ pub trait OperatorStore: Any + Send + Sync + std::fmt::Debug {
 
     /// Run maintenance for a single task / namespace.
     ///
-    /// Namespace and task id come from `state`; labels from [`Self::metrics_labels`].
-    async fn maintain(&self, state: &dyn OperatorTaskState) -> Result<()>;
+    /// Labels come from [`Self::metrics_labels`].
+    async fn maintain(&self, ns: &StateNamespace, state: &dyn OperatorTaskState) -> Result<()>;
 }
