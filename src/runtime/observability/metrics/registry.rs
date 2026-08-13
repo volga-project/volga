@@ -4,7 +4,7 @@ use metrics::atomics::AtomicU64;
 use metrics::{
     Counter, Gauge, Histogram, HistogramFn, Key, KeyName, Metadata, Recorder, SharedString, Unit,
 };
-use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
+use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
 use metrics_exporter_tcp::TcpBuilder;
 use metrics_util::layers::FanoutBuilder;
 use metrics_util::registry::{Registry, Storage};
@@ -12,8 +12,10 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::{Once, OnceLock};
 
-use super::names::LATENCY_BUCKET_BOUNDARIES;
-use super::names::LATENCY_HISTOGRAM_LEN;
+use super::names::{
+    LATENCY_BUCKET_BOUNDARIES, LATENCY_HISTOGRAM_LEN, METRIC_STREAM_TASK_CHECKPOINT_PAYLOAD_BYTES,
+    PAYLOAD_BUCKET_BOUNDARIES,
+};
 
 static PROMETHEUS_HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
 pub(super) static METRICS_REGISTRY: OnceLock<Arc<Registry<Key, MetricsRegistryStorage>>> = OnceLock::new();
@@ -99,7 +101,12 @@ impl Recorder for SnapshotRecorder {
 fn init_metrics_inner() -> Result<(), Box<dyn std::error::Error>> {
     assert!(!LATENCY_BUCKET_BOUNDARIES.contains(&f64::MAX), "LATENCY_BUCKET_BOUNDARIES should not contain f64::MAX");
 
-    let prometheus_builder = PrometheusBuilder::new().set_buckets(&LATENCY_BUCKET_BOUNDARIES)?;
+    let prometheus_builder = PrometheusBuilder::new()
+        .set_buckets(&LATENCY_BUCKET_BOUNDARIES)?
+        .set_buckets_for_metric(
+            Matcher::Full(METRIC_STREAM_TASK_CHECKPOINT_PAYLOAD_BYTES.to_string()),
+            &PAYLOAD_BUCKET_BOUNDARIES,
+        )?;
     let prometheus_recorder = prometheus_builder.build_recorder();
     let prometheus_handle = prometheus_recorder.handle();
 

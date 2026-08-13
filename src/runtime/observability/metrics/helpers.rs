@@ -4,10 +4,10 @@ use metrics::{counter, gauge, histogram};
 
 use super::names::{MetricsLabels, LABEL_PIPELINE_ID, LABEL_TASK_ID, LABEL_WORKER_ID};
 
-/// Record a per-task histogram sample (ms), with optional pipeline/worker labels.
+/// Record a per-task histogram sample, with optional pipeline/worker labels.
 pub fn record_task_histogram(
     name: &'static str,
-    value_ms: f64,
+    value: f64,
     task_id: &str,
     labels: Option<&MetricsLabels>,
 ) {
@@ -19,9 +19,9 @@ pub fn record_task_histogram(
             LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
             LABEL_WORKER_ID => labels.worker_id.clone(),
         )
-        .record(value_ms);
+        .record(value);
     } else {
-        histogram!(name, LABEL_TASK_ID => task).record(value_ms);
+        histogram!(name, LABEL_TASK_ID => task).record(value);
     }
 }
 

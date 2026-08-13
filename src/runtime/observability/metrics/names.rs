@@ -33,10 +33,11 @@ pub const METRIC_STREAM_TASK_CHECKPOINT_ALIGN_WAIT_MS: &str =
 /// Local snapshot + report RPC wall time.
 pub const METRIC_STREAM_TASK_CHECKPOINT_DURATION_MS: &str =
     "volga_stream_task_checkpoint_duration_ms";
+/// Per-checkpoint snapshot payload size (bytes).
 pub const METRIC_STREAM_TASK_CHECKPOINT_PAYLOAD_BYTES: &str =
     "volga_stream_task_checkpoint_payload_bytes";
 pub const METRIC_STREAM_TASK_CHECKPOINT_SUCCESS: &str = "volga_stream_task_checkpoint_success";
-pub const METRIC_STREAM_TASK_CHECKPOINT_FAIL: &str = "volga_stream_task_checkpoint_fail";
+pub const METRIC_STREAM_TASK_CHECKPOINT_FAILED: &str = "volga_stream_task_checkpoint_failed";
 /// Flink-style task time budget (≈ ms in the last second; sum ≈ 1000).
 pub const METRIC_STREAM_TASK_BUSY_TIME_MS_PER_SECOND: &str =
     "volga_stream_task_busy_time_ms_per_second";
@@ -85,4 +86,19 @@ pub struct MetricsLabels {
 pub const LATENCY_BUCKET_BOUNDARIES: [f64; 12] = [1.0, 2.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0];
 /// Finite Prom buckets plus the trailing `+Inf` cumulative count.
 pub const LATENCY_HISTOGRAM_LEN: usize = LATENCY_BUCKET_BOUNDARIES.len() + 1;
+/// Prom buckets for checkpoint payload size (bytes). 256 B … 1 GiB.
+pub const PAYLOAD_BUCKET_BOUNDARIES: [f64; 12] = [
+    256.0,
+    1024.0,
+    4096.0,
+    16_384.0,
+    65_536.0,
+    262_144.0,
+    1_048_576.0,
+    4_194_304.0,
+    16_777_216.0,
+    67_108_864.0,
+    268_435_456.0,
+    1_073_741_824.0,
+];
 

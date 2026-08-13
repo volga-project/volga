@@ -11,7 +11,7 @@ use crate::{
             METRIC_STREAM_TASK_BYTES_RECV, METRIC_STREAM_TASK_BYTES_SENT,
             METRIC_STREAM_TASK_CHECKPOINT_ALIGN_WAIT_MS,
             METRIC_STREAM_TASK_CHECKPOINT_BARRIER_PROPAGATION_MS,
-            METRIC_STREAM_TASK_CHECKPOINT_DURATION_MS, METRIC_STREAM_TASK_CHECKPOINT_FAIL,
+            METRIC_STREAM_TASK_CHECKPOINT_DURATION_MS, METRIC_STREAM_TASK_CHECKPOINT_FAILED,
             METRIC_STREAM_TASK_CHECKPOINT_PAYLOAD_BYTES, METRIC_STREAM_TASK_CHECKPOINT_SUCCESS,
             METRIC_STREAM_TASK_MESSAGES_RECV, METRIC_STREAM_TASK_MESSAGES_SENT,
             METRIC_STREAM_TASK_PATH_LATENCY, METRIC_STREAM_TASK_RECORDS_RECV,
@@ -847,10 +847,10 @@ impl StreamTask {
                                             &vertex_id,
                                             metrics_labels.as_ref(),
                                         );
-                                        increment_task_counter(
+                                        Self::record_histogram(
                                             METRIC_STREAM_TASK_CHECKPOINT_PAYLOAD_BYTES,
-                                            payload_len,
-                                            vertex_id.as_ref(),
+                                            payload_len as f64,
+                                            &vertex_id,
                                             metrics_labels.as_ref(),
                                         );
                                         increment_task_counter(
@@ -866,7 +866,7 @@ impl StreamTask {
                                     }
                                     Err(error) => {
                                         increment_task_counter(
-                                            METRIC_STREAM_TASK_CHECKPOINT_FAIL,
+                                            METRIC_STREAM_TASK_CHECKPOINT_FAILED,
                                             1,
                                             vertex_id.as_ref(),
                                             metrics_labels.as_ref(),
