@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::Result;
 use dashmap::DashMap;
 
+use crate::runtime::metrics::MetricsLabels;
 use crate::runtime::operators::OperatorKind;
 use crate::runtime::VertexId;
 
@@ -22,6 +23,8 @@ pub struct StateRegistry {
     stores: Mutex<HashMap<OperatorKind, Arc<dyn OperatorStore>>>,
     task_states: DashMap<VertexId, Arc<dyn OperatorTaskState>>,
     maintenance_enabled: AtomicBool,
+    /// Worker-scoped Prom/registry labels; copied onto stores at create.
+    metrics_labels: Option<MetricsLabels>,
 }
 
 impl std::fmt::Debug for StateRegistry {
@@ -37,18 +40,23 @@ impl std::fmt::Debug for StateRegistry {
 
 impl Default for StateRegistry {
     fn default() -> Self {
-        Self::new(None, Arc::new(StateResourceTracker::new()))
+        Self::new(None, Arc::new(StateResourceTracker::new()), None)
     }
 }
 
 impl StateRegistry {
-    pub fn new(session: Option<StateSessionHandle>, tracker: Arc<StateResourceTracker>) -> Self {
+    pub fn new(
+        session: Option<StateSessionHandle>,
+        tracker: Arc<StateResourceTracker>,
+        metrics_labels: Option<MetricsLabels>,
+    ) -> Self {
         Self {
             session,
             tracker,
             stores: Mutex::new(HashMap::new()),
             task_states: DashMap::new(),
             maintenance_enabled: AtomicBool::new(true),
+            metrics_labels,
         }
     }
 
@@ -58,6 +66,10 @@ impl StateRegistry {
 
     pub fn tracker(&self) -> &Arc<StateResourceTracker> {
         &self.tracker
+    }
+
+    pub fn metrics_labels(&self) -> Option<&MetricsLabels> {
+        self.metrics_labels.as_ref()
     }
 
     pub fn set_maintenance_enabled(&self, enabled: bool) {
@@ -116,9 +128,9 @@ impl StateRegistry {
         let kind_futs = work.into_iter().map(|(kind, store)| {
             let states = self.task_states(kind);
             async move {
-                let futs = states.iter().map(|state| {
-                    store.maintain(state.state_namespace(), state.as_ref())
-                });
+                let futs = states
+                    .iter()
+                    .map(|state| store.maintain(state.state_namespace(), state.as_ref()));
                 futures::future::try_join_all(futs).await
             }
         });

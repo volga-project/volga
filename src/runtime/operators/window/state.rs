@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::common::Key;
 use crate::runtime::operators::window::config::WindowConfig;
+use crate::runtime::operators::window::metrics::collect_window_operator_snapshot;
 use crate::runtime::operators::window::model::{WindowId, WindowTrigger, WindowTriggerKind};
 use crate::runtime::operators::window::store::data::cursors_from_batch;
 use crate::runtime::operators::window::store::{
@@ -19,6 +20,7 @@ use crate::runtime::operators::window::SEQ_NO_COLUMN_NAME;
 use crate::runtime::observability::snapshot_types::TaskOperatorMetrics;
 use crate::runtime::operators::OperatorKind;
 use crate::runtime::state::OperatorTaskState;
+use crate::runtime::VertexId;
 use async_trait::async_trait;
 
 /// Sentinel in [`WindowOperatorState::watermark_frontier`]: no frontier yet.
@@ -29,6 +31,7 @@ pub const WATERMARK_UNSET: i64 = i64::MIN;
 pub struct WindowOperatorState {
     store: Arc<dyn WindowOperatorStore>,
     namespace: StateNamespace,
+    task_id: VertexId,
     ts_column_index: usize,
     window_configs: Arc<BTreeMap<WindowId, WindowConfig>>,
     lateness_ms: i64,
@@ -48,6 +51,7 @@ impl WindowOperatorState {
     pub fn new(
         store: Arc<dyn WindowOperatorStore>,
         namespace: StateNamespace,
+        task_id: VertexId,
         ts_column_index: usize,
         window_configs: Arc<BTreeMap<WindowId, WindowConfig>>,
         lateness_ms: i64,
@@ -56,6 +60,7 @@ impl WindowOperatorState {
         Self {
             store,
             namespace,
+            task_id,
             ts_column_index,
             window_configs,
             lateness_ms,
@@ -223,15 +228,15 @@ impl OperatorTaskState for WindowOperatorState {
         self
     }
 
+    fn task_id(&self) -> &str {
+        self.task_id.as_ref()
+    }
+
     async fn task_operator_metrics(&self) -> Option<TaskOperatorMetrics> {
-        let store = self
-            .store
-            .as_any()
-            .downcast_ref::<InMemWindowStore>()
-            .expect("window task_operator_metrics requires InMemWindowStore");
-        Some(TaskOperatorMetrics::Window(
-            store.sample_namespace_metrics(&self.namespace).await,
-        ))
+        Some(TaskOperatorMetrics::Window(collect_window_operator_snapshot(
+            self.task_id(),
+            self.store.metrics_labels(),
+        )))
     }
 }
 

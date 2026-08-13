@@ -29,7 +29,7 @@ use crate::runtime::operators::window::store::{
 use crate::runtime::operators::window::TileConfig;
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::observability::TaskMetadata;
-use crate::runtime::state::OperatorStore;
+use crate::runtime::state::{OperatorStore, OperatorTaskState};
 
 pub fn test_input_schema() -> SchemaRef {
     Arc::new(Schema::new(vec![
@@ -134,7 +134,7 @@ impl Harness {
     pub async fn run_maintenance(&self) {
         let state = self.op.task_state();
         self.store
-            .maintain(state.namespace(), state.as_ref())
+            .maintain(state.state_namespace(), state.as_ref())
             .await
             .expect("maintain");
     }
@@ -271,7 +271,7 @@ impl WoWroHarness {
         let state = self.wo.task_state();
         state
             .store()
-            .maintain(state.namespace(), state.as_ref())
+            .maintain(state.state_namespace(), state.as_ref())
             .await
             .expect("maintain");
     }

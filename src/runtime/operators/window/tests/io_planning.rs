@@ -136,11 +136,11 @@ impl OperatorStore for RecordingWindowStore {
         self
     }
 
-    async fn maintain(
-        &self,
-        ns: &StateNamespace,
-        state: &dyn OperatorTaskState,
-    ) -> Result<()> {
+    fn metrics_labels(&self) -> Option<&crate::runtime::metrics::MetricsLabels> {
+        self.inner.metrics_labels()
+    }
+
+    async fn maintain(&self, ns: &StateNamespace, state: &dyn OperatorTaskState) -> Result<()> {
         self.inner.maintain(ns, state).await
     }
 }

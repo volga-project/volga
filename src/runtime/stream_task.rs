@@ -6,11 +6,19 @@ use crate::{
         execution_graph::ExecutionGraph,
         health::{WorkerFatalReason, WorkerHealth},
         metrics::{
-            init_metrics, MetricsLabels, LABEL_PIPELINE_ID, LABEL_VERTEX_ID, LABEL_WORKER_ID,
-            METRIC_STREAM_TASK_BYTES_RECV, METRIC_STREAM_TASK_BYTES_SENT,
+            increment_task_counter, init_metrics, record_task_histogram, set_task_gauge,
+            MetricsLabels, LABEL_PIPELINE_ID, LABEL_TASK_ID, LABEL_WORKER_ID,
+            METRIC_STREAM_TASK_BACKPRESSURED_TIME_MS_PER_SECOND,
+            METRIC_STREAM_TASK_BUSY_TIME_MS_PER_SECOND, METRIC_STREAM_TASK_BYTES_RECV,
+            METRIC_STREAM_TASK_BYTES_SENT, METRIC_STREAM_TASK_CHECKPOINT_ALIGN_WAIT_MS,
+            METRIC_STREAM_TASK_CHECKPOINT_BARRIER_PROPAGATION_MS,
+            METRIC_STREAM_TASK_CHECKPOINT_DURATION_MS, METRIC_STREAM_TASK_CHECKPOINT_FAILED,
+            METRIC_STREAM_TASK_CHECKPOINT_PAYLOAD_BYTES, METRIC_STREAM_TASK_CHECKPOINT_SUCCESS,
+            METRIC_STREAM_TASK_IDLE_TIME_MS_PER_SECOND,
             METRIC_STREAM_TASK_MESSAGES_RECV, METRIC_STREAM_TASK_MESSAGES_SENT,
             METRIC_STREAM_TASK_PATH_LATENCY, METRIC_STREAM_TASK_RECORDS_RECV,
-            METRIC_STREAM_TASK_RECORDS_SENT,
+            METRIC_STREAM_TASK_RECORDS_SENT, METRIC_STREAM_TASK_WATERMARK_LAG_MS,
+            METRIC_STREAM_TASK_WM_PROPAGATION_MS,
         },
         observability::{TaskMetadata, TaskSnapshot, StreamTaskStatus},
         operators::operator::{
@@ -24,13 +32,52 @@ use crate::{
 use anyhow::Result;
 use futures::{FutureExt, StreamExt};
 use async_stream::stream;
-use metrics::{counter, histogram};
+use metrics::counter;
 use tokio::{task::JoinHandle, sync::Mutex, sync::watch, sync::mpsc};
 use crate::transport::transport_client::DataReaderControl;
 use std::collections::HashSet;
 use crate::transport::transport_client::TransportClient;
 use crate::common::message::{Message, WatermarkMessage};
-use std::{collections::HashMap, sync::{atomic::{AtomicU8, AtomicU64, Ordering}, Arc}, time::{Duration, SystemTime, UNIX_EPOCH}};
+use std::{collections::HashMap, sync::{atomic::{AtomicU8, AtomicU64, Ordering}, Arc}, time::{Duration, Instant, SystemTime, UNIX_EPOCH}};
+
+/// Accumulates Flink-style task time metrics within a report window.
+///
+/// Idle = `poll_next` wait (source produce or input); backpressured = exclusive
+/// tx-queue wait via [`BackpressureTracker`] (same write path as BP ratio
+/// gauges); busy = residual wall time so the three ms/s gauges sum to ~1000.
+#[derive(Debug, Default)]
+pub(crate) struct TaskTimeMetrics {
+    idle_ns: AtomicU64,
+    backpressure_tracker: Arc<crate::transport::batch_channel::BackpressureTracker>,
+}
+
+impl TaskTimeMetrics {
+    fn add_idle_ns(&self, ns: u64) {
+        self.idle_ns.fetch_add(ns, Ordering::Relaxed);
+    }
+
+    fn backpressure_tracker(&self) -> Arc<crate::transport::batch_channel::BackpressureTracker> {
+        self.backpressure_tracker.clone()
+    }
+
+    /// Scale to ms-per-second and reset. Returns `(busy, idle, backpressured)`.
+    fn take_ms_per_second(&self, window: Duration) -> (f64, f64, f64) {
+        let idle = self.idle_ns.swap(0, Ordering::Relaxed);
+        let bp = self.backpressure_tracker.take_ns();
+        let window_ms = window.as_secs_f64() * 1000.0;
+        if window_ms <= 0.0 {
+            return (0.0, 0.0, 0.0);
+        }
+        let idle_ms = (idle as f64 / 1_000_000.0).min(window_ms);
+        let mut bp_ms = bp as f64 / 1_000_000.0;
+        if idle_ms + bp_ms > window_ms {
+            bp_ms = (window_ms - idle_ms).max(0.0);
+        }
+        let busy_ms = (window_ms - idle_ms - bp_ms).max(0.0);
+        let scale = 1000.0 / window_ms;
+        (busy_ms * scale, idle_ms * scale, bp_ms * scale)
+    }
+}
 // serde imports removed; this module does not define serializable DTOs directly.
 use crate::common::grpc::master::master_client as connect_master_client;
 use crate::common::grpc::GrpcConfig;
@@ -49,6 +96,9 @@ pub(crate) struct CheckpointAligner {
     upstream_count: usize,
     current_checkpoint: Option<u64>,
     seen_upstreams: HashSet<String>,
+    /// Earliest create stamp among barriers for the current checkpoint (for propagation).
+    inject_stamp: Option<u64>,
+    align_started: Option<Instant>,
     reader_control: DataReaderControl,
 }
 
@@ -58,15 +108,18 @@ impl CheckpointAligner {
             upstream_count: upstream_vertices.len(),
             current_checkpoint: None,
             seen_upstreams: HashSet::new(),
+            inject_stamp: None,
+            align_started: None,
             reader_control,
         }
     }
 
+    /// Returns `Some((checkpoint_id, inject_stamp, align_wait_ms))` when fully aligned.
     fn on_barrier(
         &mut self,
         barrier: &crate::common::message::CheckpointBarrierMessage,
         expected_attempt_id: u64,
-    ) -> Result<Option<u64>, String> {
+    ) -> Result<Option<(u64, Option<u64>, f64)>, String> {
         if barrier.execution_attempt_id != expected_attempt_id {
             // Orphan from a previous attempt — drop without failing the new attempt.
             println!(
@@ -86,6 +139,14 @@ impl CheckpointAligner {
         let checkpoint_id = barrier.checkpoint_id;
         if self.current_checkpoint.is_none() {
             self.current_checkpoint = Some(checkpoint_id);
+            self.inject_stamp = barrier.metadata.ingest_timestamp;
+            self.align_started = Some(Instant::now());
+        } else if let (Some(existing), Some(stamp)) =
+            (self.inject_stamp, barrier.metadata.ingest_timestamp)
+        {
+            self.inject_stamp = Some(existing.min(stamp));
+        } else if self.inject_stamp.is_none() {
+            self.inject_stamp = barrier.metadata.ingest_timestamp;
         }
         if self.current_checkpoint != Some(checkpoint_id) {
             return Err(format!(
@@ -98,9 +159,15 @@ impl CheckpointAligner {
         self.seen_upstreams.insert(upstream_vertex_id);
 
         if self.seen_upstreams.len() == self.upstream_count {
+            let stamp = self.inject_stamp.take();
+            let align_wait_ms = self
+                .align_started
+                .take()
+                .map(|t| t.elapsed().as_secs_f64() * 1000.0)
+                .unwrap_or(0.0);
             self.current_checkpoint = None;
             self.seen_upstreams.clear();
-            return Ok(Some(checkpoint_id));
+            return Ok(Some((checkpoint_id, stamp, align_wait_ms)));
         }
         Ok(None)
     }
@@ -162,25 +229,7 @@ impl StreamTask {
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
 
-        let metrics_labels = {
-            let cfg = runtime_context.job_config();
-            let pipeline_id = cfg
-                .get("pipeline_id")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-            let worker_id = cfg
-                .get("worker_id")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-
-            match (pipeline_id, worker_id) {
-                (Some(pipeline_id), Some(worker_id)) => Some(MetricsLabels {
-                    pipeline_id,
-                    worker_id,
-                }),
-                _ => None,
-            }
-        };
+        let metrics_labels = runtime_context.metrics_labels();
         Self {
             vertex_id: vertex_id.clone(),
             runtime_context,
@@ -248,17 +297,54 @@ impl StreamTask {
         vertex_id: &VertexId,
         labels: Option<&MetricsLabels>,
     ) {
-        if let Some(labels) = labels {
-            histogram!(
-                name,
-                LABEL_VERTEX_ID => vertex_id.clone(),
-                LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
-                LABEL_WORKER_ID => labels.worker_id.clone()
-            )
-            .record(value_ms);
-        } else {
-            histogram!(name, LABEL_VERTEX_ID => vertex_id.clone()).record(value_ms);
+        record_task_histogram(name, value_ms, vertex_id.as_ref(), labels);
+    }
+
+    fn record_control_propagation(
+        vertex_id: &VertexId,
+        message: &Message,
+        labels: Option<&MetricsLabels>,
+    ) {
+        let Some(stamp) = message.ingest_timestamp() else {
+            return;
+        };
+        let delay_ms = Self::now_ms().saturating_sub(stamp) as f64;
+        match message {
+            Message::Watermark(_) => {
+                Self::record_histogram(
+                    METRIC_STREAM_TASK_WM_PROPAGATION_MS,
+                    delay_ms,
+                    vertex_id,
+                    labels,
+                );
+            }
+            Message::CheckpointBarrier(_) => {
+                Self::record_histogram(
+                    METRIC_STREAM_TASK_CHECKPOINT_BARRIER_PROPAGATION_MS,
+                    delay_ms,
+                    vertex_id,
+                    labels,
+                );
+            }
+            _ => {}
         }
+    }
+
+    fn set_watermark_lag_gauge(
+        vertex_id: &VertexId,
+        watermark_value: u64,
+        labels: Option<&MetricsLabels>,
+    ) {
+        if watermark_value == 0 || watermark_value == MAX_WATERMARK_VALUE {
+            return;
+        }
+        let lag_ms = Self::now_ms().saturating_sub(watermark_value) as f64;
+        set_task_gauge(
+            METRIC_STREAM_TASK_WATERMARK_LAG_MS,
+            lag_ms,
+            vertex_id.as_ref(),
+            labels,
+        );
     }
 
     fn record_metrics(
@@ -278,31 +364,31 @@ impl StreamTask {
             if let Some(labels) = labels {
                 counter!(
                     METRIC_STREAM_TASK_MESSAGES_RECV,
-                    LABEL_VERTEX_ID => vertex_id.clone(),
+                    LABEL_TASK_ID => vertex_id.clone(),
                     LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
                     LABEL_WORKER_ID => labels.worker_id.clone()
                 )
                 .increment(1);
                 counter!(
                     METRIC_STREAM_TASK_RECORDS_RECV,
-                    LABEL_VERTEX_ID => vertex_id.clone(),
+                    LABEL_TASK_ID => vertex_id.clone(),
                     LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
                     LABEL_WORKER_ID => labels.worker_id.clone()
                 )
                 .increment(message.num_records() as u64);
                 counter!(
                     METRIC_STREAM_TASK_BYTES_RECV,
-                    LABEL_VERTEX_ID => vertex_id.clone(),
+                    LABEL_TASK_ID => vertex_id.clone(),
                     LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
                     LABEL_WORKER_ID => labels.worker_id.clone()
                 )
                 .increment(message.get_memory_size() as u64);
             } else {
-                counter!(METRIC_STREAM_TASK_MESSAGES_RECV, LABEL_VERTEX_ID => vertex_id.clone())
+                counter!(METRIC_STREAM_TASK_MESSAGES_RECV, LABEL_TASK_ID => vertex_id.clone())
                     .increment(1);
-                counter!(METRIC_STREAM_TASK_RECORDS_RECV, LABEL_VERTEX_ID => vertex_id.clone())
+                counter!(METRIC_STREAM_TASK_RECORDS_RECV, LABEL_TASK_ID => vertex_id.clone())
                     .increment(message.num_records() as u64);
-                counter!(METRIC_STREAM_TASK_BYTES_RECV, LABEL_VERTEX_ID => vertex_id.clone())
+                counter!(METRIC_STREAM_TASK_BYTES_RECV, LABEL_TASK_ID => vertex_id.clone())
                     .increment(message.get_memory_size() as u64);
             }
 
@@ -320,31 +406,31 @@ impl StreamTask {
             if let Some(labels) = labels {
                 counter!(
                     METRIC_STREAM_TASK_MESSAGES_SENT,
-                    LABEL_VERTEX_ID => vertex_id.clone(),
+                    LABEL_TASK_ID => vertex_id.clone(),
                     LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
                     LABEL_WORKER_ID => labels.worker_id.clone()
                 )
                 .increment(1);
                 counter!(
                     METRIC_STREAM_TASK_RECORDS_SENT,
-                    LABEL_VERTEX_ID => vertex_id.clone(),
+                    LABEL_TASK_ID => vertex_id.clone(),
                     LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
                     LABEL_WORKER_ID => labels.worker_id.clone()
                 )
                 .increment(message.num_records() as u64);
                 counter!(
                     METRIC_STREAM_TASK_BYTES_SENT,
-                    LABEL_VERTEX_ID => vertex_id.clone(),
+                    LABEL_TASK_ID => vertex_id.clone(),
                     LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
                     LABEL_WORKER_ID => labels.worker_id.clone()
                 )
                 .increment(message.get_memory_size() as u64);
             } else {
-                counter!(METRIC_STREAM_TASK_MESSAGES_SENT, LABEL_VERTEX_ID => vertex_id.clone())
+                counter!(METRIC_STREAM_TASK_MESSAGES_SENT, LABEL_TASK_ID => vertex_id.clone())
                     .increment(1);
-                counter!(METRIC_STREAM_TASK_RECORDS_SENT, LABEL_VERTEX_ID => vertex_id.clone())
+                counter!(METRIC_STREAM_TASK_RECORDS_SENT, LABEL_TASK_ID => vertex_id.clone())
                     .increment(message.num_records() as u64);
-                counter!(METRIC_STREAM_TASK_BYTES_SENT, LABEL_VERTEX_ID => vertex_id.clone())
+                counter!(METRIC_STREAM_TASK_BYTES_SENT, LABEL_TASK_ID => vertex_id.clone())
                     .increment(message.get_memory_size() as u64);
             }
         }
@@ -374,6 +460,7 @@ impl StreamTask {
             );
             while let Some(message) = input_stream.next().await {
                 Self::record_metrics(vertex_id.clone(), &message, true, labels.as_ref());
+                Self::record_control_propagation(&vertex_id, &message, labels.as_ref());
 
                 match &message {
                     Message::Watermark(watermark) => {
@@ -382,22 +469,30 @@ impl StreamTask {
                         }
                         // Advance watermark and only forward to operator if advanced.
                         if let Some(new_watermark) = watermark_manager.merge_watermark(watermark.clone()).await {
+                            Self::set_watermark_lag_gauge(&vertex_id, new_watermark, labels.as_ref());
                             let mut wm = watermark.clone();
                             wm.watermark_value = new_watermark;
                             wm.metadata.upstream_vertex_id = Some(vertex_id.as_ref().to_string());
+                            // Keep create stamp for downstream propagation.
                             yield Message::Watermark(wm);
                         }
                     }
                     Message::CheckpointBarrier(barrier) => {
                         match aligner.on_barrier(barrier, execution_attempt_id) {
-                            Ok(Some(checkpoint_id)) => {
-                                // Once fully aligned, yield a single barrier downstream through the operator.
+                            Ok(Some((checkpoint_id, inject_stamp, align_wait_ms))) => {
+                                Self::record_histogram(
+                                    METRIC_STREAM_TASK_CHECKPOINT_ALIGN_WAIT_MS,
+                                    align_wait_ms,
+                                    &vertex_id,
+                                    labels.as_ref(),
+                                );
+                                // Once fully aligned, yield a single barrier; preserve inject stamp.
                                 yield Message::CheckpointBarrier(
                                     crate::common::message::CheckpointBarrierMessage::new(
                                         vertex_id.as_ref().to_string(),
                                         checkpoint_id,
                                         execution_attempt_id,
-                                        None,
+                                        inject_stamp,
                                     ),
                                 );
                             }
@@ -423,10 +518,15 @@ impl StreamTask {
                             // Treat injected watermark exactly like an upstream watermark: merge and
                             // emit a task-local watermark only if it advances.
                             if let Some(new_watermark) = watermark_manager.merge_watermark(wm.clone()).await {
+                                Self::set_watermark_lag_gauge(
+                                    &vertex_id,
+                                    new_watermark,
+                                    labels.as_ref(),
+                                );
                                 yield Message::Watermark(WatermarkMessage::new(
                                     vertex_id.as_ref().to_string(),
                                     new_watermark,
-                                    None,
+                                    Some(Self::now_ms()),
                                 ));
                             }
                         }
@@ -436,7 +536,7 @@ impl StreamTask {
         })
     }
 
-    // Helper function to send message to collectors (similar to original stream_task.rs)
+    // Helper function to send message to collectors (similar to original stream_task.rs).
     async fn send_to_collectors_if_needed(
         mut collectors_per_target_operator: &mut HashMap<String, Collector>,
         message: Message,
@@ -457,7 +557,7 @@ impl StreamTask {
 
         // TODO should retires be inside transport?
         let mut retries_before_close = 3; // per - messages
-    
+
         // send message to all destinations until no backpressure
         while status.load(Ordering::SeqCst) == StreamTaskStatus::Running as u8 ||
             status.load(Ordering::SeqCst) == StreamTaskStatus::Finished as u8 {
@@ -479,7 +579,7 @@ impl StreamTask {
             for (target_operator_id, write_res) in write_results {
                 let mut resend_channels = vec![];
                 for channel in write_res.keys() {
-                    let (success, _backpressure_time_ms) = write_res.get(channel).unwrap();
+                    let success = write_res.get(channel).unwrap();
                     if !success {
                         resend_channels.push(channel.clone());
                     }
@@ -492,6 +592,44 @@ impl StreamTask {
                 break;
             }
         }
+    }
+
+    fn report_task_time_metrics(
+        metrics: &TaskTimeMetrics,
+        window_start: &mut Instant,
+        vertex_id: &VertexId,
+        labels: Option<&MetricsLabels>,
+        current_watermark: &AtomicU64,
+    ) {
+        let elapsed = window_start.elapsed();
+        if elapsed < Duration::from_secs(1) {
+            return;
+        }
+        let (busy, idle, bp) = metrics.take_ms_per_second(elapsed);
+        set_task_gauge(
+            METRIC_STREAM_TASK_BUSY_TIME_MS_PER_SECOND,
+            busy,
+            vertex_id.as_ref(),
+            labels,
+        );
+        set_task_gauge(
+            METRIC_STREAM_TASK_IDLE_TIME_MS_PER_SECOND,
+            idle,
+            vertex_id.as_ref(),
+            labels,
+        );
+        set_task_gauge(
+            METRIC_STREAM_TASK_BACKPRESSURED_TIME_MS_PER_SECOND,
+            bp,
+            vertex_id.as_ref(),
+            labels,
+        );
+        Self::set_watermark_lag_gauge(
+            vertex_id,
+            current_watermark.load(Ordering::Relaxed),
+            labels,
+        );
+        *window_start = Instant::now();
     }
 
     pub async fn start(&mut self) {
@@ -538,6 +676,12 @@ impl StreamTask {
             
             let mut transport_client =
                 TransportClient::new(vertex_id.clone(), transport_client_config, run_loop_health);
+
+            // Install before collectors clone the writer so ratio + BP time share one tracker.
+            let task_time_metrics = Arc::new(TaskTimeMetrics::default());
+            if let Some(writer) = transport_client.writer.as_mut() {
+                writer.set_backpressure_tracker(task_time_metrics.backpressure_tracker());
+            }
             
             let mut collectors_per_target_operator: HashMap<String, Collector> = HashMap::new();
 
@@ -642,6 +786,8 @@ impl StreamTask {
                 None
             };
             
+            let mut metrics_window_start = Instant::now();
+
             if !is_source {
                 // Pre-process input stream for non-source operators
                 let reader = transport_client.reader.take()
@@ -682,7 +828,7 @@ impl StreamTask {
                                     vertex_id.as_ref().to_string(),
                                     checkpoint_id,
                                     execution_attempt_id,
-                                    None,
+                                    Some(Self::now_ms()),
                                 ),
                             ))
                         }
@@ -696,7 +842,10 @@ impl StreamTask {
                 let poll_res = if let Some(msg) = produced {
                     OperatorPollResult::Ready(msg)
                 } else {
-                    operator.poll_next().await
+                    let idle_start = Instant::now();
+                    let res = operator.poll_next().await;
+                    task_time_metrics.add_idle_ns(idle_start.elapsed().as_nanos() as u64);
+                    res
                 };
 
                 match poll_res {
@@ -730,34 +879,73 @@ impl StreamTask {
                                     "[CHECKPOINT] {} checkpointing checkpoint_id={}",
                                     vertex_id, checkpoint_id
                                 );
-                                let checkpoint: SerializedCheckpoint =
-                                    operator.checkpoint(checkpoint_id).await?;
-                                let checkpoint_data = checkpoint.into_bytes();
+                                let started = Instant::now();
+                                let checkpoint_result = async {
+                                    let checkpoint: SerializedCheckpoint =
+                                        operator.checkpoint(checkpoint_id).await?;
+                                    let checkpoint_data = checkpoint.into_bytes();
+                                    let payload_len = checkpoint_data.len() as u64;
 
-                                let report_resp = master_client
-                                    .as_mut()
-                                    .expect("Master client not initialized")
-                                    .report_checkpoint(tonic::Request::new(
-                                        crate::runtime::master::server::master_service::ReportCheckpointRequest {
-                                            checkpoint_id,
-                                            vertex_id: vertex_id.as_ref().to_string(),
-                                            task_index: runtime_context.task_index(),
-                                            checkpoint_data,
-                                            execution_attempt_id,
-                                        },
-                                    ))
-                                    .await?
-                                    .into_inner();
-                                if !report_resp.success {
-                                    return Err(anyhow::anyhow!(
-                                        "report_checkpoint rejected: {}",
-                                        report_resp.error_message
-                                    ));
+                                    let report_resp = master_client
+                                        .as_mut()
+                                        .expect("Master client not initialized")
+                                        .report_checkpoint(tonic::Request::new(
+                                            crate::runtime::master::server::master_service::ReportCheckpointRequest {
+                                                checkpoint_id,
+                                                vertex_id: vertex_id.as_ref().to_string(),
+                                                task_index: runtime_context.task_index(),
+                                                checkpoint_data,
+                                                execution_attempt_id,
+                                            },
+                                        ))
+                                        .await?
+                                        .into_inner();
+                                    if !report_resp.success {
+                                        return Err(anyhow::anyhow!(
+                                            "report_checkpoint rejected: {}",
+                                            report_resp.error_message
+                                        ));
+                                    }
+                                    Ok::<u64, anyhow::Error>(payload_len)
                                 }
-                                println!(
-                                    "[CHECKPOINT] {} reported checkpoint_id={}",
-                                    vertex_id, checkpoint_id
-                                );
+                                .await;
+
+                                let duration_ms = started.elapsed().as_secs_f64() * 1000.0;
+                                match checkpoint_result {
+                                    Ok(payload_len) => {
+                                        Self::record_histogram(
+                                            METRIC_STREAM_TASK_CHECKPOINT_DURATION_MS,
+                                            duration_ms,
+                                            &vertex_id,
+                                            metrics_labels.as_ref(),
+                                        );
+                                        Self::record_histogram(
+                                            METRIC_STREAM_TASK_CHECKPOINT_PAYLOAD_BYTES,
+                                            payload_len as f64,
+                                            &vertex_id,
+                                            metrics_labels.as_ref(),
+                                        );
+                                        increment_task_counter(
+                                            METRIC_STREAM_TASK_CHECKPOINT_SUCCESS,
+                                            1,
+                                            vertex_id.as_ref(),
+                                            metrics_labels.as_ref(),
+                                        );
+                                        println!(
+                                            "[CHECKPOINT] {} reported checkpoint_id={}",
+                                            vertex_id, checkpoint_id
+                                        );
+                                    }
+                                    Err(error) => {
+                                        increment_task_counter(
+                                            METRIC_STREAM_TASK_CHECKPOINT_FAILED,
+                                            1,
+                                            vertex_id.as_ref(),
+                                            metrics_labels.as_ref(),
+                                        );
+                                        return Err(error);
+                                    }
+                                }
                             }
 
                             // Resume input after checkpointing
@@ -771,10 +959,11 @@ impl StreamTask {
                         //     println!("StreamTask {:?} produced message {:?}", vertex_id, message);
                         // }
                         if is_source {
-                            message.set_ingest_timestamp(SystemTime::now()
-                                .duration_since(UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_millis() as u64);
+                            // Stamp data (path latency) and control (propagation) at source egress
+                            // unless already stamped (e.g. barrier inject time).
+                            if message.ingest_timestamp().is_none() {
+                                message.set_ingest_timestamp(Self::now_ms());
+                            }
                         }
                         if let Message::Watermark(ref mut watermark) = message {
                             if is_source {
@@ -783,6 +972,11 @@ impl StreamTask {
                                         watermark.watermark_value = new_watermark;
                                     }
                                 }
+                                Self::set_watermark_lag_gauge(
+                                    &vertex_id,
+                                    watermark.watermark_value,
+                                    metrics_labels.as_ref(),
+                                );
                             }
                             // If operator outputs max watermark, finish task
                             if watermark.watermark_value == MAX_WATERMARK_VALUE {
@@ -799,7 +993,7 @@ impl StreamTask {
                         message.set_upstream_vertex_id(vertex_id.as_ref().to_string());
                         Self::record_metrics(vertex_id.clone(), &message, false, metrics_labels.as_ref());
 
-                        // Send to collectors
+                        // Send to collectors (queue waits record on BackpressureTracker)
                         Self::send_to_collectors_if_needed(
                             &mut collectors_per_target_operator,
                             message,
@@ -810,6 +1004,14 @@ impl StreamTask {
                         if let Some(wm) = injected_wm {
                             let mut injected = Message::Watermark(wm);
                             injected.set_upstream_vertex_id(vertex_id.as_ref().to_string());
+                            injected.set_ingest_timestamp(Self::now_ms());
+                            if let Message::Watermark(ref w) = injected {
+                                Self::set_watermark_lag_gauge(
+                                    &vertex_id,
+                                    w.watermark_value,
+                                    metrics_labels.as_ref(),
+                                );
+                            }
                             Self::record_metrics(
                                 vertex_id.clone(),
                                 &injected,
@@ -830,7 +1032,7 @@ impl StreamTask {
                             let wm = Message::Watermark(WatermarkMessage::new(
                                 vertex_id.as_ref().to_string(),
                                 MAX_WATERMARK_VALUE,
-                                None,
+                                Some(Self::now_ms()),
                             ));
                             Self::record_metrics(vertex_id.clone(), &wm, false, metrics_labels.as_ref());
                             Self::send_to_collectors_if_needed(
@@ -851,8 +1053,15 @@ impl StreamTask {
                         status.store(StreamTaskStatus::Finished as u8, Ordering::SeqCst);
                         break;
                     }
-                    OperatorPollResult::Continue => { /* no output */ }
+                    OperatorPollResult::Continue => { /* no output; busy = residual on report */ }
                 }
+                Self::report_task_time_metrics(
+                    &task_time_metrics,
+                    &mut metrics_window_start,
+                    &vertex_id,
+                    metrics_labels.as_ref(),
+                    &current_watermark,
+                );
             }
             
             // Flush and close collectors
@@ -886,7 +1095,7 @@ impl StreamTask {
 
     pub async fn get_state(&self) -> TaskSnapshot {
         // Detach from the live bag so later operator writes do not mutate the snapshot.
-        // Throughput/latency for WorkerSnapshot are scraped once by the worker poll.
+        // Throughput/latency for WorkerSnapshot are collected once by the worker poll.
         let metadata = TaskMetadata::default();
         metadata.extend(&self.runtime_context.task_metadata());
         TaskSnapshot {

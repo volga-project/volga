@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::Result;
 use arrow::array::RecordBatch;
@@ -18,6 +19,8 @@ use crate::runtime::operators::operator::{
 use crate::runtime::operators::window::config::{BuiltWindows, WindowConfig};
 use crate::runtime::operators::window::eval::advance_key;
 use crate::runtime::operators::window::frame_utils::{get_window_length_ms, require_range_frame};
+use crate::runtime::metrics::MetricsLabels;
+use crate::runtime::operators::window::metrics;
 use crate::runtime::operators::window::model::{Cursor, WindowId};
 use crate::runtime::operators::window::spec::WindowSpec;
 use crate::runtime::operators::window::state::{WindowOperatorState, WindowStateSnapshot};
@@ -81,6 +84,8 @@ pub struct WindowOperator {
     task_metadata: TaskMetadata,
     state_registry: Option<Arc<StateRegistry>>,
     vertex_id: Option<VertexId>,
+    /// Worker-scoped labels for hot-path metrics (task id is `vertex_id`).
+    metrics_labels: Option<MetricsLabels>,
 }
 
 impl fmt::Debug for WindowOperator {
@@ -129,6 +134,14 @@ impl WindowOperator {
             task_metadata: TaskMetadata::default(),
             state_registry: None,
             vertex_id: None,
+            metrics_labels: None,
+        }
+    }
+
+    fn metrics_target(&self) -> Option<(&str, &MetricsLabels)> {
+        match (&self.vertex_id, &self.metrics_labels) {
+            (Some(task_id), Some(labels)) => Some((task_id.as_ref(), labels)),
+            _ => None,
         }
     }
 
@@ -142,6 +155,7 @@ impl WindowOperator {
         self.state = Some(Arc::new(WindowOperatorState::new(
             store,
             namespace,
+            Arc::from("test-task"),
             self.ts_column_index,
             self.window_configs.clone(),
             self.lateness_ms,
@@ -224,20 +238,23 @@ impl OperatorTrait for WindowOperator {
                     .expect("operator id must be configured for WindowOperator"),
                 context.task_index(),
             );
+            let task_id = context.vertex_id_arc();
             let state = Arc::new(WindowOperatorState::new(
                 store,
                 ns,
+                task_id.clone(),
                 self.ts_column_index,
                 self.window_configs.clone(),
                 self.lateness_ms,
                 self.max_window_length_ms,
             ));
             registry.insert_task_state(
-                context.vertex_id_arc(),
+                task_id.clone(),
                 state.clone() as Arc<dyn OperatorTaskState>,
             );
             self.state_registry = Some(registry.clone());
-            self.vertex_id = Some(context.vertex_id_arc());
+            self.vertex_id = Some(task_id);
+            self.metrics_labels = context.metrics_labels();
             self.state = Some(state);
         }
 
@@ -285,8 +302,9 @@ impl OperatorTrait for WindowOperator {
                 Message::Keyed(keyed_message) => {
                     let key = keyed_message.key();
                     let input_rows = keyed_message.base.record_batch.num_rows();
-                    let dropped = self
-                        .state_ref()
+                    let state = self.state_ref();
+                    let ingest_started = Instant::now();
+                    let dropped = state
                         .insert_batch(
                             key,
                             keyed_message.base.record_batch.clone(),
@@ -300,6 +318,14 @@ impl OperatorTrait for WindowOperator {
                     );
                     self.task_metadata
                         .increment_u64(TASK_METADATA_ROWS_DROPPED_LATE, dropped as u64);
+                    if let Some((task_id, labels)) = self.metrics_target() {
+                        metrics::record_ingest_ms(
+                            task_id,
+                            labels,
+                            ingest_started.elapsed().as_secs_f64() * 1000.0,
+                        );
+                        metrics::add_late_dropped(task_id, labels, dropped as u64);
+                    }
                     OperatorPollResult::Continue
                 }
                 Message::Watermark(watermark) => {
@@ -317,7 +343,16 @@ impl OperatorTrait for WindowOperator {
                     let result = if advances_frontier
                         && self.output_mode == WindowOutputMode::Emit
                     {
-                        self.process_due(advance_to).await
+                        let started = Instant::now();
+                        let batch = self.process_due(advance_to).await;
+                        if let Some((task_id, labels)) = self.metrics_target() {
+                            metrics::record_wm_process_ms(
+                                task_id,
+                                labels,
+                                started.elapsed().as_secs_f64() * 1000.0,
+                            );
+                        }
+                        batch
                     } else {
                         RecordBatch::new_empty(self.output_schema.clone())
                     };

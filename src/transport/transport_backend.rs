@@ -215,8 +215,11 @@ impl TransportBackend {
                         // THIS WILL CAUSE BACKPRESSURE FOR ALL CHANNELS IF ONE CHANNEL IS BLOCKED
                         let sender = remote_reader_senders.get(&channel_id).unwrap();
                         while running.load(std::sync::atomic::Ordering::Relaxed) {
-                            match time::timeout(Duration::from_millis(100), sender.send(message.clone()))
-                                .await
+                            match time::timeout(
+                                Duration::from_millis(100),
+                                sender.send(message.clone(), None),
+                            )
+                            .await
                             {
                                 Ok(Ok(())) => break,
                                 Ok(Err(e)) => {

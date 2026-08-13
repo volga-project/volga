@@ -3983,18 +3983,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "prometheus-parse"
-version = "0.2.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "811031bea65e5a401fb2e1f37d802cca6601e204ac463809a3189352d13b78a5"
-dependencies = [
- "chrono",
- "itertools 0.12.1",
- "once_cell",
- "regex",
-]
-
-[[package]]
 name = "prost"
 version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5804,7 +5792,6 @@ dependencies = [
  "parking_lot",
  "parquet",
  "petgraph 0.6.5",
- "prometheus-parse",
  "prost",
  "rand 0.8.5",
  "rdkafka",

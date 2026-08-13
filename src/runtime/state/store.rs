@@ -5,6 +5,7 @@ use std::any::Any;
 use anyhow::Result;
 use async_trait::async_trait;
 
+use crate::runtime::metrics::MetricsLabels;
 use crate::runtime::operators::window::model::StateNamespace;
 
 use super::task_state::OperatorTaskState;
@@ -16,10 +17,13 @@ use super::task_state::OperatorTaskState;
 pub trait OperatorStore: Any + Send + Sync + std::fmt::Debug {
     fn as_any(&self) -> &dyn Any;
 
+    /// Worker-scoped Prom/registry labels (set when the store is opened).
+    fn metrics_labels(&self) -> Option<&MetricsLabels> {
+        None
+    }
+
     /// Run maintenance for a single task / namespace.
-    async fn maintain(
-        &self,
-        ns: &StateNamespace,
-        state: &dyn OperatorTaskState,
-    ) -> Result<()>;
+    ///
+    /// Labels come from [`Self::metrics_labels`].
+    async fn maintain(&self, ns: &StateNamespace, state: &dyn OperatorTaskState) -> Result<()>;
 }

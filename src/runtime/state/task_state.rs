@@ -8,14 +8,17 @@ use crate::runtime::observability::snapshot_types::TaskOperatorMetrics;
 use crate::runtime::operators::window::model::StateNamespace;
 use crate::runtime::operators::OperatorKind;
 
-/// Worker-local state for one operator task (ns, watermarks, metrics hooks, …).
+/// Worker-local state for one operator task (ns, watermarks, …).
 #[async_trait]
 pub trait OperatorTaskState: Send + Sync + std::fmt::Debug {
     fn state_namespace(&self) -> &StateNamespace;
     fn kind(&self) -> OperatorKind;
     fn as_any(&self) -> &dyn Any;
 
-    /// Sampled operator metrics for the worker poll path (API snapshot + Prom).
+    /// Runtime task id (same string used as the registry / Prom `task_id` label).
+    fn task_id(&self) -> &str;
+
+    /// Operator metrics for the worker poll path (API snapshot).
     async fn task_operator_metrics(&self) -> Option<TaskOperatorMetrics> {
         None
     }

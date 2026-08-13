@@ -26,8 +26,10 @@ pub fn open_window_operator_store(
 ) -> Result<Arc<dyn WindowOperatorStore>> {
     match config {
         OperatorStateBackendConfig::InMemory => {
-            let store = registry.get_or_insert_store(OperatorKind::Window, |_session| {
-                Arc::new(InMemWindowStore::new()) as Arc<dyn OperatorStore>
+            let labels = registry.metrics_labels().cloned();
+            let store = registry.get_or_insert_store(OperatorKind::Window, move |_session| {
+                Arc::new(InMemWindowStore::new().with_metrics_labels(labels))
+                    as Arc<dyn OperatorStore>
             });
             let inmem = store
                 .as_any()

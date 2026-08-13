@@ -14,7 +14,8 @@ use tokio::sync::RwLock;
 
 use std::any::Any;
 
-use crate::runtime::operators::window::metrics::WindowOperatorMetrics;
+use crate::runtime::metrics::MetricsLabels;
+use crate::runtime::operators::window::metrics;
 use crate::runtime::operators::window::model::{
     Cursor, RawRun, TileRun, WindowTrigger,
 };
@@ -74,6 +75,7 @@ struct InMemState {
 #[derive(Debug, Clone, Default)]
 pub struct InMemWindowStore {
     state: Arc<RwLock<InMemState>>,
+    metrics_labels: Option<MetricsLabels>,
 }
 
 impl InMemWindowStore {
@@ -81,63 +83,92 @@ impl InMemWindowStore {
         Self::default()
     }
 
-    /// Compute logical namespace metrics on demand (no cached size counters).
-    pub async fn sample_namespace_metrics(
-        &self,
-        namespace: &StateNamespace,
-    ) -> WindowOperatorMetrics {
-        let state = self.state.read().await;
-        Self::namespace_metrics(&state, namespace.bytes.as_slice())
+    pub fn with_metrics_labels(mut self, labels: Option<MetricsLabels>) -> Self {
+        self.metrics_labels = labels;
+        self
     }
 
-    fn namespace_metrics(state: &InMemState, namespace: &[u8]) -> WindowOperatorMetrics {
-        let mut snap = WindowOperatorMetrics::default();
+    /// Scan namespace store footprint and write gauges into the metrics registry.
+    fn report_metrics(
+        state: &InMemState,
+        namespace: &[u8],
+        task_id: &str,
+        labels: &crate::runtime::metrics::MetricsLabels,
+    ) {
+        use crate::runtime::metrics::set_task_gauge;
+        use metrics::{
+            METRIC_WO_STATE_KEY_STATES_BYTES, METRIC_WO_STATE_KEY_STATES_COUNT,
+            METRIC_WO_STATE_RAW_BYTES, METRIC_WO_STATE_RAW_COUNT, METRIC_WO_STATE_TILES_BYTES,
+            METRIC_WO_STATE_TILES_COUNT, METRIC_WO_STATE_TRIGGERS_BYTES,
+            METRIC_WO_STATE_TRIGGERS_COUNT,
+        };
+
+        let mut raw_count = 0u64;
+        let mut raw_bytes = 0u64;
+        let mut tiles_count = 0u64;
+        let mut tiles_bytes = 0u64;
+        let mut triggers_count = 0u64;
+        let mut triggers_bytes = 0u64;
+        let mut key_states_count = 0u64;
+        let mut key_states_bytes = 0u64;
         for (partition, part) in &state.partitions {
             if partition.namespace.as_slice() != namespace {
                 continue;
             }
-            snap.key_states_count += 1;
-            snap.key_states_bytes = snap
-                .key_states_bytes
+            key_states_count += 1;
+            key_states_bytes = key_states_bytes
                 .saturating_add(bincode::serialized_size(&part.meta).unwrap_or(0));
             for batch in part.raw.values() {
-                snap.raw_count += 1;
-                snap.raw_bytes = snap
-                    .raw_bytes
-                    .saturating_add(batch.get_array_memory_size() as u64);
+                raw_count += 1;
+                raw_bytes = raw_bytes.saturating_add(batch.get_array_memory_size() as u64);
             }
             for tiles in part.tiles.values() {
-                snap.tiles_count += 1;
-                snap.tiles_bytes = snap
-                    .tiles_bytes
-                    .saturating_add(bincode::serialized_size(tiles).unwrap_or(0));
+                tiles_count += 1;
+                tiles_bytes =
+                    tiles_bytes.saturating_add(bincode::serialized_size(tiles).unwrap_or(0));
             }
         }
         for trigger in &state.triggers {
             if trigger.partition.namespace.as_slice() != namespace {
                 continue;
             }
-            snap.triggers_count += 1;
-            snap.triggers_bytes = snap
-                .triggers_bytes
-                .saturating_add(bincode::serialized_size(trigger).unwrap_or(0));
+            triggers_count += 1;
+            triggers_bytes =
+                triggers_bytes.saturating_add(bincode::serialized_size(trigger).unwrap_or(0));
         }
-        snap
+        let labels = Some(labels);
+        for (name, value) in [
+            (METRIC_WO_STATE_RAW_COUNT, raw_count),
+            (METRIC_WO_STATE_RAW_BYTES, raw_bytes),
+            (METRIC_WO_STATE_TILES_COUNT, tiles_count),
+            (METRIC_WO_STATE_TILES_BYTES, tiles_bytes),
+            (METRIC_WO_STATE_TRIGGERS_COUNT, triggers_count),
+            (METRIC_WO_STATE_TRIGGERS_BYTES, triggers_bytes),
+            (METRIC_WO_STATE_KEY_STATES_COUNT, key_states_count),
+            (METRIC_WO_STATE_KEY_STATES_BYTES, key_states_bytes),
+        ] {
+            set_task_gauge(name, value as f64, task_id, labels);
+        }
     }
 
-    fn prune_namespace(state: &mut InMemState, namespace: &[u8], watermark: i64, floor: i64) {
+    /// Returns number of raw rows pruned.
+    fn prune_namespace(state: &mut InMemState, namespace: &[u8], watermark: i64, floor: i64) -> u64 {
         state.triggers.retain(|trigger| {
             trigger.partition.namespace.as_slice() != namespace || trigger.fire_at.ts > watermark
         });
+        let mut pruned_rows = 0u64;
         for (partition, part) in state.partitions.iter_mut() {
             if partition.namespace.as_slice() != namespace {
                 continue;
             }
+            let before = part.raw.len();
             part.raw.retain(|cursor, _| cursor.ts >= floor);
+            pruned_rows += (before - part.raw.len()) as u64;
             part.tiles.retain(|&(granularity, start_ts), _| {
                 start_ts + granularity.to_millis() > floor
             });
         }
+        pruned_rows
     }
 
     fn select_raw(state: &PartitionState, runs: &[RawRun]) -> Vec<RecordBatch> {
@@ -427,19 +458,25 @@ impl OperatorStore for InMemWindowStore {
         self
     }
 
-    async fn maintain(
-        &self,
-        ns: &StateNamespace,
-        state: &dyn OperatorTaskState,
-    ) -> Result<()> {
+    fn metrics_labels(&self) -> Option<&MetricsLabels> {
+        self.metrics_labels.as_ref()
+    }
+
+    async fn maintain(&self, ns: &StateNamespace, state: &dyn OperatorTaskState) -> Result<()> {
         let Some(wo) = state.as_any().downcast_ref::<WindowOperatorState>() else {
             return Ok(());
         };
         let Some((watermark, floor)) = wo.retention_cutoff() else {
             return Ok(());
         };
+        let task_id = state.task_id();
         let mut store = self.state.write().await;
-        Self::prune_namespace(&mut store, ns.bytes.as_slice(), watermark, floor);
+        let pruned_rows = Self::prune_namespace(&mut store, ns.bytes.as_slice(), watermark, floor);
+        if let Some(labels) = self.metrics_labels.as_ref() {
+            Self::report_metrics(&store, ns.bytes.as_slice(), task_id, labels);
+            drop(store);
+            metrics::add_pruned(task_id, labels, pruned_rows);
+        }
         Ok(())
     }
 }
@@ -883,6 +920,7 @@ mod tests {
         let task_state = WindowOperatorState::new(
             Arc::new(store.clone()) as Arc<dyn WindowOperatorStore>,
             namespace.clone(),
+            Arc::from("test-task"),
             0,
             Arc::new(BTreeMap::new()),
             0,
@@ -891,10 +929,7 @@ mod tests {
         task_state
             .watermark_frontier
             .store(5_000, std::sync::atomic::Ordering::Release);
-        store
-            .maintain(&namespace, &task_state)
-            .await
-            .unwrap();
+        store.maintain(&namespace, &task_state).await.unwrap();
 
         let mut due = store.stream_due(&namespace, None, Cursor::new(10_000, u64::MAX));
         let work = due.try_next().await.unwrap().unwrap();
@@ -930,16 +965,6 @@ mod tests {
             ]
         );
         assert_eq!(store.load_key_state(&partition).await.unwrap().next_seq, 4);
-
-        let size = store.sample_namespace_metrics(&namespace).await;
-        assert_eq!(size.raw_count, 2);
-        assert_eq!(size.tiles_count, 2);
-        assert_eq!(size.triggers_count, 1);
-        assert_eq!(size.key_states_count, 1);
-        assert!(size.raw_bytes > 0);
-        assert!(size.tiles_bytes > 0);
-        assert!(size.triggers_bytes > 0);
-        assert!(size.key_states_bytes > 0);
     }
 
     #[tokio::test]

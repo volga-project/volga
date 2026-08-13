@@ -33,7 +33,10 @@ pub enum CheckpointAckOutcome {
     /// Progress recorded; still waiting for state acks and/or barrier aligns.
     Pending,
     /// Expected state acks and barrier aligns both satisfied; newly completed.
-    Completed,
+    Completed {
+        /// Wall ms from checkpoint start to completion.
+        duration_ms: u64,
+    },
     /// Ignored / rejected without completing.
     Rejected(CheckpointAckReject),
 }
@@ -175,7 +178,7 @@ impl Checkpoints {
         checkpoint_id: u64,
         outcome: CheckpointAckOutcome,
     ) -> anyhow::Result<CheckpointAckOutcome> {
-        if !matches!(outcome, CheckpointAckOutcome::Completed) {
+        if !matches!(outcome, CheckpointAckOutcome::Completed { .. }) {
             return Ok(outcome);
         }
         let tasks = self.pending.remove(&checkpoint_id).unwrap_or_default();
@@ -246,10 +249,10 @@ mod tests {
                 .unwrap(),
             CheckpointAckOutcome::Pending
         );
-        assert_eq!(
+        assert!(matches!(
             cps.note_barrier_progress(id, task("a", 0)).await.unwrap(),
-            CheckpointAckOutcome::Completed
-        );
+            CheckpointAckOutcome::Completed { .. }
+        ));
         id
     }
 
@@ -310,11 +313,11 @@ mod tests {
                 .unwrap(),
             CheckpointAckOutcome::Pending
         );
-        assert_eq!(
+        assert!(matches!(
             cps.note_barrier_progress(id, task("sink", 0))
                 .await
                 .unwrap(),
-            CheckpointAckOutcome::Completed
-        );
+            CheckpointAckOutcome::Completed { .. }
+        ));
     }
 }

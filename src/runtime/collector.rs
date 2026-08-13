@@ -65,22 +65,22 @@ impl Collector {
         partitions.iter().map(|partition_idx| self.output_channels[*partition_idx].clone()).collect()
     }
 
-    async fn write_message_to_channels(&mut self, message: &Message, channels_to_send: Vec<Channel>) -> HashMap<Channel, (bool, u32)> {
-        // parallel write
+    async fn write_message_to_channels(
+        &mut self,
+        message: &Message,
+        channels_to_send: Vec<Channel>,
+    ) -> HashMap<Channel, bool> {
+        // parallel write (BP time is recorded inside DataWriter / BatchSender)
         let mut write_futures = Vec::new();
         for channel in channels_to_send.clone() {
-            
             let mut writer = self.data_writer.clone();
-            // let channel_id_clone = channel_id.clone();
-            write_futures.push(async move {
-                return writer.write_message(&channel, message).await;
-            });
+            write_futures.push(async move { writer.write_message(&channel, message).await });
         }
         let results = join_all(write_futures).await;
-        
+
         let mut channel_results = HashMap::new();
-        for (i, (success, backpressure_time_ms)) in results.into_iter().enumerate() {
-            channel_results.insert(channels_to_send[i].clone(), (success, backpressure_time_ms));
+        for (i, success) in results.into_iter().enumerate() {
+            channel_results.insert(channels_to_send[i].clone(), success);
         }
         channel_results
     }
@@ -88,8 +88,8 @@ impl Collector {
     pub async fn write_message_to_operators(
         collectors: &mut HashMap<String, Collector>,
         message: &Message,
-        channels_per_operator: HashMap<String, Vec<Channel>>
-    ) -> HashMap<String, HashMap<Channel, (bool, u32)>> {
+        channels_per_operator: HashMap<String, Vec<Channel>>,
+    ) -> HashMap<String, HashMap<Channel, bool>> {
         let mut futures = Vec::new();
         for (operator_id, collector) in collectors.iter_mut() {
             let operator_id = operator_id.clone();
