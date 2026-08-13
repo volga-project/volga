@@ -52,7 +52,9 @@ pub enum FaultAction {
         worker_id: String,
         mode: WorkerKillMode,
     },
-    RestartWorker { worker_id: String },
+    RestartWorker {
+        worker_id: String,
+    },
     KillMaster,
     RestartMaster,
 }
@@ -103,10 +105,68 @@ impl PipelineLaunchSpec {
 }
 
 /// Install/replace the in-memory gRPC sink address, preserving any upsert keys already on the pipeline.
+/// Non-InMemory sinks (Count, Parquet, Request) are left unchanged.
 pub(crate) fn install_in_memory_sink(pipeline: &mut PipelineSpec, server_addr: impl Into<String>) {
     let server_addr = server_addr.into();
     pipeline.sink = Some(match pipeline.sink.take() {
         Some(sink @ SinkSpec::InMemoryStorageGrpc { .. }) => sink.with_server_addr(server_addr),
-        _ => SinkSpec::in_memory_grpc(server_addr),
+        Some(other) => other,
+        None => SinkSpec::in_memory_grpc(server_addr),
     });
+}
+
+pub(crate) fn pipeline_needs_in_memory_store(pipeline: &PipelineSpec) -> bool {
+    pipeline
+        .sink
+        .as_ref()
+        .map(SinkSpec::needs_in_memory_store)
+        .unwrap_or(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::spec::event_time::EventTimeSpec;
+    use crate::api::spec::operators::OperatorOverrides;
+    use crate::api::spec::pipeline::ExecutionMode;
+    use crate::api::spec::state::StateSpec;
+    use crate::api::spec::worker_runtime::WorkerRuntimeSpec;
+
+    fn pipeline_with_sink(sink: Option<SinkSpec>) -> PipelineSpec {
+        PipelineSpec {
+            execution_profile: None,
+            execution_mode: ExecutionMode::Streaming,
+            parallelism: 1,
+            worker_runtime: WorkerRuntimeSpec::default(),
+            state: StateSpec::default(),
+            operator_overrides: OperatorOverrides::default(),
+            event_time: EventTimeSpec::default(),
+            sources: Vec::new(),
+            request_source_sink: None,
+            sink,
+            sql: None,
+            task_assignment_strategy: None,
+        }
+    }
+
+    #[test]
+    fn install_in_memory_sink_preserves_count() {
+        let mut pipeline = pipeline_with_sink(Some(SinkSpec::Count));
+        assert!(!pipeline_needs_in_memory_store(&pipeline));
+        install_in_memory_sink(&mut pipeline, "http://127.0.0.1:1");
+        assert!(matches!(pipeline.sink, Some(SinkSpec::Count)));
+    }
+
+    #[test]
+    fn install_in_memory_sink_fills_default() {
+        let mut pipeline = pipeline_with_sink(None);
+        assert!(pipeline_needs_in_memory_store(&pipeline));
+        install_in_memory_sink(&mut pipeline, "http://127.0.0.1:1");
+        match pipeline.sink {
+            Some(SinkSpec::InMemoryStorageGrpc { server_addr, .. }) => {
+                assert_eq!(server_addr, "http://127.0.0.1:1");
+            }
+            other => panic!("expected InMemoryStorageGrpc, got {other:?}"),
+        }
+    }
 }
