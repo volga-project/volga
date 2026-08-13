@@ -27,7 +27,7 @@ Conventions from the metrics stack (keep):
 
 | PR | Steps | Track | State |
 | --- | --- | --- | --- |
-| A `/metrics` | 1 | Engine | in progress |
+| A `/metrics` | 1 | Engine | [#233](https://github.com/volga-project/volga/pull/233) |
 | B Count sink | 2 | Engine | not started |
 | C CRD + Kind topology | 3 | Operator | not started |
 | D `test_utils` | 0 | Refactor | not started |
