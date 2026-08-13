@@ -8,8 +8,6 @@ use crate::{
         metrics::{
             increment_task_counter, init_metrics, record_task_histogram, set_task_gauge,
             MetricsLabels, LABEL_PIPELINE_ID, LABEL_TASK_ID, LABEL_WORKER_ID,
-            increment_task_counter, init_metrics, record_task_histogram, set_task_gauge,
-            MetricsLabels, LABEL_PIPELINE_ID, LABEL_TASK_ID, LABEL_WORKER_ID,
             METRIC_STREAM_TASK_BACKPRESSURED_TIME_MS_PER_SECOND,
             METRIC_STREAM_TASK_BUSY_TIME_MS_PER_SECOND, METRIC_STREAM_TASK_BYTES_RECV,
             METRIC_STREAM_TASK_BYTES_SENT, METRIC_STREAM_TASK_CHECKPOINT_ALIGN_WAIT_MS,
@@ -44,9 +42,9 @@ use std::{collections::HashMap, sync::{atomic::{AtomicU8, AtomicU64, Ordering}, 
 
 /// Accumulates Flink-style task time metrics within a report window.
 ///
-/// Idle = input wait; backpressured = exclusive tx-queue wait via
-/// [`BackpressureTracker`] (same write path as BP ratio gauges); busy = residual
-/// wall time so the three ms/s gauges sum to ~1000.
+/// Idle = `poll_next` wait (source produce or input); backpressured = exclusive
+/// tx-queue wait via [`BackpressureTracker`] (same write path as BP ratio
+/// gauges); busy = residual wall time so the three ms/s gauges sum to ~1000.
 #[derive(Debug, Default)]
 pub(crate) struct TaskTimeMetrics {
     idle_ns: AtomicU64,
@@ -451,7 +449,6 @@ impl StreamTask {
         mut aligner: CheckpointAligner,
         labels: Option<MetricsLabels>,
         execution_attempt_id: u64,
-        task_time_metrics: Arc<TaskTimeMetrics>,
     ) -> MessageStream {
         Box::pin(stream! {
             let mut input_stream = input_stream;
@@ -461,12 +458,7 @@ impl StreamTask {
                 upstream_watermarks.clone(),
                 current_watermark.clone(),
             );
-            loop {
-                let idle_start = Instant::now();
-                let Some(message) = input_stream.next().await else {
-                    break;
-                };
-                task_time_metrics.add_idle_ns(idle_start.elapsed().as_nanos() as u64);
+            while let Some(message) = input_stream.next().await {
                 Self::record_metrics(vertex_id.clone(), &message, true, labels.as_ref());
                 Self::record_control_propagation(&vertex_id, &message, labels.as_ref());
 
@@ -816,7 +808,6 @@ impl StreamTask {
                     checkpoint_aligner,
                     metrics_labels.clone(),
                     execution_attempt_id,
-                    task_time_metrics.clone(),
                 );
 
                 operator.set_input(Some(preprocessed_stream))
@@ -851,7 +842,10 @@ impl StreamTask {
                 let poll_res = if let Some(msg) = produced {
                     OperatorPollResult::Ready(msg)
                 } else {
-                    operator.poll_next().await
+                    let idle_start = Instant::now();
+                    let res = operator.poll_next().await;
+                    task_time_metrics.add_idle_ns(idle_start.elapsed().as_nanos() as u64);
+                    res
                 };
 
                 match poll_res {

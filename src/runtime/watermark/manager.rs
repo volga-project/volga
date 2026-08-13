@@ -273,7 +273,7 @@ mod tests {
     use futures::StreamExt;
 
         use crate::runtime::observability::snapshot_types::StreamTaskStatus;
-        use crate::runtime::stream_task::{CheckpointAligner, StreamTask, TaskTimeMetrics};
+        use crate::runtime::stream_task::{CheckpointAligner, StreamTask};
     use crate::transport::transport_client::DataReaderControl;
     use std::sync::atomic::AtomicU8;
     use std::time::Duration;
@@ -359,7 +359,6 @@ mod tests {
             CheckpointAligner::new(&["u0".to_string()], DataReaderControl::empty_for_test()),
             None,
             0,
-            Arc::new(TaskTimeMetrics::default()),
         );
 
         let mut seen = Vec::new();
@@ -434,7 +433,6 @@ mod tests {
             ),
             None,
             0,
-            Arc::new(TaskTimeMetrics::default()),
         );
 
         let mut seen = Vec::new();
@@ -496,7 +494,6 @@ mod tests {
             ),
             None,
             0,
-            Arc::new(TaskTimeMetrics::default()),
         );
 
         let mut seen = Vec::new();
@@ -551,7 +548,6 @@ mod tests {
             ),
             None,
             0,
-            Arc::new(TaskTimeMetrics::default()),
         );
 
         let mut seen = Vec::new();
