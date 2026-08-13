@@ -8,8 +8,9 @@ use crate::{
         metrics::{
             init_metrics, record_task_histogram, set_task_gauge, MetricsLabels,
             LABEL_PIPELINE_ID, LABEL_TASK_ID, LABEL_WORKER_ID,
-            METRIC_STREAM_TASK_BARRIER_PROPAGATION_MS, METRIC_STREAM_TASK_BYTES_RECV,
-            METRIC_STREAM_TASK_BYTES_SENT, METRIC_STREAM_TASK_MESSAGES_RECV,
+            METRIC_STREAM_TASK_BYTES_RECV,
+            METRIC_STREAM_TASK_BYTES_SENT, METRIC_STREAM_TASK_CHECKPOINT_BARRIER_PROPAGATION_MS,
+            METRIC_STREAM_TASK_MESSAGES_RECV,
             METRIC_STREAM_TASK_MESSAGES_SENT, METRIC_STREAM_TASK_PATH_LATENCY,
             METRIC_STREAM_TASK_RECORDS_RECV, METRIC_STREAM_TASK_RECORDS_SENT,
             METRIC_STREAM_TASK_WATERMARK_LAG_MS, METRIC_STREAM_TASK_WM_PROPAGATION_MS,
@@ -32,7 +33,7 @@ use crate::transport::transport_client::DataReaderControl;
 use std::collections::HashSet;
 use crate::transport::transport_client::TransportClient;
 use crate::common::message::{Message, WatermarkMessage};
-use std::{collections::HashMap, sync::{atomic::{AtomicU8, AtomicU64, Ordering}, Arc}, time::{Duration, SystemTime, UNIX_EPOCH}};
+use std::{collections::HashMap, sync::{atomic::{AtomicU8, AtomicU64, Ordering}, Arc}, time::{Duration, Instant, SystemTime, UNIX_EPOCH}};
 // serde imports removed; this module does not define serializable DTOs directly.
 use crate::common::grpc::master::master_client as connect_master_client;
 use crate::common::grpc::GrpcConfig;
@@ -267,7 +268,7 @@ impl StreamTask {
             }
             Message::CheckpointBarrier(_) => {
                 Self::record_histogram(
-                    METRIC_STREAM_TASK_BARRIER_PROPAGATION_MS,
+                    METRIC_STREAM_TASK_CHECKPOINT_BARRIER_PROPAGATION_MS,
                     delay_ms,
                     vertex_id,
                     labels,
@@ -292,6 +293,23 @@ impl StreamTask {
             vertex_id.as_ref(),
             labels,
         );
+    }
+
+    fn maybe_publish_watermark_lag(
+        window_start: &mut Instant,
+        vertex_id: &VertexId,
+        labels: Option<&MetricsLabels>,
+        current_watermark: &AtomicU64,
+    ) {
+        if window_start.elapsed() < Duration::from_secs(1) {
+            return;
+        }
+        Self::set_watermark_lag_gauge(
+            vertex_id,
+            current_watermark.load(Ordering::Relaxed),
+            labels,
+        );
+        *window_start = Instant::now();
     }
 
     fn record_metrics(
@@ -708,6 +726,7 @@ impl StreamTask {
                 operator.set_input(Some(preprocessed_stream))
             };
 
+            let mut lag_window_start = Instant::now();
             while status.load(Ordering::SeqCst) == StreamTaskStatus::Running as u8 {
                 // For sources: if checkpoint is triggered, synthesize a CheckpointBarrier message and treat it exactly
                 // like a poll_next() output (same code path, no duplication).
@@ -908,6 +927,12 @@ impl StreamTask {
                     }
                     OperatorPollResult::Continue => { /* no output */ }
                 }
+                Self::maybe_publish_watermark_lag(
+                    &mut lag_window_start,
+                    &vertex_id,
+                    metrics_labels.as_ref(),
+                    &current_watermark,
+                );
             }
             
             // Flush and close collectors

@@ -20,12 +20,13 @@ pub const METRIC_STREAM_TASK_TX_QUEUE_REM: &str = "volga_stream_task_tx_queue_re
 pub const METRIC_STREAM_TASK_BACKPRESSURE_RATIO: &str = "volga_stream_task_backpressure_ratio";
 pub const METRIC_STREAM_TASK_BACKPRESSURE_MAX: &str = "volga_stream_task_backpressure_max";
 /// Event-time lag: `wall_now_ms − current_watermark` (omit for 0 / MAX).
+/// Refreshed on watermark advance and on the task metrics tick so idle lag grows.
 pub const METRIC_STREAM_TASK_WATERMARK_LAG_MS: &str = "volga_stream_task_watermark_lag_ms";
-/// Hop delay for watermarks: `recv − create_stamp`.
+/// Control-path delay for watermarks: `recv − source/inject stamp`.
 pub const METRIC_STREAM_TASK_WM_PROPAGATION_MS: &str = "volga_stream_task_wm_propagation_ms";
-/// Hop delay for checkpoint barriers: `recv − create_stamp`.
-pub const METRIC_STREAM_TASK_BARRIER_PROPAGATION_MS: &str =
-    "volga_stream_task_barrier_propagation_ms";
+/// Control-path delay for checkpoint barriers: `recv − source/inject stamp`.
+pub const METRIC_STREAM_TASK_CHECKPOINT_BARRIER_PROPAGATION_MS: &str =
+    "volga_stream_task_checkpoint_barrier_propagation_ms";
 /// Wait from first barrier seen to full upstream alignment (non-sources).
 pub const METRIC_STREAM_TASK_CHECKPOINT_ALIGN_WAIT_MS: &str =
     "volga_stream_task_checkpoint_align_wait_ms";
