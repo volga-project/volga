@@ -20,7 +20,6 @@ pub const METRIC_WO_STATE_KEY_STATES_BYTES: &str = "volga_wo_state_key_states_by
 
 pub const METRIC_WO_INGEST_MS: &str = "volga_wo_ingest_ms";
 pub const METRIC_WO_WM_PROCESS_MS: &str = "volga_wo_wm_process_ms";
-pub const METRIC_WO_MAINTAIN_MS: &str = "volga_wo_maintain_ms";
 pub const METRIC_WO_MAINTAIN_PRUNED_ROWS: &str = "volga_wo_maintain_pruned_rows";
 pub const METRIC_WO_LATE_DROPPED_ROWS: &str = "volga_wo_late_dropped_rows";
 
@@ -66,10 +65,6 @@ pub fn record_ingest_ms(task_id: &str, labels: &MetricsLabels, ms: f64) {
 
 pub fn record_wm_process_ms(task_id: &str, labels: &MetricsLabels, ms: f64) {
     record_task_histogram(METRIC_WO_WM_PROCESS_MS, ms, task_id, Some(labels));
-}
-
-pub fn record_maintain_ms(task_id: &str, labels: &MetricsLabels, ms: f64) {
-    record_task_histogram(METRIC_WO_MAINTAIN_MS, ms, task_id, Some(labels));
 }
 
 fn gauge_u64(values: &crate::runtime::metrics::TaskMetricValues, name: &str) -> u64 {

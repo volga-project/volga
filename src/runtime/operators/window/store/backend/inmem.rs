@@ -471,17 +471,11 @@ impl OperatorStore for InMemWindowStore {
         };
         let ns = state.state_namespace();
         let task_id = state.task_id();
-        let started = std::time::Instant::now();
         let mut store = self.state.write().await;
         let pruned_rows = Self::prune_namespace(&mut store, ns.bytes.as_slice(), watermark, floor);
         if let Some(labels) = self.metrics_labels.as_ref() {
             Self::report_metrics(&store, ns.bytes.as_slice(), task_id, labels);
             drop(store);
-            metrics::record_maintain_ms(
-                task_id,
-                labels,
-                started.elapsed().as_secs_f64() * 1000.0,
-            );
             metrics::add_pruned(task_id, labels, pruned_rows);
         }
         Ok(())
