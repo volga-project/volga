@@ -4,8 +4,8 @@ use crate::{
         Planner, PlanningContext,
     },
     common::ports::gen_unique_grpc_port,
-    common::test_utils::IdentityMapFunction,
-    tests::support::pipeline_exec,
+    test_utils::common::IdentityMapFunction,
+    test_utils::pipeline_exec,
     runtime::{
         functions::{
             key_by::{key_by_function::extract_datafusion_window_exec, KeyByFunction},

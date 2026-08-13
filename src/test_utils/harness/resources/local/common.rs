@@ -11,7 +11,7 @@ use crate::common::ports::gen_unique_grpc_port;
 use crate::orchestrator::local::LocalWorkerReplacement;
 use crate::orchestrator::orchestrator::{MasterOrchestrator, WorkerOrchestrator};
 use crate::runtime::master::server::MasterServer;
-use crate::tests::support::cluster_harness::WorkerKillMode;
+use crate::test_utils::harness::WorkerKillMode;
 use crate::runtime::worker_server::WorkerServer;
 use crate::storage::{InMemoryStorageClient, InMemoryStorageServer, InMemoryStorageSnapshot};
 

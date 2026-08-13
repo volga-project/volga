@@ -8,7 +8,7 @@ use crate::api::spec::connectors::{SourceSpec, SourceSpecKind};
 use crate::api::spec::pipeline::ExecutionProfile;
 use crate::api::{PipelineSpecBuilder, TaskWorkerAssignmentStrategyType};
 use crate::runtime::functions::source::datagen_source::{DatagenSpec, FieldGenerator};
-use crate::tests::support::cluster_harness::PipelineLaunchSpec;
+use crate::test_utils::harness::PipelineLaunchSpec;
 
 pub fn default_pipelined_smoke_launch_spec() -> PipelineLaunchSpec {
     smoke_launch_spec(

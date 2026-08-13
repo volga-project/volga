@@ -13,7 +13,7 @@ use crate::runtime::operators::source::TASK_METADATA_RECORDS_GENERATED;
 use crate::runtime::operators::window::{
     TASK_METADATA_ROWS_ACCEPTED, TASK_METADATA_ROWS_DROPPED_LATE,
 };
-use crate::tests::support::cluster_harness::{MasterHandle, RuntimeEnv};
+use crate::test_utils::harness::{MasterHandle, RuntimeEnv};
 use crate::storage::InMemoryStorageSnapshot;
 
 use super::launch::{checkpoint_datagen_parts, CheckpointWorkload, WINDOW_RANGE_MS};

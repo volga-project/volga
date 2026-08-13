@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use crate::runtime::functions::sink::parquet::{ParquetSinkConfig, ParquetSinkFunction, ParquetSinkSpec};
 use crate::runtime::functions::sink::SinkFunctionTrait;
-use crate::tests::support::parquet::{parquet_roundtrip_via_sink_and_source, test_schema};
+use crate::test_utils::parquet::{parquet_roundtrip_via_sink_and_source, test_schema};
 
 fn write_parquet_file(path: &Path, schema: SchemaRef, batch: RecordBatch) {
     let file = File::create(path).unwrap();

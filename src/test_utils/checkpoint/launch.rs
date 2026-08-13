@@ -13,8 +13,8 @@ use crate::api::{PipelineSpecBuilder, TaskWorkerAssignmentStrategyType};
 use crate::runtime::functions::source::datagen_source::{DatagenSpec, FieldGenerator};
 use crate::runtime::operators::window::spec::WindowSpec;
 use crate::runtime::operators::window::{TileConfig, TimeGranularity};
-use crate::tests::support::cluster_harness::PipelineLaunchSpec;
-use crate::tests::support::launch_specs::worker_count_for;
+use crate::test_utils::harness::PipelineLaunchSpec;
+use crate::test_utils::launch_specs::worker_count_for;
 
 /// Pipelined slot packing; worker_count = parallelism / slots.
 const SLOTS_PER_NODE: usize = 2;

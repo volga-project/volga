@@ -1,5 +1,6 @@
 use crate::{
-    common::{test_utils::{create_test_string_batch, gen_unique_grpc_port}, Message, WatermarkMessage, MAX_WATERMARK_VALUE},
+    common::{Message, WatermarkMessage, MAX_WATERMARK_VALUE},
+    test_utils::common::{create_test_string_batch, gen_unique_grpc_port},
     runtime::{
         functions::{
             key_by::KeyByFunction, map::{MapFunction, MapFunctionTrait}

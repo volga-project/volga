@@ -4,10 +4,10 @@ use anyhow::Result;
 
 use crate::api::TaskWorkerAssignmentStrategyType;
 use crate::runtime::functions::source::datagen_source::FieldGenerator;
-use crate::tests::support::cluster_harness::{
-    OutputOracle, PipelineLaunchSpec, RuntimeEnv, TestCluster,
+use crate::test_utils::harness::{
+    OutputOracle, PipelineLaunchSpec, RuntimeEnv, VolgaCluster,
 };
-use crate::tests::support::launch_specs::{
+use crate::test_utils::launch_specs::{
     deployment_smoke_launch_spec, smoke_launch_spec, worker_count_for,
 };
 
@@ -18,7 +18,7 @@ pub async fn run_assignment_smoke(
 ) -> Result<()> {
     let worker_count = worker_count_for(&assignment_strategy, parallelism);
     let expected_rows = 10 * parallelism;
-    let cluster = TestCluster::launch(
+    let cluster = VolgaCluster::launch(
         RuntimeEnv::Local,
         smoke_launch_spec(assignment_strategy, parallelism, worker_count),
     )
@@ -46,7 +46,7 @@ pub async fn run_deployment_smoke(
     description: &str,
     predicate: impl Fn(&str) -> bool,
 ) -> Result<()> {
-    let cluster = TestCluster::launch(env, launch).await?;
+    let cluster = VolgaCluster::launch(env, launch).await?;
     cluster.start_execution().await?;
     cluster.wait_for_completion().await?;
     OutputOracle::assert_string_column_matches(

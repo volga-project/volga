@@ -14,7 +14,7 @@ use crate::common::types::PipelineId;
 use crate::runtime::functions::source::datagen_source::{DatagenSpec, FieldGenerator};
 use crate::runtime::observability::snapshot_types::StreamTaskStatus;
 use crate::runtime::operators::operator::OperatorConfig;
-use crate::tests::support::test_utils::{
+use crate::test_utils::support::{
     create_window_input_schema, wait_for_status, window_rows_from_messages, WindowOutputRow,
 };
 use crate::runtime::worker::{Worker, WorkerConfig};

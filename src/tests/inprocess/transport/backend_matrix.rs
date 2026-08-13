@@ -4,7 +4,7 @@ use std::sync::Arc;
 use crate::runtime::health::WorkerHealth;
 use crate::transport::{TransportBackend, TransportBackendTrait};
 
-use crate::tests::support::many_to_many_harness::{run_many_to_many_case, MeshChannelMode, MeshTestConfig};
+use crate::test_utils::many_to_many_harness::{run_many_to_many_case, MeshChannelMode, MeshTestConfig};
 
 #[tokio::test]
 async fn test_many_to_many_local_only_harness() {

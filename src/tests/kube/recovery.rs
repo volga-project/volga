@@ -18,8 +18,8 @@
 
 use anyhow::Result;
 
-use crate::tests::support::cluster_harness::{RuntimeEnv, WorkerKillMode};
-use crate::tests::support::recovery::{
+use crate::test_utils::harness::{RuntimeEnv, WorkerKillMode};
+use crate::test_utils::recovery::{
     assert_multi_worker_multi_kill, assert_multi_worker_single_kill,
     assert_single_worker_abrupt_failure,
     multi_worker_recovery_launch_spec, run_worker_kill_recovery, run_workers_kill_recovery,

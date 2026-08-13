@@ -1,6 +1,6 @@
 use crate::api::LogicalGraph;
 use crate::common::message::Message;
-use crate::common::test_utils::{create_test_string_batch, IdentityMapFunction};
+use crate::test_utils::common::{create_test_string_batch, IdentityMapFunction};
 use crate::common::{WatermarkMessage, MAX_WATERMARK_VALUE};
 use crate::runtime::functions::map::MapFunction;
 use crate::runtime::health::WorkerHealth;
@@ -9,7 +9,7 @@ use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::stream_task::StreamTask;
 use crate::runtime::stream_task_actor::{StreamTaskActor, StreamTaskMessage};
 use crate::transport::channel::Channel;
-use crate::transport::test_utils::{TestDataReaderActor, TestDataWriterActor};
+use crate::test_utils::transport::{TestDataReaderActor, TestDataWriterActor};
 use crate::transport::transport_backend_actor::{
     TransportBackendActor, TransportBackendActorMessage,
 };
@@ -131,7 +131,7 @@ fn test_stream_task_actor() -> Result<()> {
             );
             input_ref
                 .ask(
-                    crate::transport::test_utils::TestDataWriterMessage::WriteMessage {
+                    crate::test_utils::transport::TestDataWriterMessage::WriteMessage {
                         channel,
                         message: message.clone(),
                     },
@@ -143,7 +143,7 @@ fn test_stream_task_actor() -> Result<()> {
         let mut received_messages: Vec<Message> = Vec::new();
         for _ in 0..test_messages.len() {
             let result = output_ref
-                .ask(crate::transport::test_utils::TestDataReaderMessage::ReadMessage)
+                .ask(crate::test_utils::transport::TestDataReaderMessage::ReadMessage)
                 .await?;
             if let Some(message) = result {
                 received_messages.push(message);

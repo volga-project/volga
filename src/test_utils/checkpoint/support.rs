@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use crate::runtime::master::LifecycleEvent;
-use crate::tests::support::cluster_harness::{LifecycleOracle, MasterHandle, RuntimeEnv, TestCluster};
+use crate::test_utils::harness::{LifecycleOracle, MasterHandle, RuntimeEnv, VolgaCluster};
 
 pub(super) async fn wait_until_attempt0_running(
     master: &MasterHandle,
@@ -59,7 +59,7 @@ pub(super) async fn wait_until_attempt_running(
 /// The timeout budget resets whenever the in-flight set changes so a chain of
 /// interval checkpoints (2 → 3 → 4) each get a full settle window rather than
 /// sharing one deadline from the first open CP.
-pub(super) async fn wait_until_checkpoints_idle(
+pub async fn wait_until_checkpoints_idle(
     master: &MasterHandle,
     timeout: Duration,
 ) -> Result<()> {
@@ -100,7 +100,7 @@ pub(super) fn checkpoint_idle_timeout(env: RuntimeEnv) -> Duration {
     }
 }
 
-pub(super) async fn wait_for_checkpoint_completed(
+pub async fn wait_for_checkpoint_completed(
     master: &MasterHandle,
     cursor: &mut u64,
     timeout: Duration,
@@ -119,7 +119,7 @@ pub(super) async fn wait_for_checkpoint_completed(
     }
 }
 
-pub(super) async fn wait_for_checkpoint_completed_id(
+pub async fn wait_for_checkpoint_completed_id(
     master: &MasterHandle,
     cursor: &mut u64,
     timeout: Duration,
@@ -153,7 +153,7 @@ pub(super) async fn advance_lifecycle_cursor(
     Ok(())
 }
 
-pub(super) async fn wait_for_checkpoint_started(
+pub async fn wait_for_checkpoint_started(
     master: &MasterHandle,
     cursor: &mut u64,
     timeout: Duration,
@@ -192,7 +192,7 @@ fn finish_timeout(env: RuntimeEnv, failure_count: usize) -> Duration {
 
 /// Stop sources (after any in-flight CP settles), then wait for `PipelineFinished`.
 pub(super) async fn harness_finish_pipeline(
-    cluster: &TestCluster,
+    cluster: &VolgaCluster,
     cursor: &mut u64,
     env: RuntimeEnv,
     failure_count: usize,
@@ -214,7 +214,7 @@ pub(super) async fn harness_finish_pipeline(
 }
 
 /// Always tear down cluster resources (kube `VolgaPipeline` delete, local workers, etc.).
-pub(super) async fn shutdown_after<T>(cluster: &TestCluster, result: Result<T>) -> Result<T> {
+pub(super) async fn shutdown_after<T>(cluster: &VolgaCluster, result: Result<T>) -> Result<T> {
     match cluster.shutdown().await {
         Ok(()) => result,
         Err(shutdown_err) => match result {

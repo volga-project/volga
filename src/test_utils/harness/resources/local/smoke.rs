@@ -10,8 +10,8 @@ use crate::orchestrator::local::{LocalTestOrchestrator, LocalWorkerOrchestrator}
 use crate::orchestrator::orchestrator::{MasterOrchestrator, WorkerOrchestrator};
 use crate::runtime::master::{LifecycleEventRecord, MasterConfig};
 use crate::storage::InMemoryStorageSnapshot;
-use crate::tests::support::cluster_harness::backend::ClusterBackend;
-use crate::tests::support::cluster_harness::{FaultAction, PipelineLaunchSpec, WorkerKillMode};
+use crate::test_utils::harness::backend::ClusterBackend;
+use crate::test_utils::harness::{FaultAction, PipelineLaunchSpec, WorkerKillMode};
 use async_trait::async_trait;
 use anyhow::Context;
 

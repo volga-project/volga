@@ -1,7 +1,7 @@
 use anyhow::Result;
 
 use crate::api::TaskWorkerAssignmentStrategyType;
-use crate::tests::support::smoke::run_assignment_smoke;
+use crate::test_utils::smoke::run_assignment_smoke;
 
 // tests pass individually but can fail when running the full suite (likely cross-test interference).
 

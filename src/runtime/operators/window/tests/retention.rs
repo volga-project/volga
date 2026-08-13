@@ -8,7 +8,7 @@ use crate::runtime::operators::window::model::{Cursor, RawRun, TileRun};
 use crate::runtime::operators::window::operator::{WindowOperatorConfig, WindowOutputMode};
 use crate::runtime::operators::window::spec::WindowSpec;
 use crate::runtime::operators::window::store::{PartitionKey, WindowOperatorStore};
-use crate::runtime::operators::window::tests::harness::{
+use crate::test_utils::window::harness::{
     batch, key, watermark_message, window_exec_from_sql, Harness,
 };
 use crate::runtime::operators::window::{TileConfig, TimeGranularity};

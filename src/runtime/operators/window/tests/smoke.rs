@@ -4,7 +4,7 @@ use datafusion::scalar::ScalarValue;
 
 use crate::common::MAX_WATERMARK_VALUE;
 use crate::runtime::operators::window::operator::WindowOperatorConfig;
-use crate::runtime::operators::window::tests::harness::{
+use crate::test_utils::window::harness::{
     assert_window_values, batch, run_wo, window_exec_from_sql, Harness, WoWroHarness,
 };
 use crate::runtime::operators::window::{

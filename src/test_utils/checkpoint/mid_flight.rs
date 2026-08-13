@@ -3,10 +3,10 @@
 use anyhow::{anyhow, Result};
 
 use crate::runtime::master::LifecycleEvent;
-use crate::tests::support::cluster_harness::{
-    LifecycleOracle, PipelineLaunchSpec, RecoveryReport, RuntimeEnv, TestCluster, WorkerKillMode,
+use crate::test_utils::harness::{
+    LifecycleOracle, PipelineLaunchSpec, RecoveryReport, RuntimeEnv, VolgaCluster, WorkerKillMode,
 };
-use crate::tests::support::recovery::RecoveryTimeouts;
+use crate::test_utils::recovery::RecoveryTimeouts;
 
 use super::sink_oracle::assert_sink_matches_offline_datagen;
 use super::support::{
@@ -38,7 +38,7 @@ pub async fn run_checkpoint_mid_flight_kill_no_prior(
     mode: WorkerKillMode,
 ) -> Result<RecoveryReport> {
     let timeouts = RecoveryTimeouts::for_env(env);
-    let cluster = TestCluster::launch(env, launch).await?;
+    let cluster = VolgaCluster::launch(env, launch).await?;
     let result = async {
         let target = cluster
             .worker_ids()
@@ -114,7 +114,7 @@ pub async fn run_checkpoint_mid_flight_kill_after_safe(
     mode: WorkerKillMode,
 ) -> Result<RecoveryReport> {
     let timeouts = RecoveryTimeouts::for_env(env);
-    let cluster = TestCluster::launch(env, launch).await?;
+    let cluster = VolgaCluster::launch(env, launch).await?;
     let result = async {
         let target = cluster
             .worker_ids()

@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-use crate::tests::support::checkpoint::{
+use crate::test_utils::checkpoint::{
     assert_checkpoint_multi_restore, assert_checkpoint_restore,
     checkpoint_multi_failure_launch_spec, checkpoint_recovery_launch_spec,
     run_checkpoint_barrier_path, run_checkpoint_mid_flight_kill_after_safe,
@@ -8,7 +8,7 @@ use crate::tests::support::checkpoint::{
     run_checkpoint_worker_kill_recovery, CheckpointWorkload, MULTI_FAILURE_COUNT,
     MULTI_WORKER_PARALLELISM, SINGLE_WORKER_PARALLELISM,
 };
-use crate::tests::support::cluster_harness::{RuntimeEnv, WorkerKillMode};
+use crate::test_utils::harness::{RuntimeEnv, WorkerKillMode};
 
 #[tokio::test]
 async fn test_local_checkpoint_barrier_path_before_complete() -> Result<()> {

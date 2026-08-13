@@ -7,9 +7,7 @@ use crate::runtime::VertexId;
 use crate::runtime::health::WorkerHealth;
 use crate::runtime::operators::operator::MessageStream;
 use crate::transport::channel::Channel;
-use crate::transport::transport_client::{DataReader, DataWriter};
-
-use super::transport_client::TransportClientConfig;
+use crate::transport::transport_client::{DataReader, DataWriter, TransportClientConfig};
 
 #[derive(Debug)]
 pub enum TestDataReaderMessage {

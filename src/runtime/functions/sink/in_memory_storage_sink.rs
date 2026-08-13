@@ -225,7 +225,7 @@ mod tests {
     use arrow::record_batch::RecordBatch;
     use crate::common::message::{BaseMessage, KeyedMessage};
     use crate::common::ports::gen_unique_grpc_port;
-    use crate::common::test_utils::create_test_string_batch;
+    use crate::test_utils::common::create_test_string_batch;
     use crate::common::Key;
     use crate::storage::in_memory_storage_grpc_server::InMemoryStorageServer;
 

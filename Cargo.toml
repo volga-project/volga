@@ -99,12 +99,12 @@ hyper = "1.0"
 reqwest = { version = "0.11", features = ["json"] }
 base64 = "0.22"
 arrow-integration-test = "55.0.0"
+serde_yaml = "0.9"
 
 [dev-dependencies]
 tower = "0.5"
 http-body-util = "0.1"
 testcontainers = "0.15"
-serde_yaml = "0.9"
 
 [build]
 rustflags = ["--cfg", "tokio_unstable"]

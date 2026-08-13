@@ -9,9 +9,9 @@ use uuid::Uuid;
 
 use crate::api::PipelineSpec;
 use crate::common::ports::gen_unique_grpc_port;
-use crate::tests::support::cluster_harness::PipelineLaunchSpec;
-use crate::tests::support::cluster_harness::backend::ClusterBackend;
-use crate::tests::support::cluster_harness::FaultAction;
+use crate::test_utils::harness::PipelineLaunchSpec;
+use crate::test_utils::harness::backend::ClusterBackend;
+use crate::test_utils::harness::FaultAction;
 use crate::storage::InMemoryStorageSnapshot;
 use crate::runtime::master::LifecycleEvent;
 use crate::runtime::master::LifecycleEventRecord;
