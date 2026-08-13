@@ -9,11 +9,13 @@ use super::spec::{SoakScenario, SoakSpec};
 
 const USAGE: &str = "\
 Usage:
-  volga-longrun soak [--env local|kube|docker] [--scenario steady|kill] [--duration-secs N] [--kill-after-checkpoint N]
+  volga-longrun soak [--env local|kube|docker] [--scenario steady|kill] [--duration-secs N]
+                     [--kill-after-checkpoint N] [--dump DIR] [--prom-url URL]
   volga-longrun bench
 
 v1 implements soak only. Default duration: local 120s, kube/docker 3600s.
-Checkpoints use prod consts (30s interval). Count sink. Sliding RANGE window job.";
+Checkpoints use prod consts (30s interval). Count sink. Sliding RANGE window job.
+--dump writes lifecycle.json (and prom.json when --prom-url is set).";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LongrunCommand {
@@ -26,6 +28,8 @@ pub struct SoakArgs {
     pub env: RuntimeEnv,
     pub scenario: SoakScenario,
     pub duration_secs: Option<u64>,
+    pub dump: Option<std::path::PathBuf>,
+    pub prom_url: Option<String>,
 }
 
 pub async fn run<I, S>(args: I) -> Result<()>
@@ -38,7 +42,15 @@ where
             let duration_secs = args
                 .duration_secs
                 .unwrap_or_else(|| SoakSpec::default_duration_secs(args.env));
-            let spec = SoakSpec::new(args.env, args.scenario, Duration::from_secs(duration_secs));
+            let spec = SoakSpec {
+                dump: args.dump,
+                prom_url: args.prom_url,
+                ..SoakSpec::new(
+                    args.env,
+                    args.scenario,
+                    Duration::from_secs(duration_secs),
+                )
+            };
             run_soak(spec).await
         }
         LongrunCommand::Bench => {
@@ -74,6 +86,8 @@ fn parse_soak(args: &[String]) -> Result<SoakArgs> {
     let mut duration_secs = None;
     let mut kill_after = 1u64;
     let mut kill_after_set = false;
+    let mut dump = None;
+    let mut prom_url = None;
     let mut i = 0;
     while i < args.len() {
         let arg = args[i].as_str();
@@ -113,6 +127,12 @@ fn parse_soak(args: &[String]) -> Result<SoakArgs> {
                 kill_after = n;
                 kill_after_set = true;
             }
+            "--dump" => {
+                dump = Some(std::path::PathBuf::from(take_value(flag, inline, args, &mut i)?));
+            }
+            "--prom-url" => {
+                prom_url = Some(take_value(flag, inline, args, &mut i)?);
+            }
             other => bail!("unknown soak flag `{other}`\n{USAGE}"),
         }
         i += 1;
@@ -131,6 +151,8 @@ fn parse_soak(args: &[String]) -> Result<SoakArgs> {
         env,
         scenario,
         duration_secs,
+        dump,
+        prom_url,
     })
 }
 
@@ -156,17 +178,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_soak_kill_kube() {
+    fn parse_soak_kill_dump() {
         let LongrunCommand::Soak(args) = parse_args([
             "soak",
-            "--env",
-            "kube",
-            "--scenario",
-            "kill",
-            "--duration-secs",
-            "3600",
-            "--kill-after-checkpoint",
-            "2",
+            "--env=kube",
+            "--scenario=kill",
+            "--duration-secs=3600",
+            "--kill-after-checkpoint=2",
+            "--dump=/tmp/soak",
+            "--prom-url=http://127.0.0.1:9090",
         ])
         .unwrap() else {
             panic!("expected soak");
@@ -179,6 +199,8 @@ mod tests {
             }
         );
         assert_eq!(args.duration_secs, Some(3600));
+        assert_eq!(args.dump.as_deref().unwrap().to_str().unwrap(), "/tmp/soak");
+        assert_eq!(args.prom_url.as_deref(), Some("http://127.0.0.1:9090"));
     }
 
     #[test]

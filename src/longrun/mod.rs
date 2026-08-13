@@ -4,8 +4,10 @@
 //! [`flink::FlinkCluster`] later, not a wrapper around Volga.
 
 pub mod cli;
+pub mod dump;
 pub mod flink;
 pub mod job;
+pub mod oracles;
 pub mod run;
 pub mod spec;
 

@@ -1,0 +1,262 @@
+use serde::{Deserialize, Serialize};
+
+/// One Prom matrix point.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Sample {
+    pub ts: f64,
+    pub value: f64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PromQueryRange {
+    pub status: String,
+    #[serde(default)]
+    pub data: PromData,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct PromData {
+    #[serde(default, rename = "resultType")]
+    pub result_type: String,
+    #[serde(default)]
+    pub result: Vec<PromSeries>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PromSeries {
+    #[serde(default)]
+    pub metric: serde_json::Map<String, serde_json::Value>,
+    #[serde(default)]
+    pub values: Vec<(f64, String)>,
+}
+
+impl PromQueryRange {
+    pub fn samples(&self) -> Vec<Sample> {
+        let mut out = Vec::new();
+        for series in &self.data.result {
+            for (ts, value) in &series.values {
+                if let Ok(v) = value.parse::<f64>() {
+                    if v.is_finite() {
+                        out.push(Sample { ts: *ts, value: v });
+                    }
+                }
+            }
+        }
+        out.sort_by(|a, b| a.ts.total_cmp(&b.ts));
+        out
+    }
+
+    /// Sum values that share a timestamp (multiple series).
+    pub fn samples_summed(&self) -> Vec<Sample> {
+        let mut by_ts: Vec<(f64, f64)> = Vec::new();
+        for sample in self.samples() {
+            match by_ts.last_mut() {
+                Some((ts, acc)) if (*ts - sample.ts).abs() < 0.001 => *acc += sample.value,
+                _ => by_ts.push((sample.ts, sample.value)),
+            }
+        }
+        by_ts
+            .into_iter()
+            .map(|(ts, value)| Sample { ts, value })
+            .collect()
+    }
+}
+
+/// #238 soak board exprs. Grafana uses `pipeline_id=~"$pipeline"`; dump uses `.*` (all).
+pub fn board_queries() -> &'static [(&'static str, &'static str)] {
+    &[
+        (
+            "checkpoint_completed",
+            concat!(
+                "increase(volga_checkpoint_completed_total",
+                r#"{pipeline_id=~".*"}"#,
+                "[5m])"
+            ),
+        ),
+        (
+            "checkpoint_failed",
+            concat!(
+                "increase(volga_checkpoint_failed_total",
+                r#"{pipeline_id=~".*"}"#,
+                "[5m])"
+            ),
+        ),
+        (
+            "checkpoint_duration_p99",
+            concat!(
+                "histogram_quantile(0.99, sum by (le) (rate(volga_checkpoint_duration_ms_bucket",
+                r#"{pipeline_id=~".*"}"#,
+                "[1m])))"
+            ),
+        ),
+        (
+            "busy_ms_per_s",
+            concat!(
+                "avg by (task_id) (volga_stream_task_busy_time_ms_per_second",
+                r#"{pipeline_id=~".*"}"#,
+                ")"
+            ),
+        ),
+        (
+            "idle_ms_per_s",
+            concat!(
+                "avg by (task_id) (volga_stream_task_idle_time_ms_per_second",
+                r#"{pipeline_id=~".*"}"#,
+                ")"
+            ),
+        ),
+        (
+            "backpressured_ms_per_s",
+            concat!(
+                "avg by (task_id) (volga_stream_task_backpressured_time_ms_per_second",
+                r#"{pipeline_id=~".*"}"#,
+                ")"
+            ),
+        ),
+        (
+            "watermark_lag_p50",
+            concat!(
+                "quantile(0.50, volga_stream_task_watermark_lag_ms",
+                r#"{pipeline_id=~".*"}"#,
+                ")"
+            ),
+        ),
+        (
+            "watermark_lag_p99",
+            concat!(
+                "quantile(0.99, volga_stream_task_watermark_lag_ms",
+                r#"{pipeline_id=~".*"}"#,
+                ")"
+            ),
+        ),
+        (
+            "records_sent_rate",
+            concat!(
+                "sum(rate(volga_stream_task_records_sent_total",
+                r#"{pipeline_id=~".*"}"#,
+                "[1m]))"
+            ),
+        ),
+        (
+            "sink_records_rate",
+            concat!(
+                "sum(rate(volga_sink_records_written_total",
+                r#"{pipeline_id=~".*"}"#,
+                "[1m]))"
+            ),
+        ),
+        (
+            "wo_ingest_p99",
+            concat!(
+                "histogram_quantile(0.99, sum by (le) (rate(volga_wo_ingest_ms_bucket",
+                r#"{pipeline_id=~".*"}"#,
+                "[1m])))"
+            ),
+        ),
+        (
+            "wo_late_dropped_rate",
+            concat!(
+                "sum(rate(volga_wo_late_dropped_rows_total",
+                r#"{pipeline_id=~".*"}"#,
+                "[1m]))"
+            ),
+        ),
+        (
+            "wo_maintain_pruned_rate",
+            concat!(
+                "sum(rate(volga_wo_maintain_pruned_rows_total",
+                r#"{pipeline_id=~".*"}"#,
+                "[1m]))"
+            ),
+        ),
+        (
+            "wo_state_bytes",
+            concat!(
+                "sum(volga_wo_state_raw_bytes",
+                r#"{pipeline_id=~".*"}"#,
+                ") + sum(volga_wo_state_tiles_bytes",
+                r#"{pipeline_id=~".*"}"#,
+                ") + sum(volga_wo_state_triggers_bytes",
+                r#"{pipeline_id=~".*"}"#,
+                ") + sum(volga_wo_state_key_states_bytes",
+                r#"{pipeline_id=~".*"}"#,
+                ")"
+            ),
+        ),
+    ]
+}
+
+pub async fn query_range(
+    client: &reqwest::Client,
+    prom_url: &str,
+    query: &str,
+    start: f64,
+    end: f64,
+    step: &str,
+) -> anyhow::Result<PromQueryRange> {
+    let url = format!("{}/api/v1/query_range", prom_url.trim_end_matches('/'));
+    let resp = client
+        .get(&url)
+        .query(&[
+            ("query", query),
+            ("start", &format!("{start:.3}")),
+            ("end", &format!("{end:.3}")),
+            ("step", step),
+        ])
+        .send()
+        .await?
+        .error_for_status()?;
+    let body: PromQueryRange = resp.json().await?;
+    if body.status != "success" {
+        anyhow::bail!(
+            "prom query_range failed: {}",
+            body.error.unwrap_or_else(|| body.status.clone())
+        );
+    }
+    Ok(body)
+}
+
+pub async fn dump_board_series(
+    prom_url: &str,
+    start: f64,
+    end: f64,
+    step: &str,
+) -> anyhow::Result<serde_json::Value> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?;
+    let mut series = serde_json::Map::new();
+    for (name, query) in board_queries() {
+        let result = query_range(&client, prom_url, query, start, end, step).await?;
+        series.insert(name.to_string(), serde_json::to_value(&result)?);
+    }
+    Ok(serde_json::json!({
+        "prom_url": prom_url,
+        "start": start,
+        "end": end,
+        "step": step,
+        "series": series,
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn board_queries_match_soak_dashboard() {
+        let names: Vec<_> = board_queries().iter().map(|(n, _)| *n).collect();
+        assert!(names.contains(&"wo_late_dropped_rate"));
+        assert!(names.contains(&"wo_maintain_pruned_rate"));
+        assert!(names.contains(&"wo_state_bytes"));
+        assert!(names.contains(&"wo_ingest_p99"));
+        for (_, query) in board_queries() {
+            assert!(
+                query.contains(r#"pipeline_id=~".*""#),
+                "board query missing pipeline_id: {query}"
+            );
+        }
+    }
+}

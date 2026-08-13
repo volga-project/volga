@@ -27,7 +27,7 @@ pub const MULTI_FAILURE_COUNT: usize = 2;
 /// Hang guard only (per attempt `open`); harness finishes via `MasterHandle::stop_sources`.
 const SAFETY_DATAGEN_RUN_FOR_S: f64 = 300.0;
 const DATAGEN_RATE: f32 = 200.0;
-pub(super) const WINDOW_RANGE_MS: i64 = 10_000;
+pub const WINDOW_RANGE_MS: i64 = 10_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckpointWorkload {
