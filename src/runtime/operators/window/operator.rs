@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Result;
-use arrow::array::{RecordBatch, TimestampMillisecondArray};
+use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use futures::{future, TryStreamExt};
@@ -303,6 +303,7 @@ impl OperatorTrait for WindowOperator {
                     let key = keyed_message.key();
                     let input_rows = keyed_message.base.record_batch.num_rows();
                     let state = self.state_ref();
+                    let ingest_started = Instant::now();
                     let dropped = state
                         .insert_batch(
                             key,
@@ -318,6 +319,11 @@ impl OperatorTrait for WindowOperator {
                     self.task_metadata
                         .increment_u64(TASK_METADATA_ROWS_DROPPED_LATE, dropped as u64);
                     if let Some((task_id, labels)) = self.metrics_target() {
+                        metrics::record_ingest_ms(
+                            task_id,
+                            labels,
+                            ingest_started.elapsed().as_secs_f64() * 1000.0,
+                        );
                         metrics::add_late_dropped(task_id, labels, dropped as u64);
                     }
                     OperatorPollResult::Continue
@@ -345,13 +351,6 @@ impl OperatorTrait for WindowOperator {
                                 labels,
                                 started.elapsed().as_secs_f64() * 1000.0,
                             );
-                            if let Some(ts) = batch
-                                .column(self.ts_column_index)
-                                .as_any()
-                                .downcast_ref::<TimestampMillisecondArray>()
-                            {
-                                metrics::record_result_freshness(task_id, labels, ts);
-                            }
                         }
                         batch
                     } else {

@@ -4,10 +4,6 @@
 //! fanout (Prometheus + in-process registry). API snapshots are built by
 //! visiting that registry on poll.
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
-use arrow::array::TimestampMillisecondArray;
-
 use crate::runtime::metrics::{
     collect_task_metric_values, increment_task_counter, record_task_histogram, MetricsLabels,
 };
@@ -22,8 +18,8 @@ pub const METRIC_WO_STATE_TRIGGERS_BYTES: &str = "volga_wo_state_triggers_bytes"
 pub const METRIC_WO_STATE_KEY_STATES_COUNT: &str = "volga_wo_state_key_states_count";
 pub const METRIC_WO_STATE_KEY_STATES_BYTES: &str = "volga_wo_state_key_states_bytes";
 
+pub const METRIC_WO_INGEST_MS: &str = "volga_wo_ingest_ms";
 pub const METRIC_WO_WM_PROCESS_MS: &str = "volga_wo_wm_process_ms";
-pub const METRIC_WO_RESULT_FRESHNESS_MS: &str = "volga_wo_result_freshness_ms";
 pub const METRIC_WO_MAINTAIN_MS: &str = "volga_wo_maintain_ms";
 pub const METRIC_WO_MAINTAIN_PRUNED_ROWS: &str = "volga_wo_maintain_pruned_rows";
 pub const METRIC_WO_LATE_DROPPED_ROWS: &str = "volga_wo_late_dropped_rows";
@@ -64,35 +60,16 @@ pub fn add_pruned(task_id: &str, labels: &MetricsLabels, rows: u64) {
     increment_task_counter(METRIC_WO_MAINTAIN_PRUNED_ROWS, rows, task_id, Some(labels));
 }
 
+pub fn record_ingest_ms(task_id: &str, labels: &MetricsLabels, ms: f64) {
+    record_task_histogram(METRIC_WO_INGEST_MS, ms, task_id, Some(labels));
+}
+
 pub fn record_wm_process_ms(task_id: &str, labels: &MetricsLabels, ms: f64) {
     record_task_histogram(METRIC_WO_WM_PROCESS_MS, ms, task_id, Some(labels));
 }
 
 pub fn record_maintain_ms(task_id: &str, labels: &MetricsLabels, ms: f64) {
     record_task_histogram(METRIC_WO_MAINTAIN_MS, ms, task_id, Some(labels));
-}
-
-/// Max hist samples per emit batch (stride across rows; all rows if shorter).
-const RESULT_FRESHNESS_SAMPLE_COUNT: usize = 16;
-
-/// Record result freshness from a stride sample of the batch (≤16 hist samples).
-pub fn record_result_freshness(task_id: &str, labels: &MetricsLabels, ts: &TimestampMillisecondArray) {
-    let len = ts.len();
-    if len == 0 {
-        return;
-    }
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64;
-    let samples = RESULT_FRESHNESS_SAMPLE_COUNT.min(len);
-    let labels = Some(labels);
-    let values = ts.values();
-    for k in 0..samples {
-        let i = k * len / samples;
-        let freshness = now_ms.saturating_sub(values[i]).max(0) as f64;
-        record_task_histogram(METRIC_WO_RESULT_FRESHNESS_MS, freshness, task_id, labels);
-    }
 }
 
 fn gauge_u64(values: &crate::runtime::metrics::TaskMetricValues, name: &str) -> u64 {
