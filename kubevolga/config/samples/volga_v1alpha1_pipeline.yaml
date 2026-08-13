@@ -67,6 +67,6 @@ spec:
     sink:
       InMemoryStorageGrpc: |
         {
-          "server_addr": "http://volga-test-storage.default.svc.cluster.local:50071"
+          "server_addr": ""
         }
     sql: "SELECT value FROM test_table"

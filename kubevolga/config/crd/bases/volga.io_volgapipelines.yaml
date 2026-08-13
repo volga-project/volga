@@ -97,6 +97,8 @@ spec:
                   type: string
                 masterServiceAddr:
                   type: string
+                storageServiceAddr:
+                  type: string
                 conditions:
                   type: array
                   items:

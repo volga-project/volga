@@ -116,11 +116,42 @@ func (r *PipelineReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		pipelineID = fmt.Sprintf("%s-%s", vp.Namespace, vp.Name)
 	}
 	if err := validatePipelineSpec(vp.Spec.PipelineSpec); err != nil {
-		if statusErr := r.updatePipelineStatus(ctx, req.NamespacedName, pipelineID, "", "InvalidSpec"); statusErr != nil {
+		if statusErr := r.updatePipelineStatus(ctx, req.NamespacedName, pipelineID, "", "", "InvalidSpec"); statusErr != nil {
 			return ctrl.Result{}, statusErr
 		}
 		logger.Error(err, "invalid pipelineSpec; skipping resource reconciliation")
 		return ctrl.Result{}, nil
+	}
+
+	sink, err := parseInMemorySink(vp.Spec.PipelineSpec)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	ownedStorageAddr := ownedStorageHTTPAddr(vp.Namespace, vp.Name)
+	ownsStore := ownsInMemoryStore(sink, ownedStorageAddr)
+	storageLabels := cloneAndAdd(baseLabels, map[string]string{"volga.io/component": "storage"})
+	if err := r.reconcileInMemoryStore(
+		ctx,
+		&vp,
+		ownsStore,
+		volgaImage,
+		masterPullPolicy,
+		masterResources,
+		storageLabels,
+	); err != nil {
+		return ctrl.Result{}, err
+	}
+	if ownsStore && sink.addr == "" {
+		filled, err := r.injectOwnedStorageAddr(ctx, req.NamespacedName, ownedStorageAddr)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		vp.Spec.PipelineSpec = filled
+		sink.addr = ownedStorageAddr
+	}
+	storageServiceAddr := ""
+	if ownsStore {
+		storageServiceAddr = ownedStorageAddr
 	}
 
 	if err := r.reconcileMasterService(ctx, &vp, masterServiceName, masterLabels); err != nil {
@@ -174,14 +205,19 @@ func (r *PipelineReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		}
 		var sts appsv1.StatefulSet
 		if err := r.Get(ctx, client.ObjectKey{Namespace: vp.Namespace, Name: fmt.Sprintf("%s-worker", vp.Name)}, &sts); err == nil {
-			if masterPod.Status.Phase == corev1.PodRunning && sts.Status.ReadyReplicas == replicas {
+			if masterPod.Status.Phase == corev1.PodRunning &&
+				sts.Status.ReadyReplicas == replicas &&
+				r.storageReady(ctx, vp.Namespace, vp.Name, ownsStore) {
 				phase = "Running"
 			}
 		}
 	}
 
-	if vp.Status.MasterServiceAddr != masterServiceAddr || vp.Status.Phase != phase || vp.Status.PipelineID != pipelineID {
-		if err := r.updatePipelineStatus(ctx, req.NamespacedName, pipelineID, masterServiceAddr, phase); err != nil {
+	if vp.Status.MasterServiceAddr != masterServiceAddr ||
+		vp.Status.StorageServiceAddr != storageServiceAddr ||
+		vp.Status.Phase != phase ||
+		vp.Status.PipelineID != pipelineID {
+		if err := r.updatePipelineStatus(ctx, req.NamespacedName, pipelineID, masterServiceAddr, storageServiceAddr, phase); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
@@ -247,6 +283,154 @@ func (r *PipelineReconciler) reconcileWorkerHeadlessService(
 		return err
 	})
 	return err
+}
+
+func (r *PipelineReconciler) reconcileInMemoryStore(
+	ctx context.Context,
+	vp *v1alpha1.VolgaPipeline,
+	owns bool,
+	image string,
+	imagePullPolicy corev1.PullPolicy,
+	resources corev1.ResourceRequirements,
+	labels map[string]string,
+) error {
+	name := storageResourceName(vp.Name)
+	if !owns {
+		return r.deleteOwnedStorage(ctx, vp.Namespace, name)
+	}
+	if err := r.reconcileStorageService(ctx, vp, name, labels); err != nil {
+		return err
+	}
+	return r.reconcileStorageDeployment(ctx, vp, name, image, imagePullPolicy, resources, labels)
+}
+
+func (r *PipelineReconciler) reconcileStorageService(
+	ctx context.Context,
+	vp *v1alpha1.VolgaPipeline,
+	name string,
+	labels map[string]string,
+) error {
+	var svc corev1.Service
+	svc.Namespace = vp.Namespace
+	svc.Name = name
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		_, err := controllerutil.CreateOrUpdate(ctx, r.Client, &svc, func() error {
+			if err := controllerutil.SetControllerReference(vp, &svc, r.Scheme); err != nil {
+				return err
+			}
+			svc.Labels = labels
+			svc.Spec.Selector = labels
+			svc.Spec.Ports = []corev1.ServicePort{{
+				Name: "grpc",
+				Port: storagePort,
+			}}
+			return nil
+		})
+		return err
+	})
+}
+
+func (r *PipelineReconciler) reconcileStorageDeployment(
+	ctx context.Context,
+	vp *v1alpha1.VolgaPipeline,
+	name string,
+	image string,
+	imagePullPolicy corev1.PullPolicy,
+	resources corev1.ResourceRequirements,
+	labels map[string]string,
+) error {
+	var deploy appsv1.Deployment
+	deploy.Namespace = vp.Namespace
+	deploy.Name = name
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		_, err := controllerutil.CreateOrUpdate(ctx, r.Client, &deploy, func() error {
+			if err := controllerutil.SetControllerReference(vp, &deploy, r.Scheme); err != nil {
+				return err
+			}
+			deploy.Labels = labels
+			deploy.Spec.Replicas = ptr.To(int32(1))
+			deploy.Spec.Selector = &metav1.LabelSelector{MatchLabels: labels}
+			deploy.Spec.Template.ObjectMeta.Labels = labels
+			deploy.Spec.Template.Spec.Containers = []corev1.Container{{
+				Name:            "storage",
+				Image:           image,
+				ImagePullPolicy: imagePullPolicy,
+				Resources:       cloneResourceRequirements(resources),
+				Command:         []string{"volga-test-storage"},
+				Env: []corev1.EnvVar{{
+					Name:  "VOLGA_TEST_STORAGE_BIND_ADDR",
+					Value: "0.0.0.0:" + strconv.FormatInt(int64(storagePort), 10),
+				}},
+				Ports: []corev1.ContainerPort{{
+					ContainerPort: storagePort,
+					Name:          "grpc",
+				}},
+			}}
+			applyPodPlacement(&deploy.Spec.Template.Spec, vp.Spec.Master)
+			return nil
+		})
+		return err
+	})
+}
+
+func (r *PipelineReconciler) deleteOwnedStorage(ctx context.Context, namespace, name string) error {
+	deploy := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name},
+	}
+	if err := r.Delete(ctx, deploy); err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+	svc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name},
+	}
+	if err := r.Delete(ctx, svc); err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+	return nil
+}
+
+func (r *PipelineReconciler) injectOwnedStorageAddr(
+	ctx context.Context,
+	key client.ObjectKey,
+	addr string,
+) (json.RawMessage, error) {
+	var filled json.RawMessage
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var latest v1alpha1.VolgaPipeline
+		if err := r.Get(ctx, key, &latest); err != nil {
+			return err
+		}
+		sink, err := parseInMemorySink(latest.Spec.PipelineSpec)
+		if err != nil {
+			return err
+		}
+		if sink.present && sink.addr != "" {
+			filled = latest.Spec.PipelineSpec
+			return nil
+		}
+		updated, err := withInMemorySinkAddr(latest.Spec.PipelineSpec, addr)
+		if err != nil {
+			return err
+		}
+		latest.Spec.PipelineSpec = updated
+		if err := r.Update(ctx, &latest); err != nil {
+			return err
+		}
+		filled = updated
+		return nil
+	})
+	return filled, err
+}
+
+func (r *PipelineReconciler) storageReady(ctx context.Context, namespace, pipelineName string, owns bool) bool {
+	if !owns {
+		return true
+	}
+	var deploy appsv1.Deployment
+	if err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: storageResourceName(pipelineName)}, &deploy); err != nil {
+		return false
+	}
+	return deploy.Status.ReadyReplicas >= 1
 }
 
 func (r *PipelineReconciler) reconcileMasterPod(
@@ -534,6 +718,7 @@ func (r *PipelineReconciler) updatePipelineStatus(
 	key client.ObjectKey,
 	pipelineID string,
 	masterServiceAddr string,
+	storageServiceAddr string,
 	phase string,
 ) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -543,6 +728,7 @@ func (r *PipelineReconciler) updatePipelineStatus(
 		}
 		latest.Status.PipelineID = pipelineID
 		latest.Status.MasterServiceAddr = masterServiceAddr
+		latest.Status.StorageServiceAddr = storageServiceAddr
 		latest.Status.Phase = phase
 		return r.Status().Update(ctx, &latest)
 	})
@@ -600,6 +786,7 @@ func cloneResourceRequirements(in corev1.ResourceRequirements) corev1.ResourceRe
 func (r *PipelineReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.VolgaPipeline{}).
+		Owns(&appsv1.Deployment{}).
 		Owns(&appsv1.StatefulSet{}).
 		Owns(&corev1.Pod{}).
 		Owns(&corev1.Service{}).

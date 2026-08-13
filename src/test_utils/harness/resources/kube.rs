@@ -151,18 +151,6 @@ impl ClusterBackend for KubeCluster {
 
 impl KubeClusterResources {
     pub async fn launch(launch: PipelineLaunchSpec) -> Result<Self> {
-        let needs_storage = super::pipeline_needs_in_memory_store(&launch.pipeline);
-        let (storage_port_forward, storage_endpoint) = if needs_storage {
-            start_storage()?;
-            let storage_port = gen_unique_grpc_port();
-            let storage_port_forward = start_storage_port_forward(storage_port)?;
-            let storage_endpoint = format!("http://127.0.0.1:{storage_port}");
-            wait_for_local_port(storage_port, Duration::from_secs(30))?;
-            wait_for_empty_storage(&storage_endpoint).await?;
-            (Some(storage_port_forward), Some(storage_endpoint))
-        } else {
-            (None, None)
-        };
         let pipeline_name = format!("kube-harness-{}", Uuid::new_v4().simple());
         let manifest_path = write_pipeline_manifest(
             &pipeline_name,
@@ -173,6 +161,11 @@ impl KubeClusterResources {
         )?;
         kubectl(&["apply", "-f", manifest_path.to_str().unwrap()])?;
         wait_for_pipeline(&pipeline_name)?;
+        let storage_port = gen_unique_grpc_port();
+        let storage_port_forward = start_storage_port_forward(&pipeline_name, storage_port)?;
+        let storage_endpoint = format!("http://127.0.0.1:{storage_port}");
+        wait_for_local_port(storage_port, Duration::from_secs(30))?;
+        wait_for_empty_storage(&storage_endpoint).await?;
         let master_port = gen_unique_grpc_port();
         let master_port_forward = start_master_port_forward(&pipeline_name, master_port)?;
         wait_for_local_port(master_port, Duration::from_secs(30))?;
@@ -285,30 +278,6 @@ async fn wait_for_empty_storage(endpoint: &str) -> Result<()> {
     }
 }
 
-fn start_storage() -> Result<()> {
-    let manifest_dir =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("kubevolga/config/test-storage");
-    kubectl(&[
-        "-n",
-        "default",
-        "delete",
-        "deployment/volga-test-storage",
-        "--ignore-not-found=true",
-        "--wait=true",
-    ])?;
-    wait_for_no_pods("app.kubernetes.io/name=volga-test-storage")?;
-    kubectl(&["apply", "-k", manifest_dir.to_str().unwrap()])?;
-    kubectl(&[
-        "-n",
-        "default",
-        "rollout",
-        "status",
-        "deployment/volga-test-storage",
-        "--timeout=120s",
-    ])?;
-    Ok(())
-}
-
 fn write_pipeline_manifest(
     pipeline_name: &str,
     mut pipeline: PipelineSpec,
@@ -316,12 +285,8 @@ fn write_pipeline_manifest(
     kube_worker_health_poll: bool,
     runtime_consts_profile: crate::runtime::consts::RuntimeConstsProfile,
 ) -> Result<PathBuf> {
-    if super::pipeline_needs_in_memory_store(&pipeline) {
-        super::install_in_memory_sink(
-            &mut pipeline,
-            "http://volga-test-storage.default.svc.cluster.local:50071",
-        );
-    }
+    // Operator creates `{name}-storage`; get_spec fills the DNS in memory only.
+    super::install_in_memory_sink(&mut pipeline, "");
     let sample_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("kubevolga/config/samples/volga_v1alpha1_pipeline.yaml");
     let mut manifest: Value = serde_yaml::from_str(&fs::read_to_string(sample_path)?)?;
@@ -402,38 +367,13 @@ fn wait_for_pipeline_deleted(pipeline_name: &str) -> Result<()> {
     }
 }
 
-fn wait_for_no_pods(label: &str) -> Result<()> {
-    let start = std::time::Instant::now();
-    loop {
-        let pods = kubectl(&[
-            "-n",
-            "default",
-            "get",
-            "pods",
-            "-l",
-            label,
-            "-o",
-            "jsonpath={.items[*].metadata.name}",
-        ])?;
-        if pods.trim().is_empty() {
-            return Ok(());
-        }
-        if start.elapsed() > Duration::from_secs(120) {
-            return Err(anyhow!(
-                "timeout waiting for pods matching {label} to terminate"
-            ));
-        }
-        std::thread::sleep(Duration::from_secs(1));
-    }
-}
-
-fn start_storage_port_forward(local_port: u16) -> Result<Child> {
+fn start_storage_port_forward(pipeline_name: &str, local_port: u16) -> Result<Child> {
     kubectl_command()
         .args([
             "-n",
             "default",
             "port-forward",
-            "svc/volga-test-storage",
+            &format!("svc/{pipeline_name}-storage"),
             &format!("{local_port}:50071"),
         ])
         .stdout(Stdio::null())
