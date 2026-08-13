@@ -17,6 +17,16 @@ spec:
         app.kubernetes.io/component: operator
     spec:
       serviceAccountName: kubevolga-operator
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: volga.io/role
+                    operator: In
+                    values:
+                      - infra
       containers:
         - name: operator
           image: kubevolga:dev

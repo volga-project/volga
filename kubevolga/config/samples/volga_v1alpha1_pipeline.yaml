@@ -9,6 +9,8 @@ spec:
   image: volga:latest
   imagePullPolicy: IfNotPresent
   master:
+    nodeSelector:
+      volga.io/role: infra
     resources:
       requests:
         cpu: "500m"
@@ -17,6 +19,14 @@ spec:
         cpu: "2"
         memory: "2Gi"
   worker:
+    # Required hostname anti-affinity is omitted so CI (1 volga-worker node) can pack replicas.
+    nodeSelector:
+      volga.io/role: worker
+    tolerations:
+      - key: volga.io/role
+        operator: Equal
+        value: worker
+        effect: NoSchedule
     resources:
       requests:
         cpu: "500m"

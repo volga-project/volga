@@ -307,6 +307,7 @@ func (r *PipelineReconciler) reconcileMasterPod(
 				}},
 			},
 		}
+		applyPodPlacement(&create.Spec, vp.Spec.Master)
 		if err := controllerutil.SetControllerReference(vp, &create, r.Scheme); err != nil {
 			return err
 		}
@@ -369,6 +370,7 @@ func (r *PipelineReconciler) reconcileWorkerStatefulSet(
 					},
 				},
 			}}
+			applyPodPlacement(&sts.Spec.Template.Spec, vp.Spec.Worker)
 			return nil
 		})
 		return err
@@ -526,6 +528,13 @@ func (r *PipelineReconciler) updatePipelineStatus(
 		latest.Status.Phase = phase
 		return r.Status().Update(ctx, &latest)
 	})
+}
+
+func applyPodPlacement(spec *corev1.PodSpec, placement v1alpha1.VolgaPodSpec) {
+	copied := placement.DeepCopy()
+	spec.NodeSelector = copied.NodeSelector
+	spec.Tolerations = copied.Tolerations
+	spec.Affinity = copied.Affinity
 }
 
 func resolvePullPolicy(global corev1.PullPolicy, component corev1.PullPolicy) corev1.PullPolicy {

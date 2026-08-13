@@ -1,7 +1,18 @@
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
-name: test-cluster
+# 1 control-plane + infra + 1 volga-worker (CI contract). CPU is still shared.
+# Labels/taints are also applied by scripts/kube-test-env after create.
 nodes:
   - role: control-plane
   - role: worker
+    labels:
+      volga.io/role: infra
   - role: worker
+    labels:
+      volga.io/role: worker
+    kubeadmConfigPatches:
+      - |
+        kind: JoinConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            register-with-taints: "volga.io/role=worker:NoSchedule"
