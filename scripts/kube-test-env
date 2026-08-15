@@ -23,42 +23,6 @@ kubectl_test() {
   kubectl --context "$CONTEXT" "$@"
 }
 
-# First extra node → infra (no worker taint). Remaining extras → volga-worker + NoSchedule.
-# Control-plane is left unlabeled. Needs ≥1 extra node for infra; ≥2 for worker isolation.
-apply_volga_node_roles() {
-  local workers=()
-  local node
-  while IFS= read -r node; do
-    if [[ -n "$node" ]]; then
-      workers+=("$node")
-    fi
-  done < <(
-    kubectl_test get nodes \
-      -l '!node-role.kubernetes.io/control-plane' \
-      -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'
-  )
-
-  if [[ ${#workers[@]} -eq 0 ]]; then
-    echo "Kind cluster $CLUSTER_NAME has no extra worker nodes; skip volga.io/role labels" >&2
-    echo "recreate with: scripts/kube-test-env destroy && scripts/kube-test-env setup" >&2
-    return
-  fi
-
-  kubectl_test label --overwrite "node/${workers[0]}" volga.io/role=infra
-  kubectl_test taint "node/${workers[0]}" volga.io/role=worker:NoSchedule- >/dev/null 2>&1 || true
-
-  local i
-  for ((i = 1; i < ${#workers[@]}; i++)); do
-    kubectl_test label --overwrite "node/${workers[$i]}" volga.io/role=worker
-    kubectl_test taint --overwrite "node/${workers[$i]}" volga.io/role=worker=worker:NoSchedule
-  done
-
-  if [[ ${#workers[@]} -lt 2 ]]; then
-    echo "Kind cluster $CLUSTER_NAME has no volga-worker node; worker pods with nodeSelector will stay Pending" >&2
-    echo "recreate with: scripts/kube-test-env destroy && scripts/kube-test-env setup" >&2
-  fi
-}
-
 cleanup_resources() {
   if ! cluster_exists; then
     return
@@ -87,10 +51,9 @@ setup() {
   if cluster_exists; then
     echo "using existing Kind cluster: $CLUSTER_NAME"
   else
-    kind create cluster --name "$CLUSTER_NAME" --config "$ROOT/kubevolga/hack/kind-multi.yaml"
+    kind create cluster --name "$CLUSTER_NAME"
   fi
-  kubectl_test wait --for=condition=Ready nodes --all --timeout=180s
-  apply_volga_node_roles
+  kubectl_test wait --for=condition=Ready nodes --all --timeout=120s
 
   # Shared Buildx/GHA cache with the docker job (scope=volga-image).
   if [[ "$REBUILD" == "--rebuild" ]]; then
