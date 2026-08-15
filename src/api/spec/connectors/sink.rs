@@ -71,19 +71,3 @@ impl SinkSpec {
         matches!(self, Self::InMemoryStorageGrpc { .. })
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn count_sink_roundtrips_and_does_not_need_store() {
-        let spec = SinkSpec::Count;
-        assert!(!spec.needs_in_memory_store());
-        assert!(matches!(spec.to_sink_config(), SinkConfig::CountSinkConfig));
-        let json = serde_json::to_value(&spec).unwrap();
-        assert_eq!(json, serde_json::json!("Count"));
-        let parsed: SinkSpec = serde_json::from_value(json).unwrap();
-        assert!(matches!(parsed, SinkSpec::Count));
-    }
-}

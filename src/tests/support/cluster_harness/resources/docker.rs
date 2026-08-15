@@ -15,11 +15,11 @@ use crate::runtime::master::server::master_service::GetLifecycleEventsRequest;
 use crate::runtime::master::LifecycleEvent;
 use crate::runtime::master::LifecycleEventRecord;
 use crate::runtime::observability::{PipelineSnapshot, StreamTaskStatus};
-use crate::storage::InMemoryStorageClient;
-use crate::storage::InMemoryStorageSnapshot;
 use crate::tests::support::cluster_harness::backend::ClusterBackend;
-use crate::tests::support::cluster_harness::FaultAction;
 use crate::tests::support::cluster_harness::PipelineLaunchSpec;
+use crate::tests::support::cluster_harness::FaultAction;
+use crate::storage::InMemoryStorageSnapshot;
+use crate::storage::InMemoryStorageClient;
 use async_trait::async_trait;
 
 struct DockerResources {
@@ -160,7 +160,10 @@ impl ClusterBackend for DockerCluster {
             .await
     }
 
-    async fn lifecycle_events_since(&mut self, sequence: u64) -> Result<Vec<LifecycleEventRecord>> {
+    async fn lifecycle_events_since(
+        &mut self,
+        sequence: u64,
+    ) -> Result<Vec<LifecycleEventRecord>> {
         let resources = self
             .resources
             .as_ref()
@@ -192,10 +195,7 @@ impl ClusterBackend for DockerCluster {
     }
 
     async fn apply_fault(&mut self, fault: FaultAction) -> Result<()> {
-        let resources = self
-            .resources
-            .as_ref()
-            .context("docker cluster is not launched")?;
+        let resources = self.resources.as_ref().context("docker cluster is not launched")?;
         match fault {
             FaultAction::KillWorker { worker_id, mode: _ } => resources.kill(&worker_id),
             FaultAction::RestartWorker { worker_id } => resources.restart(&worker_id),
@@ -240,7 +240,10 @@ impl DockerClusterResources {
             if response.has_snapshot {
                 let snapshot: PipelineSnapshot = bincode::deserialize(&response.snapshot_bytes)?;
                 let all_done = snapshot.worker_states.values().all(|worker| {
-                    worker.all_tasks_in(&[StreamTaskStatus::Finished, StreamTaskStatus::Closed])
+                    worker.all_tasks_in(&[
+                        StreamTaskStatus::Finished,
+                        StreamTaskStatus::Closed,
+                    ])
                 });
                 if all_done && snapshot.worker_states.len() == self.expected_workers {
                     break;
@@ -289,7 +292,10 @@ async fn connect_master(port: u16) -> Result<MasterServiceClient<tonic::transpor
         .map_err(|error| anyhow!("failed to connect to master: {error}"))
 }
 
-async fn fetch_lifecycle_events(port: u16, sequence: u64) -> Result<Vec<LifecycleEventRecord>> {
+async fn fetch_lifecycle_events(
+    port: u16,
+    sequence: u64,
+) -> Result<Vec<LifecycleEventRecord>> {
     let mut client = connect_master(port).await?;
     client
         .get_lifecycle_events(tonic::Request::new(GetLifecycleEventsRequest {
@@ -300,8 +306,8 @@ async fn fetch_lifecycle_events(port: u16, sequence: u64) -> Result<Vec<Lifecycl
         .events
         .into_iter()
         .map(|record| {
-            let event: LifecycleEvent =
-                bincode::deserialize(&record.event_bytes).with_context(|| {
+            let event: LifecycleEvent = bincode::deserialize(&record.event_bytes)
+                .with_context(|| {
                     format!(
                         "failed to decode lifecycle event sequence={} bytes={}",
                         record.sequence,
