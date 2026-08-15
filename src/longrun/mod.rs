@@ -12,4 +12,4 @@ pub mod run;
 pub mod spec;
 
 pub use run::run_soak;
-pub use spec::{SoakOracleConfig, SoakScenario, SoakSpec};
+pub use spec::{soak_lag_p99_bound, SoakOracleConfig, SoakScenario, SoakSpec};
