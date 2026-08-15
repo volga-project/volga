@@ -36,7 +36,7 @@ Conventions from the metrics stack (keep):
 | G dump + oracles | 7 | Longrun | [#239](https://github.com/volga-project/volga/pull/239) |
 | H operator-owned InMemory store | — | Operator | [#240](https://github.com/volga-project/volga/pull/240) |
 | I `state.checkpoint` on `PipelineSpec` | — | Engine | follow-up (sibling of longrun; base master) |
-| J soak `--config` YAML | — | Longrun | follow-up on **G** |
+| J soak `--config` YAML | — | Longrun | [#241](https://github.com/volga-project/volga/pull/241) |
 
 A, B, C, H have no mutual dependency — land whenever. Stack longrun **D → E → G → J**. F needs A + C, not the binary. **I** is job API, not soak — do not stack under E.
 
