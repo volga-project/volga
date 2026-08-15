@@ -2,12 +2,14 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 
-use crate::runtime::consts::{runtime_consts, MASTER_CHECKPOINT_INTERVAL, MASTER_CHECKPOINT_TIMEOUT};
+use crate::api::CheckpointSpec;
 use crate::runtime::master::LifecycleEvent;
 use crate::runtime::master::LifecycleEventRecord;
 
 use super::dump::{PromQueryRange, Sample};
-use super::spec::SoakOracleConfig;
+use super::spec::{
+    resolved_checkpoint_interval, resolved_checkpoint_timeout, SoakOracleConfig,
+};
 
 #[derive(Clone, Debug)]
 pub struct KillWindow {
@@ -65,20 +67,13 @@ fn parse_named(
     Ok(range.samples_summed())
 }
 
-fn checkpoint_interval() -> Duration {
-    runtime_consts().duration(MASTER_CHECKPOINT_INTERVAL)
-}
-
-fn checkpoint_timeout() -> Duration {
-    runtime_consts().duration(MASTER_CHECKPOINT_TIMEOUT)
-}
-
 /// Fail the process if any oracle fails. Prom checks are skipped when `prom` is None.
 pub fn evaluate(
     oracles: &SoakOracleConfig,
     events: &[LifecycleEventRecord],
     kill: Option<&KillWindow>,
     prom: Option<&PromSeriesSet>,
+    checkpoint: &CheckpointSpec,
 ) -> Result<()> {
     let mut failures = Vec::new();
     if let Err(err) = unexpected_fatal(oracles, events, kill) {
@@ -91,7 +86,7 @@ pub fn evaluate(
         if let Err(err) = lag_p99(oracles, prom) {
             failures.push(err.to_string());
         }
-        if let Err(err) = checkpoint_health(oracles, prom, kill) {
+        if let Err(err) = checkpoint_health(oracles, prom, kill, checkpoint) {
             failures.push(err.to_string());
         }
         if let Some(kill) = kill {
@@ -209,9 +204,10 @@ fn checkpoint_health(
     oracles: &SoakOracleConfig,
     prom: &PromSeriesSet,
     kill: Option<&KillWindow>,
+    checkpoint: &CheckpointSpec,
 ) -> Result<()> {
-    let interval = checkpoint_interval();
-    let timeout = checkpoint_timeout();
+    let interval = resolved_checkpoint_interval(checkpoint);
+    let timeout = resolved_checkpoint_timeout(checkpoint);
     let silence = interval * oracles.checkpoint_silence_intervals.max(1);
     let completed = &prom.checkpoint_completed;
     if completed.len() < 2 {
@@ -429,7 +425,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        assert!(checkpoint_health(&cfg(), &prom, None).is_err());
+        assert!(checkpoint_health(&cfg(), &prom, None, &CheckpointSpec::default()).is_err());
     }
 
     #[test]
@@ -442,7 +438,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        assert!(checkpoint_health(&cfg(), &prom, None).is_err());
+        assert!(checkpoint_health(&cfg(), &prom, None, &CheckpointSpec::default()).is_err());
     }
 
     #[test]
@@ -482,6 +478,6 @@ mod tests {
                 detail: "boom".into(),
             },
         }];
-        assert!(evaluate(&cfg(), &events, None, None).is_err());
+        assert!(evaluate(&cfg(), &events, None, None, &CheckpointSpec::default()).is_err());
     }
 }

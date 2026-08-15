@@ -61,7 +61,9 @@ impl ExecutionAttempt {
             .run_health_poll(worker_ids, self.failure_tx.clone());
 
         let poll_interval = runtime_consts().duration(MASTER_STATE_POLL_INTERVAL);
-        let checkpoint_interval = runtime_consts().duration(MASTER_CHECKPOINT_INTERVAL);
+        let checkpoint_interval = self.pipeline.spec.state.checkpoint.interval_or(
+            runtime_consts().duration(MASTER_CHECKPOINT_INTERVAL),
+        );
 
         let run_loop = tokio::spawn(async move {
             let mut poll = interval_at(Instant::now() + poll_interval, poll_interval);
@@ -146,7 +148,9 @@ impl ExecutionAttempt {
             return;
         }
 
-        let checkpoint_timeout = runtime_consts().duration(MASTER_CHECKPOINT_TIMEOUT);
+        let checkpoint_timeout = self.pipeline.spec.state.checkpoint.timeout_or(
+            runtime_consts().duration(MASTER_CHECKPOINT_TIMEOUT),
+        );
         let draining = self.phase == AttemptPhase::Draining;
         if !state_poll.failures.is_empty() {
             for (worker_id, error) in &state_poll.failures {

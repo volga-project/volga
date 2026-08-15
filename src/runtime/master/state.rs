@@ -255,7 +255,9 @@ impl MasterState {
                 task_index,
             })
             .collect();
-        let retention = runtime_consts().u64(MASTER_CHECKPOINT_RETENTION) as usize;
+        let retention = config.spec.state.checkpoint.retention_or(
+            runtime_consts().u64(MASTER_CHECKPOINT_RETENTION),
+        ) as usize;
         self.checkpoints
             .ask(ConfigureCheckpoints {
                 pipeline_id,

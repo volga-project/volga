@@ -4,10 +4,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
 
-use crate::runtime::consts::{
-    init_runtime_consts_profile, runtime_consts, RuntimeConstsProfile, MASTER_CHECKPOINT_INTERVAL,
-    MASTER_CHECKPOINT_TIMEOUT,
-};
+use crate::api::CheckpointSpec;
+use crate::runtime::consts::{init_runtime_consts_profile, RuntimeConstsProfile};
 use crate::runtime::master::LifecycleEvent;
 use crate::test_utils::checkpoint::{
     wait_for_checkpoint_completed, wait_for_kill_restore, wait_until_attempt0_running,
@@ -18,7 +16,9 @@ use crate::test_utils::recovery::RecoveryTimeouts;
 
 use super::dump::dump_board_series;
 use super::oracles::{self, KillWindow, PromSeriesSet};
-use super::spec::{SoakScenario, SoakSpec};
+use super::spec::{
+    resolved_checkpoint_interval, resolved_checkpoint_timeout, SoakScenario, SoakSpec,
+};
 
 const PROM_STEP: &str = "5s";
 
@@ -28,14 +28,13 @@ struct ScenarioOutcome {
     started_unix: f64,
 }
 
-fn checkpoint_wait() -> Duration {
-    let interval = runtime_consts().duration(MASTER_CHECKPOINT_INTERVAL);
+fn checkpoint_wait(checkpoint: &CheckpointSpec) -> Duration {
+    let interval = resolved_checkpoint_interval(checkpoint);
     interval * 3 + interval
 }
 
-fn checkpoint_idle() -> Duration {
-    runtime_consts().duration(MASTER_CHECKPOINT_TIMEOUT)
-        + runtime_consts().duration(MASTER_CHECKPOINT_INTERVAL)
+fn checkpoint_idle(checkpoint: &CheckpointSpec) -> Duration {
+    resolved_checkpoint_timeout(checkpoint) + resolved_checkpoint_interval(checkpoint)
 }
 
 pub async fn run_soak(spec: SoakSpec) -> Result<()> {
@@ -55,7 +54,14 @@ pub async fn run_soak(spec: SoakSpec) -> Result<()> {
     let started_unix = unix_now();
     let result = async {
         let scenario_result = tokio::select! {
-            result = run_scenario(&cluster, env, scenario, duration, started_unix) => result,
+            result = run_scenario(
+                &cluster,
+                env,
+                scenario,
+                duration,
+                started_unix,
+                &spec.launch.pipeline.state.checkpoint,
+            ) => result,
             failed = watch_pipeline_failed(&cluster) => Err(failed),
             _ = shutdown_signal() => {
                 println!("[volga-longrun] interrupt, dumping then shutting down");
@@ -94,6 +100,7 @@ async fn run_scenario(
     scenario: SoakScenario,
     duration: Duration,
     started_unix: f64,
+    checkpoint: &CheckpointSpec,
 ) -> Result<ScenarioOutcome> {
     let timeouts = RecoveryTimeouts::for_env(env);
     let mut cursor = 0u64;
@@ -106,7 +113,14 @@ async fn run_scenario(
     let kill = match scenario {
         SoakScenario::Steady => None,
         SoakScenario::KillAfterCheckpoint { after_checkpoint } => Some(
-            run_kill_after_checkpoint(cluster, &timeouts, &mut cursor, after_checkpoint).await?,
+            run_kill_after_checkpoint(
+                cluster,
+                &timeouts,
+                &mut cursor,
+                after_checkpoint,
+                checkpoint,
+            )
+            .await?,
         ),
     };
 
@@ -144,6 +158,7 @@ async fn run_kill_after_checkpoint(
     timeouts: &RecoveryTimeouts,
     cursor: &mut u64,
     after_checkpoint: u64,
+    checkpoint: &CheckpointSpec,
 ) -> Result<KillWindow> {
     if after_checkpoint < 1 {
         return Err(anyhow!("kill-after-checkpoint must be >= 1"));
@@ -152,11 +167,11 @@ async fn run_kill_after_checkpoint(
     let mut checkpoint_id = 0u64;
     for n in 1..=after_checkpoint {
         checkpoint_id =
-            wait_for_checkpoint_completed(&cluster.master(), cursor, checkpoint_wait()).await?;
+            wait_for_checkpoint_completed(&cluster.master(), cursor, checkpoint_wait(checkpoint)).await?;
         println!("[volga-longrun] checkpoint {checkpoint_id} completed ({n}/{after_checkpoint})");
     }
 
-    wait_until_checkpoints_idle(&cluster.master(), checkpoint_idle()).await?;
+    wait_until_checkpoints_idle(&cluster.master(), checkpoint_idle(checkpoint)).await?;
 
     let worker_ids = cluster.worker_ids();
     let target = worker_ids
@@ -234,6 +249,7 @@ async fn teardown_observe(
         &events,
         outcome.kill.as_ref(),
         prom_series.as_ref(),
+        &spec.launch.pipeline.state.checkpoint,
     )?;
     println!("[volga-longrun] oracles passed");
     Ok(())

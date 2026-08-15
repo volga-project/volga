@@ -181,6 +181,18 @@ impl PipelineSpecBuilder {
         self
     }
 
+    pub fn with_checkpoint(
+        mut self,
+        interval_ms: Option<u64>,
+        timeout_ms: Option<u64>,
+        retention: Option<u64>,
+    ) -> Self {
+        self.spec.state.checkpoint.interval_ms = interval_ms;
+        self.spec.state.checkpoint.timeout_ms = timeout_ms;
+        self.spec.state.checkpoint.retention = retention;
+        self
+    }
+
     pub fn with_operator_overrides_defaults(mut self, defaults: OperatorOverride) -> Self {
         self.spec.operator_overrides.defaults = defaults;
         self
@@ -252,6 +264,15 @@ impl PipelineSpec {
         }
         if self.execution_mode == ExecutionMode::Request && self.state.request_store.is_none() {
             return Err("request mode requires a request store".to_string());
+        }
+        if matches!(self.state.checkpoint.interval_ms, Some(0)) {
+            return Err("state.checkpoint.interval_ms must be > 0".to_string());
+        }
+        if matches!(self.state.checkpoint.timeout_ms, Some(0)) {
+            return Err("state.checkpoint.timeout_ms must be > 0".to_string());
+        }
+        if matches!(self.state.checkpoint.retention, Some(0)) {
+            return Err("state.checkpoint.retention must be > 0".to_string());
         }
         Ok(())
     }

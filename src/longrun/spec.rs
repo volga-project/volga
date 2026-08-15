@@ -1,10 +1,20 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use crate::api::CheckpointSpec;
+use crate::runtime::consts::{runtime_consts, MASTER_CHECKPOINT_INTERVAL, MASTER_CHECKPOINT_TIMEOUT};
 use crate::test_utils::checkpoint::WINDOW_RANGE_MS;
 use crate::test_utils::harness::{PipelineLaunchSpec, RuntimeEnv};
 
 use super::job::soak_window_launch_spec;
+
+pub fn resolved_checkpoint_interval(checkpoint: &CheckpointSpec) -> Duration {
+    checkpoint.interval_or(runtime_consts().duration(MASTER_CHECKPOINT_INTERVAL))
+}
+
+pub fn resolved_checkpoint_timeout(checkpoint: &CheckpointSpec) -> Duration {
+    checkpoint.timeout_or(runtime_consts().duration(MASTER_CHECKPOINT_TIMEOUT))
+}
 
 /// Soak window RANGE + event-time OOO (0). Used as the default lag p99 bound.
 pub fn soak_lag_p99_bound() -> Duration {
@@ -19,7 +29,7 @@ pub struct SoakOracleConfig {
     /// Fail if lag p99 exceeds this for [`Self::lag_p99_sustain`].
     pub lag_p99: Duration,
     pub lag_p99_sustain: Duration,
-    /// Fail if no completed checkpoint within this many `master.checkpoint_interval` multiples.
+    /// Fail if no completed checkpoint within this many job-checkpoint-interval multiples.
     pub checkpoint_silence_intervals: u32,
     /// Fail if checkpoint `failed` increases outside the injected-kill window.
     pub allow_checkpoint_fail_outside_kill: bool,
