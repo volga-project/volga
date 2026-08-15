@@ -1,0 +1,24 @@
+# Soak run file for `volga-longrun soak --config`. CLI flags override these fields.
+# launch.checkpoint writes PipelineSpec.state.checkpoint (master + soak waits).
+# Omit a checkpoint field to keep the Prod consts fallback.
+
+env: kube
+duration_secs: 3600
+scenario: kill
+kill_after_checkpoint: 1
+dump: /tmp/soak
+prom_url: http://127.0.0.1:9090
+launch:
+  worker_count: 2
+  checkpoint:
+    interval_ms: 30000
+    timeout_ms: 60000
+    retention: 1
+oracles:
+  watermark_stale_while_sending: 30s
+  lag_p99: 1.5x_window
+  lag_p99_sustain: 60s
+  checkpoint_silence_intervals: 3
+  restore_catchup: 3x_interval
+  allow_checkpoint_fail_outside_kill: false
+  allow_unexpected_fatal: false

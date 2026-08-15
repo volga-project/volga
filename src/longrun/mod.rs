@@ -4,6 +4,7 @@
 //! [`flink::FlinkCluster`] later, not a wrapper around Volga.
 
 pub mod cli;
+pub mod config;
 pub mod dump;
 pub mod flink;
 pub mod job;
