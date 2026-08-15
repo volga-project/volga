@@ -3,7 +3,6 @@
 mod collect;
 mod helpers;
 mod histogram;
-mod http;
 mod names;
 mod registry;
 mod types;
@@ -17,8 +16,9 @@ pub use helpers::{
 };
 pub use histogram::HistogramMetrics;
 pub use names::*;
-pub use http::{spawn_metrics_http_from_env, DEFAULT_METRICS_PORT, METRICS_BIND_ENV};
-pub use registry::{init_metrics, prometheus_handle};
+pub use registry::{
+    init_metrics, install_metrics_http_from_env, prometheus_handle, DEFAULT_METRICS_PORT, METRICS_BIND_ENV,
+};
 pub use types::{
     OperatorAggregateMetrics, TaskMetrics, ThroughputMetrics, WorkerAggregateMetrics,
 };

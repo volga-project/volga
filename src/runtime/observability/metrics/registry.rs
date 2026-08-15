@@ -8,9 +8,10 @@ use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
 use metrics_exporter_tcp::TcpBuilder;
 use metrics_util::layers::FanoutBuilder;
 use metrics_util::registry::{Registry, Storage};
+use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::sync::{Once, OnceLock};
+use std::sync::OnceLock;
 
 use super::names::{
     LATENCY_BUCKET_BOUNDARIES, LATENCY_HISTOGRAM_LEN, METRIC_STREAM_TASK_CHECKPOINT_PAYLOAD_BYTES,
@@ -19,12 +20,53 @@ use super::names::{
 
 static PROMETHEUS_HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
 pub(super) static METRICS_REGISTRY: OnceLock<Arc<Registry<Key, MetricsRegistryStorage>>> = OnceLock::new();
-static INIT_METRICS: Once = Once::new();
+/// `Ok(http_listening)` after the first init; `Err` if that init failed.
+static INIT_METRICS: OnceLock<Result<bool, String>> = OnceLock::new();
+
+pub const METRICS_BIND_ENV: &str = "VOLGA_METRICS_BIND_ADDR";
+pub const DEFAULT_METRICS_PORT: u16 = 9090;
 
 pub fn init_metrics() {
-    INIT_METRICS.call_once(|| {
-        init_metrics_inner().expect("Failed to initialize metrics");
+    init_metrics_maybe_http(None).expect("Failed to initialize metrics");
+}
+
+/// Install the recorder and, if `VOLGA_METRICS_BIND_ADDR` is set, the crate
+/// scrape listener. Parse/bind failures fail master/worker `start`.
+pub fn install_metrics_http_from_env() -> anyhow::Result<()> {
+    match metrics_bind_addr_from_env()? {
+        None => {
+            init_metrics();
+            Ok(())
+        }
+        Some(addr) => init_metrics_maybe_http(Some(addr))
+            .map_err(|err| anyhow::anyhow!("{METRICS_BIND_ENV}={addr}: {err}")),
+    }
+}
+
+fn metrics_bind_addr_from_env() -> anyhow::Result<Option<SocketAddr>> {
+    match std::env::var(METRICS_BIND_ENV) {
+        Err(_) => Ok(None),
+        Ok(raw) if raw.is_empty() => Ok(None),
+        Ok(raw) => raw.parse().map(Some).map_err(|err| {
+            anyhow::anyhow!("{METRICS_BIND_ENV}={raw} is not a socket address: {err}")
+        }),
+    }
+}
+
+fn init_metrics_maybe_http(
+    http_addr: Option<SocketAddr>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let state = INIT_METRICS.get_or_init(|| {
+        init_metrics_inner(http_addr).map_err(|err| err.to_string())
     });
+    match state {
+        Err(err) => Err(err.clone().into()),
+        Ok(false) if http_addr.is_some() => Err(
+            "metrics already initialized without HTTP listener while a bind address was requested"
+                .into(),
+        ),
+        Ok(_) => Ok(()),
+    }
 }
 
 pub fn prometheus_handle() -> Option<&'static PrometheusHandle> {
@@ -98,7 +140,7 @@ impl Recorder for SnapshotRecorder {
     }
 }
 
-fn init_metrics_inner() -> Result<(), Box<dyn std::error::Error>> {
+fn init_metrics_inner(http_addr: Option<SocketAddr>) -> Result<bool, Box<dyn std::error::Error>> {
     assert!(!LATENCY_BUCKET_BOUNDARIES.contains(&f64::MAX), "LATENCY_BUCKET_BOUNDARIES should not contain f64::MAX");
 
     let prometheus_builder = PrometheusBuilder::new()
@@ -107,7 +149,14 @@ fn init_metrics_inner() -> Result<(), Box<dyn std::error::Error>> {
             Matcher::Full(METRIC_STREAM_TASK_CHECKPOINT_PAYLOAD_BYTES.to_string()),
             &PAYLOAD_BUCKET_BOUNDARIES,
         )?;
-    let prometheus_recorder = prometheus_builder.build_recorder();
+    let (prometheus_recorder, http_listening) = if let Some(addr) = http_addr {
+        let (recorder, exporter) = prometheus_builder.with_http_listener(addr).build()?;
+        tokio::spawn(exporter);
+        println!("[metrics] HTTP /metrics listening on {addr}");
+        (recorder, true)
+    } else {
+        (prometheus_builder.build_recorder(), false)
+    };
     let prometheus_handle = prometheus_recorder.handle();
 
     let registry = Arc::new(Registry::new(MetricsRegistryStorage));
@@ -137,7 +186,7 @@ fn init_metrics_inner() -> Result<(), Box<dyn std::error::Error>> {
     if tcp_enabled {
         println!("🔍 TCP metrics streaming to 127.0.0.1:9999");
     }
-    Ok(())
+    Ok(http_listening)
 }
 
 
@@ -149,6 +198,39 @@ mod tests {
     use crate::runtime::metrics::{
         HistogramMetrics, LATENCY_BUCKET_BOUNDARIES, LATENCY_HISTOGRAM_LEN,
     };
+
+    #[tokio::test]
+    async fn metrics_http_serves_prometheus_text() {
+        use std::time::Duration;
+
+        use super::{install_metrics_http_from_env, METRICS_BIND_ENV};
+        use crate::common::ports::gen_unique_grpc_port;
+        use metrics::counter;
+
+        let addr = format!("127.0.0.1:{}", gen_unique_grpc_port());
+        std::env::set_var(METRICS_BIND_ENV, &addr);
+        install_metrics_http_from_env().expect("install metrics HTTP");
+        counter!("volga_metrics_http_test").increment(1);
+
+        let url = format!("http://{addr}/metrics");
+        let started = tokio::time::Instant::now();
+        let body = loop {
+            match reqwest::get(&url).await {
+                Ok(resp) => {
+                    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+                    break resp.text().await.expect("metrics body");
+                }
+                Err(_) if started.elapsed() < Duration::from_secs(2) => {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                Err(err) => panic!("GET {url}: {err}"),
+            }
+        };
+        assert!(
+            body.contains("volga_metrics_http_test"),
+            "scrape missing test series: {body:?}"
+        );
+    }
 
     #[test]
     fn cumulative_histogram_buckets_and_overflow() {

@@ -48,7 +48,7 @@ impl MasterServer {
     }
 
     pub async fn start(&mut self, addr: &str) -> anyhow::Result<()> {
-        crate::runtime::metrics::spawn_metrics_http_from_env();
+        crate::runtime::metrics::install_metrics_http_from_env()?;
         let addr = addr.parse()?;
         let service = master_server(self.service.clone());
 
