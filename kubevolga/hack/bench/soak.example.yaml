@@ -3,7 +3,7 @@
 # `Nx_interval` multiplies that job interval (30s on the default soak job).
 
 env: kube
-duration_secs: 3600
+duration: 1h
 scenario: kill
 kill_after_checkpoint: 1
 dump: /tmp/soak

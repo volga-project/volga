@@ -15,7 +15,7 @@ use super::spec::{
 #[serde(deny_unknown_fields)]
 pub struct SoakFile {
     pub env: Option<String>,
-    pub duration_secs: Option<u64>,
+    pub duration: Option<String>,
     pub scenario: Option<String>,
     pub kill_after_checkpoint: Option<u64>,
     pub dump: Option<PathBuf>,
@@ -30,7 +30,7 @@ pub struct SoakLaunchFile {
     pub worker_count: Option<usize>,
 }
 
-/// Duration fields accept `30s` / `500ms` or multipliers (`1.5x_window`).
+/// Duration fields accept `1h` / `30s` / `500ms` or multipliers (`1.5x_window`).
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SoakOracleFile {
@@ -61,6 +61,14 @@ impl SoakFile {
     }
 
     pub fn scenario(&self) -> Result<Option<SoakScenario>> {
+        if let Some(n) = self.kill_after_checkpoint {
+            if n == 0 {
+                bail!("config kill_after_checkpoint must be >= 1");
+            }
+            if self.scenario.as_deref() != Some("kill") {
+                bail!("config kill_after_checkpoint requires scenario: kill");
+            }
+        }
         match self.scenario.as_deref() {
             None => Ok(None),
             Some("steady") => Ok(Some(SoakScenario::Steady)),
@@ -77,11 +85,9 @@ pub fn apply_file(mut spec: SoakSpec, file: &SoakFile) -> Result<SoakSpec> {
     if let Some(env) = file.env()? {
         spec.env = env;
     }
-    if let Some(secs) = file.duration_secs {
-        if secs == 0 {
-            bail!("config duration_secs must be >= 1");
-        }
-        spec.duration = Duration::from_secs(secs);
+    if let Some(raw) = &file.duration {
+        let interval = resolved_checkpoint_interval(&spec.launch.pipeline.state.checkpoint);
+        spec.duration = parse_duration(raw, interval)?;
     }
     if let Some(scenario) = file.scenario()? {
         spec.scenario = scenario;
@@ -168,16 +174,32 @@ fn parse_duration(raw: &str, checkpoint_interval: Duration) -> Result<Duration> 
             .trim()
             .parse()
             .map_err(|_| anyhow!("invalid duration `{raw}`"))?;
+        if n == 0 {
+            bail!("duration must be > 0: `{raw}`");
+        }
         return Ok(Duration::from_millis(n));
+    }
+    if let Some(rest) = raw.strip_suffix('h') {
+        let n: u64 = rest
+            .trim()
+            .parse()
+            .map_err(|_| anyhow!("invalid duration `{raw}`"))?;
+        if n == 0 {
+            bail!("duration must be > 0: `{raw}`");
+        }
+        return Ok(Duration::from_secs(n.saturating_mul(3600)));
     }
     if let Some(rest) = raw.strip_suffix('s') {
         let n: u64 = rest
             .trim()
             .parse()
             .map_err(|_| anyhow!("invalid duration `{raw}`"))?;
+        if n == 0 {
+            bail!("duration must be > 0: `{raw}`");
+        }
         return Ok(Duration::from_secs(n));
     }
-    bail!("invalid duration `{raw}` (use Ns, Nms, Nx_window, or Nx_interval)")
+    bail!("invalid duration `{raw}` (use Nh, Ns, Nms, Nx_window, or Nx_interval)")
 }
 
 #[cfg(test)]
@@ -187,9 +209,13 @@ mod tests {
     #[test]
     fn parse_window_multiplier() {
         let interval = Duration::from_secs(30);
-        assert_eq!(parse_duration("1.5x_window", interval).unwrap(), Duration::from_secs(15));
+        assert_eq!(
+            parse_duration("1.5x_window", interval).unwrap(),
+            Duration::from_secs_f64(1.5 * soak_lag_p99_bound().as_secs_f64())
+        );
         assert_eq!(parse_duration("3x_interval", interval).unwrap(), Duration::from_secs(90));
         assert_eq!(parse_duration("30s", interval).unwrap(), Duration::from_secs(30));
+        assert_eq!(parse_duration("1h", interval).unwrap(), Duration::from_secs(3600));
         assert_eq!(parse_duration("500ms", interval).unwrap(), Duration::from_millis(500));
     }
 
@@ -198,7 +224,7 @@ mod tests {
         let file: SoakFile = serde_yaml::from_str(
             r#"
 env: kube
-duration_secs: 3600
+duration: 1h
 scenario: kill
 kill_after_checkpoint: 2
 dump: /tmp/soak
@@ -231,8 +257,22 @@ oracles:
         );
         assert_eq!(spec.launch.worker_count, 4);
         assert_eq!(spec.launch.pipeline.state.checkpoint.interval_ms, Some(30_000));
-        assert_eq!(spec.oracles.lag_p99, Duration::from_secs(15));
+        assert_eq!(
+            spec.oracles.lag_p99,
+            Duration::from_secs_f64(1.5 * soak_lag_p99_bound().as_secs_f64())
+        );
         assert_eq!(spec.oracles.restore_catchup, Duration::from_secs(90));
         assert_eq!(spec.oracles.checkpoint_silence_intervals, 4);
+    }
+
+    #[test]
+    fn kill_after_requires_kill_scenario() {
+        let zero: SoakFile = serde_yaml::from_str("scenario: kill\nkill_after_checkpoint: 0\n").unwrap();
+        assert!(zero.scenario().is_err());
+        let on_steady: SoakFile =
+            serde_yaml::from_str("scenario: steady\nkill_after_checkpoint: 2\n").unwrap();
+        assert!(on_steady.scenario().is_err());
+        let no_scenario: SoakFile = serde_yaml::from_str("kill_after_checkpoint: 2\n").unwrap();
+        assert!(no_scenario.scenario().is_err());
     }
 }
