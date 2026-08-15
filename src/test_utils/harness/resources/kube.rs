@@ -53,7 +53,7 @@ impl KubeResources {
 pub struct KubeClusterResources {
     resources: Option<KubeResources>,
     storage_endpoint: Option<String>,
-    expected_output_rows: usize,
+    expected_output_rows: Option<usize>,
     worker_ids: Vec<String>,
 }
 
@@ -198,9 +198,12 @@ impl KubeClusterResources {
     }
 
     pub async fn wait_for_completion(&mut self) -> Result<()> {
+        let expected = self
+            .expected_output_rows
+            .context("wait_for_completion requires expected_output_rows")?;
         let start = tokio::time::Instant::now();
         loop {
-            if self.storage_snapshot().await?.row_count() >= self.expected_output_rows {
+            if self.storage_snapshot().await?.row_count() >= expected {
                 return Ok(());
             }
             if start.elapsed() > Duration::from_secs(120) {

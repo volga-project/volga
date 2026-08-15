@@ -88,7 +88,8 @@ pub enum FaultAction {
 pub struct PipelineLaunchSpec {
     pub pipeline: PipelineSpec,
     pub worker_count: usize,
-    pub expected_output_rows: usize,
+    /// `None` when the run does not wait on sink row count (`wait_for_completion`).
+    pub expected_output_rows: Option<usize>,
     /// Kube only: sets `volga.io/kube-worker-health-poll` on the pipeline CR.
     /// Master reads it at poll start (env overrides). Default `true`.
     pub kube_worker_health_poll: bool,
@@ -98,7 +99,7 @@ pub struct PipelineLaunchSpec {
 }
 
 impl PipelineLaunchSpec {
-    pub fn new(pipeline: PipelineSpec, worker_count: usize, expected_output_rows: usize) -> Self {
+    pub fn new(pipeline: PipelineSpec, worker_count: usize, expected_output_rows: Option<usize>) -> Self {
         let mut pipeline = pipeline;
         // Cluster e2e (local/docker/kube) always run store maintenance by default.
         pipeline.state.maintenance_enabled = true;

@@ -485,7 +485,7 @@ pub fn multi_worker_recovery_launch_spec() -> PipelineLaunchSpec {
 }
 
 fn apply_streaming_recovery_source(launch: &mut PipelineLaunchSpec) {
-    launch.expected_output_rows = 0;
+    launch.expected_output_rows = None;
     if let SourceSpecKind::Datagen(datagen) = &mut launch.pipeline.sources[0].source {
         datagen.rate = Some(50.0);
         datagen.limit = None;

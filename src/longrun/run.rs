@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, Result};
 
 use crate::runtime::consts::{init_runtime_consts_profile, RuntimeConstsProfile};
+use crate::runtime::master::LifecycleEvent;
 use crate::test_utils::checkpoint::{
     wait_for_checkpoint_completed, wait_for_kill_restore, wait_until_attempt0_running,
     wait_until_attempt_running, wait_until_checkpoints_idle,
@@ -39,7 +40,13 @@ pub async fn run_soak(spec: SoakSpec) -> Result<()> {
     let duration = spec.duration;
     let scenario = spec.scenario;
     let cluster = VolgaCluster::launch(env, spec.launch).await?;
-    let result = run_scenario(&cluster, env, scenario, duration).await;
+    let result = tokio::select! {
+        result = run_scenario(&cluster, env, scenario, duration) => result,
+        _ = shutdown_signal() => {
+            println!("[volga-longrun] interrupt, shutting down");
+            Ok(())
+        }
+    };
     match cluster.shutdown().await {
         Ok(()) => result,
         Err(shutdown_err) => match result {
@@ -50,6 +57,18 @@ pub async fn run_soak(spec: SoakSpec) -> Result<()> {
 }
 
 async fn run_scenario(
+    cluster: &VolgaCluster,
+    env: RuntimeEnv,
+    scenario: SoakScenario,
+    duration: Duration,
+) -> Result<()> {
+    tokio::select! {
+        result = run_scenario_body(cluster, env, scenario, duration) => result,
+        failed = watch_pipeline_failed(cluster) => failed,
+    }
+}
+
+async fn run_scenario_body(
     cluster: &VolgaCluster,
     env: RuntimeEnv,
     scenario: SoakScenario,
@@ -73,12 +92,7 @@ async fn run_scenario(
     let remaining = duration.saturating_sub(started.elapsed());
     if remaining > Duration::ZERO {
         println!("[volga-longrun] running for remaining {remaining:?}");
-        tokio::select! {
-            _ = tokio::time::sleep(remaining) => {}
-            _ = shutdown_signal() => {
-                println!("[volga-longrun] interrupt, shutting down");
-            }
-        }
+        tokio::time::sleep(remaining).await;
     }
 
     println!(
@@ -86,6 +100,18 @@ async fn run_scenario(
         started.elapsed()
     );
     Ok(())
+}
+
+/// Fail the soak if the pipeline dies. G still owns lag/checkpoint oracles.
+async fn watch_pipeline_failed(cluster: &VolgaCluster) -> Result<()> {
+    loop {
+        for record in cluster.master().lifecycle_events_since(0).await? {
+            if let LifecycleEvent::PipelineFailed { detail } = record.event {
+                return Err(anyhow!("pipeline failed: {detail}"));
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
 }
 
 async fn run_kill_after_checkpoint(

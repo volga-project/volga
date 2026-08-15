@@ -68,7 +68,7 @@ impl SoakSpec {
     pub fn new(env: RuntimeEnv, scenario: SoakScenario, duration: Duration) -> Self {
         Self {
             env,
-            launch: soak_window_launch_spec(duration),
+            launch: soak_window_launch_spec(),
             scenario,
             duration,
             oracles: SoakOracleConfig::default(),
