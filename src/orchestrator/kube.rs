@@ -574,8 +574,10 @@ impl MasterOrchestrator for KubeMasterOrchestrator {
             .unwrap_or_else(|| panic!("pipelineSpec not found in CRD {}", self.crd_name));
         let kube_spec: KubePipelineSpec = serde_json::from_value(spec_json.clone())
             .unwrap_or_else(|e| panic!("failed to deserialize pipelineSpec from CRD: {}", e));
-        PipelineSpec::try_from(kube_spec)
-            .unwrap_or_else(|e| panic!("failed to convert pipelineSpec from CRD: {}", e))
+        let mut spec = PipelineSpec::try_from(kube_spec)
+            .unwrap_or_else(|e| panic!("failed to convert pipelineSpec from CRD: {}", e));
+        spec.fill_created_in_memory_store_addr(&self.api.namespace, &self.crd_name);
+        spec
     }
 
     async fn get_num_expected_workers(&self) -> usize {

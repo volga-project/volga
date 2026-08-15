@@ -148,3 +148,18 @@ pub(crate) fn pipeline_needs_in_memory_store(pipeline: &PipelineSpec) -> bool {
         .map(SinkSpec::needs_in_memory_store)
         .unwrap_or(true)
 }
+
+/// Ask the operator to create `{name}-storage`; get_spec fills the DNS.
+pub(crate) fn install_created_in_memory_sink(pipeline: &mut PipelineSpec) {
+    let upsert_key_columns = match &pipeline.sink {
+        Some(SinkSpec::InMemoryStorageGrpc {
+            upsert_key_columns, ..
+        }) => upsert_key_columns.clone(),
+        _ => Vec::new(),
+    };
+    pipeline.sink = Some(SinkSpec::InMemoryStorageGrpc {
+        create: true,
+        server_addr: None,
+        upsert_key_columns,
+    });
+}

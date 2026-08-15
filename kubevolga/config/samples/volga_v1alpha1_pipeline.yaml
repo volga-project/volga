@@ -67,6 +67,6 @@ spec:
     sink:
       InMemoryStorageGrpc: |
         {
-          "server_addr": ""
+          "create": true
         }
     sql: "SELECT value FROM test_table"

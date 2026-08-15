@@ -104,7 +104,10 @@ impl ClusterBackend for KubeCluster {
             .await
     }
 
-    async fn lifecycle_events_since(&mut self, sequence: u64) -> Result<Vec<LifecycleEventRecord>> {
+    async fn lifecycle_events_since(
+        &mut self,
+        sequence: u64,
+    ) -> Result<Vec<LifecycleEventRecord>> {
         let master_port = self
             .resources
             .as_ref()
@@ -137,10 +140,7 @@ impl ClusterBackend for KubeCluster {
     }
 
     async fn apply_fault(&mut self, fault: FaultAction) -> Result<()> {
-        let resources = self
-            .resources
-            .as_ref()
-            .context("kube cluster is not launched")?;
+        let resources = self.resources.as_ref().context("kube cluster is not launched")?;
         match fault {
             FaultAction::KillWorker { worker_id, mode: _ }
             | FaultAction::RestartWorker { worker_id } => resources.delete_worker_pod(&worker_id),
@@ -285,8 +285,7 @@ fn write_pipeline_manifest(
     kube_worker_health_poll: bool,
     runtime_consts_profile: crate::runtime::consts::RuntimeConstsProfile,
 ) -> Result<PathBuf> {
-    // Operator creates `{name}-storage`; get_spec fills the DNS in memory only.
-    super::install_in_memory_sink(&mut pipeline, "");
+    super::install_created_in_memory_sink(&mut pipeline);
     let sample_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("kubevolga/config/samples/volga_v1alpha1_pipeline.yaml");
     let mut manifest: Value = serde_yaml::from_str(&fs::read_to_string(sample_path)?)?;
@@ -341,8 +340,14 @@ fn wait_for_pipeline(pipeline_name: &str) -> Result<()> {
 fn wait_for_pipeline_deleted(pipeline_name: &str) -> Result<()> {
     let start = std::time::Instant::now();
     loop {
-        let pipeline_deleted =
-            kubectl(&["-n", "default", "get", "volgapipeline", pipeline_name]).is_err();
+        let pipeline_deleted = kubectl(&[
+            "-n",
+            "default",
+            "get",
+            "volgapipeline",
+            pipeline_name,
+        ])
+        .is_err();
         let pods_deleted = kubectl(&[
             "-n",
             "default",
@@ -416,7 +421,8 @@ async fn fetch_lifecycle_events(
     master_port: u16,
     sequence: u64,
 ) -> Result<Vec<LifecycleEventRecord>> {
-    let mut client = master_client(&format!("127.0.0.1:{master_port}"), &GrpcConfig::new()).await?;
+    let mut client =
+        master_client(&format!("127.0.0.1:{master_port}"), &GrpcConfig::new()).await?;
     client
         .get_lifecycle_events(tonic::Request::new(GetLifecycleEventsRequest {
             after_sequence: sequence,
@@ -426,8 +432,8 @@ async fn fetch_lifecycle_events(
         .events
         .into_iter()
         .map(|record| {
-            let event: LifecycleEvent =
-                bincode::deserialize(&record.event_bytes).with_context(|| {
+            let event: LifecycleEvent = bincode::deserialize(&record.event_bytes)
+                .with_context(|| {
                     format!(
                         "failed to decode lifecycle event sequence={} bytes={}",
                         record.sequence,
@@ -445,7 +451,8 @@ async fn fetch_lifecycle_events(
 async fn master_latest_pipeline_snapshot(
     master_port: u16,
 ) -> Result<Option<crate::runtime::observability::PipelineSnapshot>> {
-    let mut client = master_client(&format!("127.0.0.1:{master_port}"), &GrpcConfig::new()).await?;
+    let mut client =
+        master_client(&format!("127.0.0.1:{master_port}"), &GrpcConfig::new()).await?;
     let response = client
         .get_latest_pipeline_snapshot(tonic::Request::new(
             crate::runtime::master::server::master_service::GetLatestPipelineSnapshotRequest {},
@@ -459,7 +466,8 @@ async fn master_latest_pipeline_snapshot(
 }
 
 async fn master_stop_sources(master_port: u16) -> Result<()> {
-    let mut client = master_client(&format!("127.0.0.1:{master_port}"), &GrpcConfig::new()).await?;
+    let mut client =
+        master_client(&format!("127.0.0.1:{master_port}"), &GrpcConfig::new()).await?;
     let response = client
         .stop_sources(tonic::Request::new(
             crate::runtime::master::server::master_service::StopSourcesRequest {},

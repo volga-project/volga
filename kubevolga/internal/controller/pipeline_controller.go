@@ -116,7 +116,7 @@ func (r *PipelineReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		pipelineID = fmt.Sprintf("%s-%s", vp.Namespace, vp.Name)
 	}
 	if err := validatePipelineSpec(vp.Spec.PipelineSpec); err != nil {
-		if statusErr := r.updatePipelineStatus(ctx, req.NamespacedName, pipelineID, "", "", "InvalidSpec"); statusErr != nil {
+		if statusErr := r.updatePipelineStatus(ctx, req.NamespacedName, pipelineID, "", "InvalidSpec"); statusErr != nil {
 			return ctrl.Result{}, statusErr
 		}
 		logger.Error(err, "invalid pipelineSpec; skipping resource reconciliation")
@@ -127,31 +127,25 @@ func (r *PipelineReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	ownedStorageAddr := ownedStorageHTTPAddr(vp.Namespace, vp.Name)
-	ownsStore := ownsInMemoryStore(sink, ownedStorageAddr)
+	createsStore, err := sink.createsStore()
+	if err != nil {
+		if statusErr := r.updatePipelineStatus(ctx, req.NamespacedName, pipelineID, "", "InvalidSpec"); statusErr != nil {
+			return ctrl.Result{}, statusErr
+		}
+		logger.Error(err, "invalid InMemoryStorageGrpc sink; skipping resource reconciliation")
+		return ctrl.Result{}, nil
+	}
 	storageLabels := cloneAndAdd(baseLabels, map[string]string{"volga.io/component": "storage"})
 	if err := r.reconcileInMemoryStore(
 		ctx,
 		&vp,
-		ownsStore,
+		createsStore,
 		volgaImage,
 		masterPullPolicy,
 		masterResources,
 		storageLabels,
 	); err != nil {
 		return ctrl.Result{}, err
-	}
-	if ownsStore && sink.addr == "" {
-		filled, err := r.injectOwnedStorageAddr(ctx, req.NamespacedName, ownedStorageAddr)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-		vp.Spec.PipelineSpec = filled
-		sink.addr = ownedStorageAddr
-	}
-	storageServiceAddr := ""
-	if ownsStore {
-		storageServiceAddr = ownedStorageAddr
 	}
 
 	if err := r.reconcileMasterService(ctx, &vp, masterServiceName, masterLabels); err != nil {
@@ -183,18 +177,20 @@ func (r *PipelineReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	); err != nil {
 		return ctrl.Result{}, err
 	}
-	if err := r.reconcileWorkerStatefulSet(
-		ctx,
-		&vp,
-		workerServiceName,
-		volgaImage,
-		workerPullPolicy,
-		workerResources,
-		workerLabels,
-		replicas,
-		masterServiceAddr,
-	); err != nil {
-		return ctrl.Result{}, err
+	if r.storageReady(ctx, vp.Namespace, vp.Name, createsStore) {
+		if err := r.reconcileWorkerStatefulSet(
+			ctx,
+			&vp,
+			workerServiceName,
+			volgaImage,
+			workerPullPolicy,
+			workerResources,
+			workerLabels,
+			replicas,
+			masterServiceAddr,
+		); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	phase := "Starting"
@@ -207,17 +203,16 @@ func (r *PipelineReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		if err := r.Get(ctx, client.ObjectKey{Namespace: vp.Namespace, Name: fmt.Sprintf("%s-worker", vp.Name)}, &sts); err == nil {
 			if masterPod.Status.Phase == corev1.PodRunning &&
 				sts.Status.ReadyReplicas == replicas &&
-				r.storageReady(ctx, vp.Namespace, vp.Name, ownsStore) {
+				r.storageReady(ctx, vp.Namespace, vp.Name, createsStore) {
 				phase = "Running"
 			}
 		}
 	}
 
 	if vp.Status.MasterServiceAddr != masterServiceAddr ||
-		vp.Status.StorageServiceAddr != storageServiceAddr ||
 		vp.Status.Phase != phase ||
 		vp.Status.PipelineID != pipelineID {
-		if err := r.updatePipelineStatus(ctx, req.NamespacedName, pipelineID, masterServiceAddr, storageServiceAddr, phase); err != nil {
+		if err := r.updatePipelineStatus(ctx, req.NamespacedName, pipelineID, masterServiceAddr, phase); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
@@ -288,15 +283,15 @@ func (r *PipelineReconciler) reconcileWorkerHeadlessService(
 func (r *PipelineReconciler) reconcileInMemoryStore(
 	ctx context.Context,
 	vp *v1alpha1.VolgaPipeline,
-	owns bool,
+	create bool,
 	image string,
 	imagePullPolicy corev1.PullPolicy,
 	resources corev1.ResourceRequirements,
 	labels map[string]string,
 ) error {
 	name := storageResourceName(vp.Name)
-	if !owns {
-		return r.deleteOwnedStorage(ctx, vp.Namespace, name)
+	if !create {
+		return r.deleteCreatedStorage(ctx, vp.Namespace, name)
 	}
 	if err := r.reconcileStorageService(ctx, vp, name, labels); err != nil {
 		return err
@@ -373,7 +368,7 @@ func (r *PipelineReconciler) reconcileStorageDeployment(
 	})
 }
 
-func (r *PipelineReconciler) deleteOwnedStorage(ctx context.Context, namespace, name string) error {
+func (r *PipelineReconciler) deleteCreatedStorage(ctx context.Context, namespace, name string) error {
 	deploy := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name},
 	}
@@ -389,41 +384,8 @@ func (r *PipelineReconciler) deleteOwnedStorage(ctx context.Context, namespace, 
 	return nil
 }
 
-func (r *PipelineReconciler) injectOwnedStorageAddr(
-	ctx context.Context,
-	key client.ObjectKey,
-	addr string,
-) (json.RawMessage, error) {
-	var filled json.RawMessage
-	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		var latest v1alpha1.VolgaPipeline
-		if err := r.Get(ctx, key, &latest); err != nil {
-			return err
-		}
-		sink, err := parseInMemorySink(latest.Spec.PipelineSpec)
-		if err != nil {
-			return err
-		}
-		if sink.present && sink.addr != "" {
-			filled = latest.Spec.PipelineSpec
-			return nil
-		}
-		updated, err := withInMemorySinkAddr(latest.Spec.PipelineSpec, addr)
-		if err != nil {
-			return err
-		}
-		latest.Spec.PipelineSpec = updated
-		if err := r.Update(ctx, &latest); err != nil {
-			return err
-		}
-		filled = updated
-		return nil
-	})
-	return filled, err
-}
-
-func (r *PipelineReconciler) storageReady(ctx context.Context, namespace, pipelineName string, owns bool) bool {
-	if !owns {
+func (r *PipelineReconciler) storageReady(ctx context.Context, namespace, pipelineName string, create bool) bool {
+	if !create {
 		return true
 	}
 	var deploy appsv1.Deployment
@@ -718,7 +680,6 @@ func (r *PipelineReconciler) updatePipelineStatus(
 	key client.ObjectKey,
 	pipelineID string,
 	masterServiceAddr string,
-	storageServiceAddr string,
 	phase string,
 ) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -728,7 +689,6 @@ func (r *PipelineReconciler) updatePipelineStatus(
 		}
 		latest.Status.PipelineID = pipelineID
 		latest.Status.MasterServiceAddr = masterServiceAddr
-		latest.Status.StorageServiceAddr = storageServiceAddr
 		latest.Status.Phase = phase
 		return r.Status().Update(ctx, &latest)
 	})

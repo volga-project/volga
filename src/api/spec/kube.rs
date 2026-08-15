@@ -163,10 +163,15 @@ mod tests {
             })
         );
         match &spec.sink {
-            Some(SinkSpec::InMemoryStorageGrpc { server_addr, .. }) => {
+            Some(SinkSpec::InMemoryStorageGrpc {
+                create,
+                server_addr,
+                ..
+            }) => {
+                assert!(!*create);
                 assert_eq!(
-                    server_addr,
-                    "http://volga-test-storage.default.svc.cluster.local:50071"
+                    server_addr.as_deref(),
+                    Some("http://volga-test-storage.default.svc.cluster.local:50071")
                 );
             }
             other => panic!("expected InMemoryStorageGrpc sink, got {:?}", other),

@@ -33,9 +33,8 @@ type VolgaPodSpec struct {
 type VolgaPipelineStatus struct {
 	PipelineID         string             `json:"pipelineId,omitempty"`
 	Phase              string             `json:"phase,omitempty"`
-	MasterServiceAddr  string             `json:"masterServiceAddr,omitempty"`
-	StorageServiceAddr string             `json:"storageServiceAddr,omitempty"`
-	Conditions         []metav1.Condition `json:"conditions,omitempty"`
+	MasterServiceAddr string             `json:"masterServiceAddr,omitempty"`
+	Conditions        []metav1.Condition `json:"conditions,omitempty"`
 	LifecycleEvents    []json.RawMessage  `json:"lifecycleEvents,omitempty"`
 }
 
