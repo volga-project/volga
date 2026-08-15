@@ -253,9 +253,9 @@ Defaults are Kind-calibrated; override on `SoakSpec` for a real cluster. Lag bou
 | **D** `test_utils` (whole codebase) | 0 | Refactor | None. Not soak-scoped: move every shared helper under `src/test_utils/`. Split 0a moves / 0b always-compile only if the diff is huge. |
 | **E** `volga-longrun` + both scenarios | 4+5 | Longrun | **D** (must link `VolgaCluster`). **B** if the launch spec uses Count. |
 | **F** Prom + Grafana + dashboard JSON | 6 | Observability | **A** (scrape) + **C** (infra placement). Not the binary. |
-| **G** dump + oracles | 7 | Longrun | **E**. Board dump + oracles. Also `state.checkpoint` (`interval_ms` / `timeout_ms` / `retention`): master and soak waits read spec first, consts as fallback. Heartbeats / RPC / kube health stay on consts. |
+| **G** dump + oracles | 7 | Longrun | **E**. Board dump + oracles. Also `state.checkpoint` (`interval_ms` / `timeout_ms` / `retention`): master and soak waits read spec first, consts as fallback. Soak job sets 30s / 60s / 1 (same as Prod). Heartbeats / RPC / kube health stay on consts. |
 | **H** operator-owned InMemory store | — | Operator | None. Nice-to-have before **E** so kube tests stop `kubectl apply` of `volga-test-storage`. Not required to start A–D. |
-| **J** soak `--config` YAML | — | Longrun | **G**. `env`, duration, scenario, launch (including `checkpoint`), Prom/dump, oracle multipliers (`3x` / `1.5x_window`). CLI overrides the file. |
+| **J** soak `--config` YAML | — | Longrun | **G**. `env`, duration, scenario, `launch.worker_count`, Prom/dump, oracle multipliers (`3x` / `1.5x_window`). CLI overrides the file. Does **not** write `state.checkpoint` — that stays on the job / `PipelineSpec`. |
 
 A binary without Steady/Kill is not worth its own PR (4+5 stay together).
 
@@ -265,9 +265,9 @@ A binary without Steady/Kill is not worth its own PR (4+5 stay together).
 | --- | --- | --- |
 | Runtime consts (`RuntimeConstsProfile::Prod`) | Cluster-wide defaults: checkpoint interval/timeout, heartbeats, RPC, kube health | Fallback when `state.checkpoint` omits a field |
 | `PipelineSpec.state.checkpoint` (**G**) | Per-job interval / timeout / retention | Master + soak waits / oracles (spec first, consts fallback) |
-| Soak/bench run YAML + `--config` (**J**) | How this *run* is invoked: env, duration, scenario, launch.checkpoint, dump, Prom, oracle multipliers | `volga-longrun` only |
+| Soak/bench run YAML + `--config` (**J**) | How this *run* is invoked: env, duration, scenario, worker_count, dump, Prom, oracle multipliers | `volga-longrun` only |
 
-**G** does not take `--config`. **J** writes `launch.pipeline.state.checkpoint` from the run file.
+**G** does not take `--config`. **J** does not write `state.checkpoint`; it can point at a job that already has those fields.
 
 ```
 D #236 → E #237 → G #239 (dump + oracles + state.checkpoint)

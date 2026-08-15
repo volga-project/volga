@@ -1,5 +1,5 @@
 use crate::api::spec::connectors::{SinkSpec, SourceSpecKind};
-use crate::api::PipelineSpec;
+use crate::api::{CheckpointSpec, PipelineSpec};
 use crate::runtime::consts::RuntimeConstsProfile;
 use crate::test_utils::checkpoint::{
     checkpoint_recovery_launch_spec, CheckpointWorkload, MULTI_WORKER_PARALLELISM,
@@ -18,6 +18,11 @@ pub fn soak_window_launch_spec() -> PipelineLaunchSpec {
     let mut launch =
         checkpoint_recovery_launch_spec(MULTI_WORKER_PARALLELISM, CheckpointWorkload::Window);
     launch.pipeline.sink = Some(SinkSpec::Count);
+    launch.pipeline.state.checkpoint = CheckpointSpec {
+        interval_ms: Some(30_000),
+        timeout_ms: Some(60_000),
+        retention: Some(1),
+    };
     clear_datagen_run_for_s(&mut launch.pipeline);
     launch.expected_output_rows = None;
     launch.with_runtime_consts_profile(RuntimeConstsProfile::Prod)
@@ -61,7 +66,11 @@ mod tests {
         assert_eq!(run_for, None);
         assert_eq!(
             launch.pipeline.state.checkpoint,
-            crate::api::CheckpointSpec::default()
+            CheckpointSpec {
+                interval_ms: Some(30_000),
+                timeout_ms: Some(60_000),
+                retention: Some(1),
+            }
         );
     }
 }

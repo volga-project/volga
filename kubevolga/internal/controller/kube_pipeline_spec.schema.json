@@ -64,6 +64,7 @@
     "state": {
       "$ref": "#/$defs/StateSpec",
       "default": {
+        "checkpoint": {},
         "checkpoint_store": "in_memory",
         "maintenance_enabled": true,
         "maintenance_interval_ms": 1000,
@@ -93,6 +94,36 @@
   },
   "additionalProperties": false,
   "$defs": {
+    "CheckpointSpec": {
+      "description": "Job checkpoint knobs. `None` uses runtime consts (`master.checkpoint_*`).\n`Some(0)` is invalid and is not a disable; consts `0s` turns interval CPs off.",
+      "type": "object",
+      "properties": {
+        "interval_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "retention": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "timeout_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      }
+    },
     "CheckpointStoreConfig": {
       "type": "string",
       "enum": [
@@ -184,6 +215,11 @@
     "StateSpec": {
       "type": "object",
       "properties": {
+        "checkpoint": {
+          "description": "Per-job checkpoint interval / timeout / retention. Omitted fields use runtime consts.\n`Some(0)` is invalid; it does not disable interval checkpoints (consts `0s` does).",
+          "$ref": "#/$defs/CheckpointSpec",
+          "default": {}
+        },
         "checkpoint_store": {
           "$ref": "#/$defs/CheckpointStoreConfig",
           "default": "in_memory"

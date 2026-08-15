@@ -29,6 +29,7 @@ pub struct StateSpec {
     pub operator_backend: OperatorStateBackendConfig,
     pub request_store: Option<RequestStoreConfig>,
     /// Per-job checkpoint interval / timeout / retention. Omitted fields use runtime consts.
+    /// `Some(0)` is invalid; it does not disable interval checkpoints (consts `0s` does).
     #[serde(default)]
     pub checkpoint: CheckpointSpec,
     /// When true, workers run periodic `OperatorStore::maintain`.
@@ -37,9 +38,8 @@ pub struct StateSpec {
     pub maintenance_interval_ms: u64,
 }
 
-/// Job checkpoint knobs. Master uses each `Some` value; `None` falls back to
-/// `master.checkpoint_{interval,timeout,retention}` consts. Heartbeats / RPC /
-/// kube health stay on consts.
+/// Job checkpoint knobs. `None` uses runtime consts (`master.checkpoint_*`).
+/// `Some(0)` is invalid and is not a disable; consts `0s` turns interval CPs off.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct CheckpointSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -51,6 +51,7 @@ pub struct CheckpointSpec {
 }
 
 impl CheckpointSpec {
+    /// `Some(0)` is treated as omitted (consts fallback) if validate was skipped.
     pub fn interval(&self) -> Option<Duration> {
         self.interval_ms.filter(|ms| *ms > 0).map(Duration::from_millis)
     }
@@ -116,6 +117,19 @@ mod tests {
         assert_eq!(spec.checkpoint.interval(), Some(Duration::from_secs(5)));
         assert_eq!(spec.checkpoint.timeout(), Some(Duration::from_secs(15)));
         assert_eq!(spec.checkpoint.retention_or(1), 3);
+    }
+
+    #[test]
+    fn zero_interval_is_omitted_not_disable() {
+        let spec = CheckpointSpec {
+            interval_ms: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(spec.interval(), None);
+        assert_eq!(
+            spec.interval_or(Duration::from_secs(30)),
+            Duration::from_secs(30)
+        );
     }
 
     #[test]
