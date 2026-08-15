@@ -28,15 +28,6 @@ pub struct SoakFile {
 #[serde(deny_unknown_fields)]
 pub struct SoakLaunchFile {
     pub worker_count: Option<usize>,
-    pub checkpoint: Option<SoakCheckpointFile>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SoakCheckpointFile {
-    pub interval_ms: Option<u64>,
-    pub timeout_ms: Option<u64>,
-    pub retention: Option<u64>,
 }
 
 /// Duration fields accept `30s` / `500ms` or multipliers (`1.5x_window`).
@@ -108,40 +99,12 @@ pub fn apply_file(mut spec: SoakSpec, file: &SoakFile) -> Result<SoakSpec> {
             }
             spec.launch.worker_count = worker_count;
         }
-        if let Some(checkpoint) = &launch.checkpoint {
-            apply_checkpoint(&mut spec.launch.pipeline.state.checkpoint, checkpoint)?;
-        }
     }
     if let Some(oracles) = &file.oracles {
         let interval = resolved_checkpoint_interval(&spec.launch.pipeline.state.checkpoint);
         apply_oracles(&mut spec.oracles, oracles, interval)?;
     }
     Ok(spec)
-}
-
-fn apply_checkpoint(
-    checkpoint: &mut crate::api::CheckpointSpec,
-    file: &SoakCheckpointFile,
-) -> Result<()> {
-    if let Some(ms) = file.interval_ms {
-        if ms == 0 {
-            bail!("config launch.checkpoint.interval_ms must be > 0");
-        }
-        checkpoint.interval_ms = Some(ms);
-    }
-    if let Some(ms) = file.timeout_ms {
-        if ms == 0 {
-            bail!("config launch.checkpoint.timeout_ms must be > 0");
-        }
-        checkpoint.timeout_ms = Some(ms);
-    }
-    if let Some(n) = file.retention {
-        if n == 0 {
-            bail!("config launch.checkpoint.retention must be > 0");
-        }
-        checkpoint.retention = Some(n);
-    }
-    Ok(())
 }
 
 fn apply_oracles(
@@ -242,10 +205,6 @@ dump: /tmp/soak
 prom_url: http://127.0.0.1:9090
 launch:
   worker_count: 4
-  checkpoint:
-    interval_ms: 5000
-    timeout_ms: 15000
-    retention: 2
 oracles:
   lag_p99: 1.5x_window
   restore_catchup: 3x_interval
@@ -271,10 +230,9 @@ oracles:
             }
         );
         assert_eq!(spec.launch.worker_count, 4);
-        assert_eq!(spec.launch.pipeline.state.checkpoint.interval_ms, Some(5_000));
-        assert_eq!(spec.launch.pipeline.state.checkpoint.retention, Some(2));
+        assert_eq!(spec.launch.pipeline.state.checkpoint.interval_ms, Some(30_000));
         assert_eq!(spec.oracles.lag_p99, Duration::from_secs(15));
-        assert_eq!(spec.oracles.restore_catchup, Duration::from_secs(15));
+        assert_eq!(spec.oracles.restore_catchup, Duration::from_secs(90));
         assert_eq!(spec.oracles.checkpoint_silence_intervals, 4);
     }
 }

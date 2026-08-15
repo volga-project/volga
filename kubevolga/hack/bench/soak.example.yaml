@@ -1,6 +1,6 @@
 # Soak run file for `volga-longrun soak --config`. CLI flags override these fields.
-# launch.checkpoint writes PipelineSpec.state.checkpoint (master + soak waits).
-# Omit a checkpoint field to keep the Prod consts fallback.
+# Checkpoint knobs live on the job (`PipelineSpec.state.checkpoint`), not here.
+# `Nx_interval` multiplies that job interval (30s on the default soak job).
 
 env: kube
 duration_secs: 3600
@@ -10,10 +10,6 @@ dump: /tmp/soak
 prom_url: http://127.0.0.1:9090
 launch:
   worker_count: 2
-  checkpoint:
-    interval_ms: 30000
-    timeout_ms: 60000
-    retention: 1
 oracles:
   watermark_stale_while_sending: 30s
   lag_p99: 1.5x_window
