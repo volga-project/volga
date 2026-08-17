@@ -25,6 +25,9 @@ type VolgaWorkerSpec struct {
 type VolgaPodSpec struct {
 	ImagePullPolicy corev1.PullPolicy           `json:"imagePullPolicy,omitempty"`
 	Resources       corev1.ResourceRequirements `json:"resources,omitempty"`
+	NodeSelector    map[string]string           `json:"nodeSelector,omitempty"`
+	Tolerations     []corev1.Toleration         `json:"tolerations,omitempty"`
+	Affinity        *corev1.Affinity            `json:"affinity,omitempty"`
 }
 
 type VolgaPipelineStatus struct {
@@ -65,8 +68,8 @@ func (in *VolgaPipeline) DeepCopyInto(out *VolgaPipeline) {
 		out.Spec.PipelineSpec = make([]byte, len(in.Spec.PipelineSpec))
 		copy(out.Spec.PipelineSpec, in.Spec.PipelineSpec)
 	}
-	out.Spec.Master.Resources = deepCopyResourceRequirements(in.Spec.Master.Resources)
-	out.Spec.Worker.Resources = deepCopyResourceRequirements(in.Spec.Worker.Resources)
+	out.Spec.Master = deepCopyVolgaPodSpec(in.Spec.Master)
+	out.Spec.Worker = deepCopyVolgaPodSpec(in.Spec.Worker)
 	if in.Status.Conditions != nil {
 		out.Status.Conditions = make([]metav1.Condition, len(in.Status.Conditions))
 		copy(out.Status.Conditions, in.Status.Conditions)
@@ -77,6 +80,33 @@ func (in *VolgaPipeline) DeepCopyInto(out *VolgaPipeline) {
 			out.Status.LifecycleEvents[i] = append(json.RawMessage(nil), in.Status.LifecycleEvents[i]...)
 		}
 	}
+}
+
+func deepCopyVolgaPodSpec(in VolgaPodSpec) VolgaPodSpec {
+	out := VolgaPodSpec{
+		ImagePullPolicy: in.ImagePullPolicy,
+		Resources:       deepCopyResourceRequirements(in.Resources),
+	}
+	if in.NodeSelector != nil {
+		out.NodeSelector = make(map[string]string, len(in.NodeSelector))
+		for k, v := range in.NodeSelector {
+			out.NodeSelector[k] = v
+		}
+	}
+	if in.Tolerations != nil {
+		out.Tolerations = make([]corev1.Toleration, len(in.Tolerations))
+		for i := range in.Tolerations {
+			in.Tolerations[i].DeepCopyInto(&out.Tolerations[i])
+		}
+	}
+	if in.Affinity != nil {
+		out.Affinity = in.Affinity.DeepCopy()
+	}
+	return out
+}
+
+func (in VolgaPodSpec) DeepCopy() VolgaPodSpec {
+	return deepCopyVolgaPodSpec(in)
 }
 
 func deepCopyResourceRequirements(in corev1.ResourceRequirements) corev1.ResourceRequirements {

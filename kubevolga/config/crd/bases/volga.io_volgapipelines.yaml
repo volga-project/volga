@@ -52,12 +52,36 @@ spec:
                     resources:
                       type: object
                       x-kubernetes-preserve-unknown-fields: true
+                    nodeSelector:
+                      type: object
+                      additionalProperties:
+                        type: string
+                    tolerations:
+                      type: array
+                      items:
+                        type: object
+                        x-kubernetes-preserve-unknown-fields: true
+                    affinity:
+                      type: object
+                      x-kubernetes-preserve-unknown-fields: true
                 worker:
                   type: object
                   properties:
                     imagePullPolicy:
                       type: string
                     resources:
+                      type: object
+                      x-kubernetes-preserve-unknown-fields: true
+                    nodeSelector:
+                      type: object
+                      additionalProperties:
+                        type: string
+                    tolerations:
+                      type: array
+                      items:
+                        type: object
+                        x-kubernetes-preserve-unknown-fields: true
+                    affinity:
                       type: object
                       x-kubernetes-preserve-unknown-fields: true
                 holdOnFinish:
