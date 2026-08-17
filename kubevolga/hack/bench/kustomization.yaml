@@ -1,0 +1,27 @@
+# Lightweight Prom + Grafana for Volga soak (not kube-prometheus-stack).
+# Apply: kubectl apply -k kubevolga/hack/bench
+# UI:    kubectl -n volga-bench port-forward svc/grafana 3000:3000
+# Scrapes pods with prometheus.io/{scrape,port,path} (PR A). Prefers infra nodes (PR C).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: volga-bench
+resources:
+  - namespace.yaml
+  - rbac.yaml
+  - prometheus.yaml
+  - grafana.yaml
+configMapGenerator:
+  - name: prometheus-config
+    files:
+      - prometheus.yml
+  - name: grafana-datasources
+    files:
+      - datasources.yaml=grafana-datasources.yaml
+  - name: grafana-dashboard-provider
+    files:
+      - dashboards.yaml=grafana-dashboards.yaml
+  - name: grafana-dashboards
+    files:
+      - volga-soak.json=dashboards/volga-soak.json
+generatorOptions:
+  disableNameSuffixHash: true
