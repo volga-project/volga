@@ -28,8 +28,8 @@ pub struct StateSpec {
     pub checkpoint_store: CheckpointStoreConfig,
     pub operator_backend: OperatorStateBackendConfig,
     pub request_store: Option<RequestStoreConfig>,
-    /// Per-job checkpoint interval / timeout / retention. Omitted fields use runtime consts.
-    /// `Some(0)` is invalid; it does not disable interval checkpoints (consts `0s` does).
+    /// Per-job checkpoint interval / timeout / retention. Spec is the only source.
+    /// `interval_ms: 0` disables interval checkpoints.
     #[serde(default)]
     pub checkpoint: CheckpointSpec,
     /// When true, workers run periodic `OperatorStore::maintain`.
@@ -38,9 +38,10 @@ pub struct StateSpec {
     pub maintenance_interval_ms: u64,
 }
 
-/// Job checkpoint knobs. `None` uses runtime consts (`master.checkpoint_*`).
-/// `Some(0)` is invalid and is not a disable; consts `0s` turns interval CPs off.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+/// Job checkpoint knobs. Spec is the only source.
+/// `interval_ms: 0` disables interval checkpoints. Missing fields are off / no timeout
+/// at runtime (no panic); [`crate::api::PipelineSpec::validate`] requires all three.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct CheckpointSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interval_ms: Option<u64>,
@@ -50,26 +51,33 @@ pub struct CheckpointSpec {
     pub retention: Option<u64>,
 }
 
+impl Default for CheckpointSpec {
+    fn default() -> Self {
+        Self {
+            interval_ms: Some(0),
+            timeout_ms: Some(60_000),
+            retention: Some(1),
+        }
+    }
+}
+
 impl CheckpointSpec {
-    /// `Some(0)` is treated as omitted (consts fallback) if validate was skipped.
     pub fn interval(&self) -> Option<Duration> {
-        self.interval_ms.filter(|ms| *ms > 0).map(Duration::from_millis)
+        match self.interval_ms {
+            Some(0) | None => None,
+            Some(ms) => Some(Duration::from_millis(ms)),
+        }
     }
 
     pub fn timeout(&self) -> Option<Duration> {
-        self.timeout_ms.filter(|ms| *ms > 0).map(Duration::from_millis)
+        match self.timeout_ms {
+            Some(0) | None => None,
+            Some(ms) => Some(Duration::from_millis(ms)),
+        }
     }
 
-    pub fn interval_or(&self, fallback: Duration) -> Duration {
-        self.interval().unwrap_or(fallback)
-    }
-
-    pub fn timeout_or(&self, fallback: Duration) -> Duration {
-        self.timeout().unwrap_or(fallback)
-    }
-
-    pub fn retention_or(&self, fallback: u64) -> u64 {
-        self.retention.filter(|n| *n > 0).unwrap_or(fallback)
+    pub fn retention(&self) -> usize {
+        self.retention.filter(|n| *n > 0).unwrap_or(0) as usize
     }
 }
 
@@ -83,81 +91,5 @@ impl Default for StateSpec {
             maintenance_enabled: true,
             maintenance_interval_ms: 1_000,
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn omitted_checkpoint_uses_consts_fallback() {
-        let spec: StateSpec = serde_json::from_value(serde_json::json!({
-            "checkpoint_store": "in_memory",
-            "operator_backend": "in_memory",
-            "maintenance_enabled": true,
-            "maintenance_interval_ms": 1000
-        }))
-        .unwrap();
-        assert_eq!(spec.checkpoint, CheckpointSpec::default());
-        assert_eq!(spec.checkpoint.interval_or(Duration::from_secs(30)), Duration::from_secs(30));
-        assert_eq!(spec.checkpoint.retention_or(1), 1);
-    }
-
-    #[test]
-    fn checkpoint_fields_override_fallback() {
-        let spec: StateSpec = serde_json::from_value(serde_json::json!({
-            "checkpoint": {
-                "interval_ms": 5000,
-                "timeout_ms": 15000,
-                "retention": 3
-            }
-        }))
-        .unwrap();
-        assert_eq!(spec.checkpoint.interval(), Some(Duration::from_secs(5)));
-        assert_eq!(spec.checkpoint.timeout(), Some(Duration::from_secs(15)));
-        assert_eq!(spec.checkpoint.retention_or(1), 3);
-    }
-
-    #[test]
-    fn zero_interval_is_omitted_not_disable() {
-        let spec = CheckpointSpec {
-            interval_ms: Some(0),
-            ..Default::default()
-        };
-        assert_eq!(spec.interval(), None);
-        assert_eq!(
-            spec.interval_or(Duration::from_secs(30)),
-            Duration::from_secs(30)
-        );
-    }
-
-    #[test]
-    fn zero_checkpoint_knobs_are_invalid() {
-        use crate::api::{ExecutionMode, ExecutionProfile, PipelineSpec};
-
-        let mut spec = PipelineSpec {
-            execution_profile: Some(ExecutionProfile::SingleWorker {
-                num_threads_per_task: 1,
-            }),
-            execution_mode: ExecutionMode::Streaming,
-            parallelism: 1,
-            worker_runtime: Default::default(),
-            state: StateSpec::default(),
-            operator_overrides: Default::default(),
-            event_time: Default::default(),
-            sources: Vec::new(),
-            request_source_sink: None,
-            sink: None,
-            sql: None,
-            task_assignment_strategy: None,
-        };
-        spec.state.checkpoint.interval_ms = Some(0);
-        assert!(spec.validate().is_err());
-        spec.state.checkpoint.interval_ms = Some(1_000);
-        spec.state.checkpoint.retention = Some(0);
-        assert!(spec.validate().is_err());
-        spec.state.checkpoint.retention = Some(1);
-        assert!(spec.validate().is_ok());
     }
 }

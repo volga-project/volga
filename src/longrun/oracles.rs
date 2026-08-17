@@ -215,7 +215,7 @@ fn checkpoint_health(
             "checkpoint health: no volga_checkpoint_completed series"
         ));
     }
-    // Board dumps `increase(...[5m])`: activity is a positive sample, not a rising counter.
+    // Dump uses `increase(...[5m])`: activity is a positive sample, not a rising counter.
     let mut last_activity = completed[0].ts;
     for sample in completed {
         if sample.value > 0.5 {

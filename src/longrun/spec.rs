@@ -2,18 +2,18 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::api::CheckpointSpec;
-use crate::runtime::consts::{runtime_consts, MASTER_CHECKPOINT_INTERVAL, MASTER_CHECKPOINT_TIMEOUT};
 use crate::test_utils::checkpoint::WINDOW_RANGE_MS;
 use crate::test_utils::harness::{PipelineLaunchSpec, RuntimeEnv};
 
+use super::dump::extra_prom_queries;
 use super::job::soak_window_launch_spec;
 
 pub fn resolved_checkpoint_interval(checkpoint: &CheckpointSpec) -> Duration {
-    checkpoint.interval_or(runtime_consts().duration(MASTER_CHECKPOINT_INTERVAL))
+    checkpoint.interval().unwrap_or(Duration::ZERO)
 }
 
 pub fn resolved_checkpoint_timeout(checkpoint: &CheckpointSpec) -> Duration {
-    checkpoint.timeout_or(runtime_consts().duration(MASTER_CHECKPOINT_TIMEOUT))
+    checkpoint.timeout().unwrap_or(Duration::ZERO)
 }
 
 /// Soak window RANGE + event-time OOO (0). Used as the default lag p99 bound.
@@ -80,6 +80,8 @@ pub struct SoakSpec {
     pub dump: Option<PathBuf>,
     /// Prometheus HTTP API (laptop port-forward). Required for Prom dump / Prom oracles.
     pub prom_url: Option<String>,
+    /// Dump-only PromQL (oracles always query [`super::dump::REQUIRED_PROM_QUERIES`]).
+    pub extra_prom_queries: Vec<(String, String)>,
 }
 
 impl SoakSpec {
@@ -92,6 +94,7 @@ impl SoakSpec {
             oracles: SoakOracleConfig::default(),
             dump: None,
             prom_url: None,
+            extra_prom_queries: extra_prom_queries(),
         }
     }
 

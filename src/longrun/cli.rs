@@ -14,7 +14,7 @@ Usage:
   volga-longrun bench
 
 v1 implements soak only. Default duration: local 120s, kube/docker 3600s.
-Checkpoints use prod consts (30s interval). Count sink. Sliding RANGE window job.
+Checkpoints come from the job spec (30s / 60s / 1). Count sink. Sliding RANGE window job.
 --dump writes lifecycle.json (and prom.json when --prom-url is set).";
 
 #[derive(Debug, Clone, PartialEq, Eq)]

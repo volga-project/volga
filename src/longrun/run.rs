@@ -14,7 +14,7 @@ use crate::test_utils::checkpoint::{
 use crate::test_utils::harness::{RuntimeEnv, VolgaCluster, WorkerKillMode};
 use crate::test_utils::recovery::RecoveryTimeouts;
 
-use super::dump::dump_board_series;
+use super::dump::{dump_prom_series, prom_queries};
 use super::oracles::{self, KillWindow, PromSeriesSet};
 use super::spec::{
     resolved_checkpoint_interval, resolved_checkpoint_timeout, SoakScenario, SoakSpec,
@@ -227,7 +227,13 @@ async fn teardown_observe(
     let mut prom_dump = None;
     if let Some(prom_url) = spec.prom_url.as_deref() {
         println!("[volga-longrun] dumping Prom query_range from {prom_url}");
-        let dump = dump_board_series(prom_url, outcome.started_unix, end_unix, PROM_STEP)
+        let dump = dump_prom_series(
+            prom_url,
+            outcome.started_unix,
+            end_unix,
+            PROM_STEP,
+            &prom_queries(&spec.extra_prom_queries),
+        )
             .await
             .context("prometheus query_range dump")?;
         prom_dump = Some(dump);

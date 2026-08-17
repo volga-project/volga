@@ -8,8 +8,8 @@ use tokio::time::{
 use crate::common::failure::{workers_to_replace, FailureEvent, FailureKind};
 use crate::orchestrator::orchestrator::WorkerHealthWatchHandle;
 use crate::runtime::consts::{
-    runtime_consts, MASTER_CHECKPOINT_INTERVAL, MASTER_CHECKPOINT_TIMEOUT,
-    MASTER_FAILURE_AGGREGATION_WINDOW, MASTER_STATE_POLL_INTERVAL, MASTER_STATE_POLL_TIMEOUT,
+    runtime_consts, MASTER_FAILURE_AGGREGATION_WINDOW, MASTER_STATE_POLL_INTERVAL,
+    MASTER_STATE_POLL_TIMEOUT,
 };
 use crate::runtime::observability::snapshot_types::{PipelineSnapshot, WorkerSnapshot};
 use crate::runtime::observability::StreamTaskStatus;
@@ -61,9 +61,13 @@ impl ExecutionAttempt {
             .run_health_poll(worker_ids, self.failure_tx.clone());
 
         let poll_interval = runtime_consts().duration(MASTER_STATE_POLL_INTERVAL);
-        let checkpoint_interval = self.pipeline.spec.state.checkpoint.interval_or(
-            runtime_consts().duration(MASTER_CHECKPOINT_INTERVAL),
-        );
+        let checkpoint_interval = self
+            .pipeline
+            .spec
+            .state
+            .checkpoint
+            .interval()
+            .unwrap_or(Duration::ZERO);
 
         let run_loop = tokio::spawn(async move {
             let mut poll = interval_at(Instant::now() + poll_interval, poll_interval);
@@ -148,9 +152,13 @@ impl ExecutionAttempt {
             return;
         }
 
-        let checkpoint_timeout = self.pipeline.spec.state.checkpoint.timeout_or(
-            runtime_consts().duration(MASTER_CHECKPOINT_TIMEOUT),
-        );
+        let checkpoint_timeout = self
+            .pipeline
+            .spec
+            .state
+            .checkpoint
+            .timeout()
+            .unwrap_or(Duration::MAX);
         let draining = self.phase == AttemptPhase::Draining;
         if !state_poll.failures.is_empty() {
             for (worker_id, error) in &state_poll.failures {

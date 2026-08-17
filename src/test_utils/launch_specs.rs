@@ -6,7 +6,7 @@ use datafusion::common::ScalarValue;
 
 use crate::api::spec::connectors::{SourceSpec, SourceSpecKind};
 use crate::api::spec::pipeline::ExecutionProfile;
-use crate::api::{PipelineSpecBuilder, TaskWorkerAssignmentStrategyType};
+use crate::api::{CheckpointSpec, PipelineSpecBuilder, TaskWorkerAssignmentStrategyType};
 use crate::runtime::functions::source::datagen_source::{DatagenSpec, FieldGenerator};
 use crate::test_utils::harness::PipelineLaunchSpec;
 
@@ -36,6 +36,11 @@ pub fn smoke_launch_spec(
                 .collect(),
         },
     );
+    let checkpoint = CheckpointSpec {
+        interval_ms: Some(500),
+        timeout_ms: Some(5_000),
+        retention: Some(2),
+    };
     let pipeline = PipelineSpecBuilder::new()
         .with_parallelism(parallelism)
         .with_execution_profile(ExecutionProfile::MasterWorker {
@@ -55,6 +60,11 @@ pub fn smoke_launch_spec(
             schema_to_json(&schema),
         ))
         .sql("SELECT value FROM test_table")
+        .with_checkpoint(
+            checkpoint.interval_ms,
+            checkpoint.timeout_ms,
+            checkpoint.retention,
+        )
         .build();
     PipelineLaunchSpec::new(pipeline, worker_count, Some(rows))
 }
@@ -89,6 +99,7 @@ pub fn deployment_smoke_launch_spec(generator: FieldGenerator) -> PipelineLaunch
             schema_to_json(&schema),
         ))
         .sql("SELECT value FROM test_table")
+        .with_checkpoint(Some(2_000), Some(60_000), Some(2))
         .build();
     PipelineLaunchSpec::new(pipeline, WORKER_COUNT, Some(EXPECTED_ROWS))
 }

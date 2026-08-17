@@ -64,128 +64,153 @@ impl PromQueryRange {
     }
 }
 
-/// #238 soak board exprs. Grafana uses `pipeline_id=~"$pipeline"`; dump uses `.*` (all).
-pub fn board_queries() -> &'static [(&'static str, &'static str)] {
-    &[
-        (
-            "checkpoint_completed",
-            concat!(
-                "increase(volga_checkpoint_completed_total",
-                r#"{pipeline_id=~".*"}"#,
-                "[5m])"
-            ),
+/// Named PromQL. Oracles require [`REQUIRED_PROM_QUERIES`]; extras are dump-only.
+pub type PromQuery = (&'static str, &'static str);
+
+pub const REQUIRED_PROM_QUERY_NAMES: &[&str] = &[
+    "checkpoint_completed",
+    "checkpoint_failed",
+    "records_sent_rate",
+    "watermark_lag_p99",
+];
+
+pub const REQUIRED_PROM_QUERIES: &[PromQuery] = &[
+    (
+        "checkpoint_completed",
+        concat!(
+            "increase(volga_checkpoint_completed_total",
+            r#"{pipeline_id=~".*"}"#,
+            "[5m])"
         ),
-        (
-            "checkpoint_failed",
-            concat!(
-                "increase(volga_checkpoint_failed_total",
-                r#"{pipeline_id=~".*"}"#,
-                "[5m])"
-            ),
+    ),
+    (
+        "checkpoint_failed",
+        concat!(
+            "increase(volga_checkpoint_failed_total",
+            r#"{pipeline_id=~".*"}"#,
+            "[5m])"
         ),
-        (
-            "checkpoint_duration_p99",
-            concat!(
-                "histogram_quantile(0.99, sum by (le) (rate(volga_checkpoint_duration_ms_bucket",
-                r#"{pipeline_id=~".*"}"#,
-                "[1m])))"
-            ),
+    ),
+    (
+        "records_sent_rate",
+        concat!(
+            "sum(rate(volga_stream_task_records_sent_total",
+            r#"{pipeline_id=~".*"}"#,
+            "[1m]))"
         ),
-        (
-            "busy_ms_per_s",
-            concat!(
-                "avg by (task_id) (volga_stream_task_busy_time_ms_per_second",
-                r#"{pipeline_id=~".*"}"#,
-                ")"
-            ),
+    ),
+    (
+        "watermark_lag_p99",
+        concat!(
+            "quantile(0.99, volga_stream_task_watermark_lag_ms",
+            r#"{pipeline_id=~".*"}"#,
+            ")"
         ),
-        (
-            "idle_ms_per_s",
-            concat!(
-                "avg by (task_id) (volga_stream_task_idle_time_ms_per_second",
-                r#"{pipeline_id=~".*"}"#,
-                ")"
-            ),
+    ),
+];
+
+pub const EXTRA_PROM_QUERIES: &[PromQuery] = &[
+    (
+        "checkpoint_duration_p99",
+        concat!(
+            "histogram_quantile(0.99, sum by (le) (rate(volga_checkpoint_duration_ms_bucket",
+            r#"{pipeline_id=~".*"}"#,
+            "[1m])))"
         ),
-        (
-            "backpressured_ms_per_s",
-            concat!(
-                "avg by (task_id) (volga_stream_task_backpressured_time_ms_per_second",
-                r#"{pipeline_id=~".*"}"#,
-                ")"
-            ),
+    ),
+    (
+        "busy_ms_per_s",
+        concat!(
+            "avg by (task_id) (volga_stream_task_busy_time_ms_per_second",
+            r#"{pipeline_id=~".*"}"#,
+            ")"
         ),
-        (
-            "watermark_lag_p50",
-            concat!(
-                "quantile(0.50, volga_stream_task_watermark_lag_ms",
-                r#"{pipeline_id=~".*"}"#,
-                ")"
-            ),
+    ),
+    (
+        "idle_ms_per_s",
+        concat!(
+            "avg by (task_id) (volga_stream_task_idle_time_ms_per_second",
+            r#"{pipeline_id=~".*"}"#,
+            ")"
         ),
-        (
-            "watermark_lag_p99",
-            concat!(
-                "quantile(0.99, volga_stream_task_watermark_lag_ms",
-                r#"{pipeline_id=~".*"}"#,
-                ")"
-            ),
+    ),
+    (
+        "backpressured_ms_per_s",
+        concat!(
+            "avg by (task_id) (volga_stream_task_backpressured_time_ms_per_second",
+            r#"{pipeline_id=~".*"}"#,
+            ")"
         ),
-        (
-            "records_sent_rate",
-            concat!(
-                "sum(rate(volga_stream_task_records_sent_total",
-                r#"{pipeline_id=~".*"}"#,
-                "[1m]))"
-            ),
+    ),
+    (
+        "watermark_lag_p50",
+        concat!(
+            "quantile(0.50, volga_stream_task_watermark_lag_ms",
+            r#"{pipeline_id=~".*"}"#,
+            ")"
         ),
-        (
-            "sink_records_rate",
-            concat!(
-                "sum(rate(volga_sink_records_written_total",
-                r#"{pipeline_id=~".*"}"#,
-                "[1m]))"
-            ),
+    ),
+    (
+        "sink_records_rate",
+        concat!(
+            "sum(rate(volga_sink_records_written_total",
+            r#"{pipeline_id=~".*"}"#,
+            "[1m]))"
         ),
-        (
-            "wo_ingest_p99",
-            concat!(
-                "histogram_quantile(0.99, sum by (le) (rate(volga_wo_ingest_ms_bucket",
-                r#"{pipeline_id=~".*"}"#,
-                "[1m])))"
-            ),
+    ),
+    (
+        "wo_ingest_p99",
+        concat!(
+            "histogram_quantile(0.99, sum by (le) (rate(volga_wo_ingest_ms_bucket",
+            r#"{pipeline_id=~".*"}"#,
+            "[1m])))"
         ),
-        (
-            "wo_late_dropped_rate",
-            concat!(
-                "sum(rate(volga_wo_late_dropped_rows_total",
-                r#"{pipeline_id=~".*"}"#,
-                "[1m]))"
-            ),
+    ),
+    (
+        "wo_late_dropped_rate",
+        concat!(
+            "sum(rate(volga_wo_late_dropped_rows_total",
+            r#"{pipeline_id=~".*"}"#,
+            "[1m]))"
         ),
-        (
-            "wo_maintain_pruned_rate",
-            concat!(
-                "sum(rate(volga_wo_maintain_pruned_rows_total",
-                r#"{pipeline_id=~".*"}"#,
-                "[1m]))"
-            ),
+    ),
+    (
+        "wo_maintain_pruned_rate",
+        concat!(
+            "sum(rate(volga_wo_maintain_pruned_rows_total",
+            r#"{pipeline_id=~".*"}"#,
+            "[1m]))"
         ),
-        (
-            "wo_state_bytes",
-            concat!(
-                "sum(volga_wo_state_raw_bytes",
-                r#"{pipeline_id=~".*"}"#,
-                ") + sum(volga_wo_state_tiles_bytes",
-                r#"{pipeline_id=~".*"}"#,
-                ") + sum(volga_wo_state_triggers_bytes",
-                r#"{pipeline_id=~".*"}"#,
-                ") + sum(volga_wo_state_key_states_bytes",
-                r#"{pipeline_id=~".*"}"#,
-                ")"
-            ),
+    ),
+    (
+        "wo_state_bytes",
+        concat!(
+            "sum(volga_wo_state_raw_bytes",
+            r#"{pipeline_id=~".*"}"#,
+            ") + sum(volga_wo_state_tiles_bytes",
+            r#"{pipeline_id=~".*"}"#,
+            ") + sum(volga_wo_state_triggers_bytes",
+            r#"{pipeline_id=~".*"}"#,
+            ") + sum(volga_wo_state_key_states_bytes",
+            r#"{pipeline_id=~".*"}"#,
+            ")"
         ),
-    ]
+    ),
+];
+
+pub fn extra_prom_queries() -> Vec<(String, String)> {
+    EXTRA_PROM_QUERIES
+        .iter()
+        .map(|(name, expr)| (name.to_string(), expr.to_string()))
+        .collect()
+}
+
+pub fn prom_queries(extra: &[(String, String)]) -> Vec<(String, String)> {
+    REQUIRED_PROM_QUERIES
+        .iter()
+        .map(|(name, expr)| (name.to_string(), expr.to_string()))
+        .chain(extra.iter().cloned())
+        .collect()
 }
 
 pub async fn query_range(
@@ -218,19 +243,20 @@ pub async fn query_range(
     Ok(body)
 }
 
-pub async fn dump_board_series(
+pub async fn dump_prom_series(
     prom_url: &str,
     start: f64,
     end: f64,
     step: &str,
+    queries: &[(String, String)],
 ) -> anyhow::Result<serde_json::Value> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
     let mut series = serde_json::Map::new();
-    for (name, query) in board_queries() {
+    for (name, query) in queries {
         let result = query_range(&client, prom_url, query, start, end, step).await?;
-        series.insert(name.to_string(), serde_json::to_value(&result)?);
+        series.insert(name.clone(), serde_json::to_value(&result)?);
     }
     Ok(serde_json::json!({
         "prom_url": prom_url,
@@ -246,17 +272,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn board_queries_match_soak_dashboard() {
-        let names: Vec<_> = board_queries().iter().map(|(n, _)| *n).collect();
-        assert!(names.contains(&"wo_late_dropped_rate"));
-        assert!(names.contains(&"wo_maintain_pruned_rate"));
-        assert!(names.contains(&"wo_state_bytes"));
-        assert!(names.contains(&"wo_ingest_p99"));
-        for (_, query) in board_queries() {
-            assert!(
-                query.contains(r#"pipeline_id=~".*""#),
-                "board query missing pipeline_id: {query}"
-            );
+    fn required_prom_queries_cover_oracle_names() {
+        let names: Vec<_> = REQUIRED_PROM_QUERIES.iter().map(|(n, _)| *n).collect();
+        assert_eq!(names, REQUIRED_PROM_QUERY_NAMES);
+        let extra: Vec<_> = EXTRA_PROM_QUERIES.iter().map(|(n, _)| *n).collect();
+        for name in REQUIRED_PROM_QUERY_NAMES {
+            assert!(!extra.contains(name), "extra duplicates required {name}");
         }
     }
 }

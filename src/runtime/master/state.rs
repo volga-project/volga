@@ -13,9 +13,7 @@ use crate::api::PipelineSpec;
 use crate::common::types::PipelineId;
 use crate::orchestrator::orchestrator::{MasterOrchestrator, WorkerNode};
 use crate::runtime::checkpoint::{RestorePlan, SerializedCheckpoint};
-use crate::runtime::consts::{
-    runtime_consts, MASTER_CHECKPOINT_RETENTION, MASTER_REGISTRY_WAIT_TICK,
-};
+use crate::runtime::consts::{runtime_consts, MASTER_REGISTRY_WAIT_TICK};
 use crate::runtime::execution_graph::ExecutionGraph;
 use crate::runtime::metrics::{
     increment_pipeline_counter, record_pipeline_histogram, METRIC_CHECKPOINT_COMPLETED,
@@ -255,9 +253,7 @@ impl MasterState {
                 task_index,
             })
             .collect();
-        let retention = config.spec.state.checkpoint.retention_or(
-            runtime_consts().u64(MASTER_CHECKPOINT_RETENTION),
-        ) as usize;
+        let retention = config.spec.state.checkpoint.retention().max(1);
         self.checkpoints
             .ask(ConfigureCheckpoints {
                 pipeline_id,

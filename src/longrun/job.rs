@@ -8,8 +8,8 @@ use crate::test_utils::harness::PipelineLaunchSpec;
 
 /// Sliding RANGE window job used by both Steady and KillAfterCheckpoint.
 ///
-/// Same SQL as the checkpoint window suite; Count sink; prod runtime consts
-/// (30s checkpoint interval), not `kube_test` 2s.
+/// Same SQL as the checkpoint window suite; Count sink. Checkpoint knobs are on
+/// the job spec (30s / 60s / 1) for every env — not runtime consts.
 ///
 /// Datagen `run_for_s` stays unset: the soak loop owns wall-clock duration and
 /// shuts the cluster down. A per-attempt `run_for_s` would restart after kill

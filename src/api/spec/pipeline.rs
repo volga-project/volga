@@ -265,14 +265,21 @@ impl PipelineSpec {
         if self.execution_mode == ExecutionMode::Request && self.state.request_store.is_none() {
             return Err("request mode requires a request store".to_string());
         }
-        if matches!(self.state.checkpoint.interval_ms, Some(0)) {
-            return Err("state.checkpoint.interval_ms must be > 0".to_string());
+        if self.state.checkpoint.interval_ms.is_none() {
+            return Err(
+                "state.checkpoint.interval_ms is required (0 disables interval checkpoints)"
+                    .to_string(),
+            );
         }
-        if matches!(self.state.checkpoint.timeout_ms, Some(0)) {
-            return Err("state.checkpoint.timeout_ms must be > 0".to_string());
+        if self.state.checkpoint.timeout_ms.is_none()
+            || matches!(self.state.checkpoint.timeout_ms, Some(0))
+        {
+            return Err("state.checkpoint.timeout_ms is required and must be > 0".to_string());
         }
-        if matches!(self.state.checkpoint.retention, Some(0)) {
-            return Err("state.checkpoint.retention must be > 0".to_string());
+        if self.state.checkpoint.retention.is_none()
+            || matches!(self.state.checkpoint.retention, Some(0))
+        {
+            return Err("state.checkpoint.retention is required and must be >= 1".to_string());
         }
         Ok(())
     }
