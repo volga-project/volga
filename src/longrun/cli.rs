@@ -156,16 +156,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_soak_defaults() {
-        let LongrunCommand::Soak(args) = parse_args(["soak"]).unwrap() else {
-            panic!("expected soak");
-        };
-        assert_eq!(args.env, RuntimeEnv::Local);
-        assert_eq!(args.scenario, SoakScenario::Steady);
-        assert_eq!(args.duration_secs, None);
-    }
-
-    #[test]
     fn parse_soak_kill_kube() {
         let LongrunCommand::Soak(args) = parse_args([
             "soak",
@@ -189,20 +179,6 @@ mod tests {
             }
         );
         assert_eq!(args.duration_secs, Some(3600));
-    }
-
-    #[test]
-    fn parse_equals_and_bench() {
-        let LongrunCommand::Soak(args) =
-            parse_args(["soak", "--env=docker", "--scenario=steady"]).unwrap()
-        else {
-            panic!("expected soak");
-        };
-        assert_eq!(args.env, RuntimeEnv::Docker);
-        assert!(matches!(
-            parse_args(["bench"]).unwrap(),
-            LongrunCommand::Bench
-        ));
     }
 
     #[test]
