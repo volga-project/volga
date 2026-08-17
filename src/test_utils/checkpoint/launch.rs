@@ -152,7 +152,7 @@ pub fn checkpoint_recovery_launch_spec(
         ]))
         .build();
 
-    PipelineLaunchSpec::new(pipeline, worker_count, 0)
+    PipelineLaunchSpec::new(pipeline, worker_count, None)
 }
 
 /// Multi-worker launch for sequential multi-failure stress (same indefinite datagen).

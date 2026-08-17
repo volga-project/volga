@@ -56,7 +56,7 @@ pub fn smoke_launch_spec(
         ))
         .sql("SELECT value FROM test_table")
         .build();
-    PipelineLaunchSpec::new(pipeline, worker_count, rows)
+    PipelineLaunchSpec::new(pipeline, worker_count, Some(rows))
 }
 
 pub fn deployment_smoke_launch_spec(generator: FieldGenerator) -> PipelineLaunchSpec {
@@ -90,7 +90,7 @@ pub fn deployment_smoke_launch_spec(generator: FieldGenerator) -> PipelineLaunch
         ))
         .sql("SELECT value FROM test_table")
         .build();
-    PipelineLaunchSpec::new(pipeline, WORKER_COUNT, EXPECTED_ROWS)
+    PipelineLaunchSpec::new(pipeline, WORKER_COUNT, Some(EXPECTED_ROWS))
 }
 
 pub fn worker_count_for(

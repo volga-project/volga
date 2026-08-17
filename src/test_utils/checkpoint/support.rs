@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use crate::runtime::master::LifecycleEvent;
 use crate::test_utils::harness::{LifecycleOracle, MasterHandle, RuntimeEnv, VolgaCluster};
 
-pub(super) async fn wait_until_attempt0_running(
+pub async fn wait_until_attempt0_running(
     master: &MasterHandle,
     cursor: &mut u64,
     timeout: Duration,
@@ -28,7 +28,7 @@ pub(super) async fn wait_until_attempt0_running(
     Ok(())
 }
 
-pub(super) async fn wait_until_attempt_running(
+pub async fn wait_until_attempt_running(
     master: &MasterHandle,
     cursor: &mut u64,
     timeout: Duration,
