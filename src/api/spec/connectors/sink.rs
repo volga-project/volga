@@ -13,6 +13,8 @@ pub enum SinkSpec {
     },
     Request,
     Parquet(ParquetSinkSpec),
+    /// Drop-payload sink: count records, do not retain batches.
+    Count,
 }
 
 impl SinkSpec {
@@ -60,6 +62,12 @@ impl SinkSpec {
                 .with_upsert_key_columns(upsert_key_columns.clone()),
             SinkSpec::Request => SinkConfig::RequestSinkConfig,
             SinkSpec::Parquet(spec) => SinkConfig::ParquetSinkConfig(spec.to_config()),
+            SinkSpec::Count => SinkConfig::CountSinkConfig,
         }
+    }
+
+    /// True when this sink needs the in-memory gRPC store process/pod.
+    pub fn needs_in_memory_store(&self) -> bool {
+        matches!(self, Self::InMemoryStorageGrpc { .. })
     }
 }

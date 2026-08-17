@@ -103,10 +103,20 @@ impl PipelineLaunchSpec {
 }
 
 /// Install/replace the in-memory gRPC sink address, preserving any upsert keys already on the pipeline.
+/// Non-InMemory sinks (Count, Parquet, Request) are left unchanged.
 pub(crate) fn install_in_memory_sink(pipeline: &mut PipelineSpec, server_addr: impl Into<String>) {
     let server_addr = server_addr.into();
     pipeline.sink = Some(match pipeline.sink.take() {
         Some(sink @ SinkSpec::InMemoryStorageGrpc { .. }) => sink.with_server_addr(server_addr),
-        _ => SinkSpec::in_memory_grpc(server_addr),
+        Some(other) => other,
+        None => SinkSpec::in_memory_grpc(server_addr),
     });
+}
+
+pub(crate) fn pipeline_needs_in_memory_store(pipeline: &PipelineSpec) -> bool {
+    pipeline
+        .sink
+        .as_ref()
+        .map(SinkSpec::needs_in_memory_store)
+        .unwrap_or(true)
 }

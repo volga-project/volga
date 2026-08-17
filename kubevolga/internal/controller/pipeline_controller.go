@@ -42,10 +42,19 @@ const (
 	masterPort             = int32(50051)
 	workerControlPort      = int32(50052)
 	workerTransportPort    = int32(60052)
+	metricsPort            = int32(9090)
 	defaultVolgaImage      = "volga:latest"
 	workerIDLabelKey       = "statefulset.kubernetes.io/pod-name"
 	kubeAPIServerInCluster = "https://kubernetes.default.svc"
 )
+
+func prometheusScrapeAnnotations() map[string]string {
+	return map[string]string{
+		"prometheus.io/scrape": "true",
+		"prometheus.io/port":   "9090",
+		"prometheus.io/path":   "/metrics",
+	}
+}
 
 //go:embed kube_pipeline_spec.schema.json
 var kubePipelineSpecSchema string
@@ -200,10 +209,10 @@ func (r *PipelineReconciler) reconcileMasterService(
 			}
 			svc.Labels = labels
 			svc.Spec.Selector = labels
-			svc.Spec.Ports = []corev1.ServicePort{{
-				Name: "grpc",
-				Port: masterPort,
-			}}
+			svc.Spec.Ports = []corev1.ServicePort{
+				{Name: "grpc", Port: masterPort},
+				{Name: "metrics", Port: metricsPort},
+			}
 			return nil
 		})
 		return err
@@ -231,6 +240,7 @@ func (r *PipelineReconciler) reconcileWorkerHeadlessService(
 			svc.Spec.Ports = []corev1.ServicePort{
 				{Name: "control", Port: workerControlPort},
 				{Name: "transport", Port: workerTransportPort},
+				{Name: "metrics", Port: metricsPort},
 			}
 			return nil
 		})
@@ -265,9 +275,10 @@ func (r *PipelineReconciler) reconcileMasterPod(
 		}
 		create := corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
-				Namespace: vp.Namespace,
-				Name:      masterName,
-				Labels:    labels,
+				Namespace:   vp.Namespace,
+				Name:        masterName,
+				Labels:      labels,
+				Annotations: prometheusScrapeAnnotations(),
 			},
 			Spec: corev1.PodSpec{
 				ServiceAccountName: serviceAccountName,
@@ -278,10 +289,14 @@ func (r *PipelineReconciler) reconcileMasterPod(
 					ImagePullPolicy: imagePullPolicy,
 					Resources:       resources,
 					Command:         []string{"volga-master"},
-					Ports:           []corev1.ContainerPort{{ContainerPort: masterPort, Name: "grpc"}},
+					Ports: []corev1.ContainerPort{
+						{ContainerPort: masterPort, Name: "grpc"},
+						{ContainerPort: metricsPort, Name: "metrics"},
+					},
 					Env: []corev1.EnvVar{
 						{Name: "VOLGA_ORCHESTRATOR_KIND", Value: "kube"},
 						{Name: "VOLGA_MASTER_BIND_ADDR", Value: "0.0.0.0:" + strconv.FormatInt(int64(masterPort), 10)},
+						{Name: "VOLGA_METRICS_BIND_ADDR", Value: "0.0.0.0:" + strconv.FormatInt(int64(metricsPort), 10)},
 						{Name: "VOLGA_MASTER_HOLD_ON_FINISH", Value: holdOnFinish},
 						{Name: "VOLGA_PIPELINE_CRD_NAME", Value: vp.Name},
 						{Name: "VOLGA_WORKER_LABEL_SELECTOR", Value: workerLabelSelector},
@@ -307,6 +322,7 @@ func (r *PipelineReconciler) reconcileMasterPod(
 				}},
 			},
 		}
+		applyPodPlacement(&create.Spec, vp.Spec.Master)
 		if err := controllerutil.SetControllerReference(vp, &create, r.Scheme); err != nil {
 			return err
 		}
@@ -346,6 +362,7 @@ func (r *PipelineReconciler) reconcileWorkerStatefulSet(
 			sts.Spec.Replicas = ptr.To(replicas)
 			sts.Spec.Selector = &metav1.LabelSelector{MatchLabels: labels}
 			sts.Spec.Template.ObjectMeta.Labels = labels
+			sts.Spec.Template.ObjectMeta.Annotations = prometheusScrapeAnnotations()
 			sts.Spec.Template.Spec.Containers = []corev1.Container{{
 				Name:            "worker",
 				Image:           image,
@@ -355,10 +372,12 @@ func (r *PipelineReconciler) reconcileWorkerStatefulSet(
 				Ports: []corev1.ContainerPort{
 					{ContainerPort: workerControlPort, Name: "control"},
 					{ContainerPort: workerTransportPort, Name: "transport"},
+					{ContainerPort: metricsPort, Name: "metrics"},
 				},
 				Env: []corev1.EnvVar{
 					{Name: "VOLGA_ORCHESTRATOR_KIND", Value: "kube"},
 					{Name: "VOLGA_WORKER_BIND_ADDR", Value: "0.0.0.0:" + strconv.FormatInt(int64(workerControlPort), 10)},
+					{Name: "VOLGA_METRICS_BIND_ADDR", Value: "0.0.0.0:" + strconv.FormatInt(int64(metricsPort), 10)},
 					{Name: "VOLGA_WORKER_HOLD_ON_FINISH", Value: holdOnFinish},
 					{Name: "MASTER_SERVICE_ADDR", Value: masterServiceAddr},
 					{
@@ -369,6 +388,7 @@ func (r *PipelineReconciler) reconcileWorkerStatefulSet(
 					},
 				},
 			}}
+			applyPodPlacement(&sts.Spec.Template.Spec, vp.Spec.Worker)
 			return nil
 		})
 		return err
@@ -526,6 +546,13 @@ func (r *PipelineReconciler) updatePipelineStatus(
 		latest.Status.Phase = phase
 		return r.Status().Update(ctx, &latest)
 	})
+}
+
+func applyPodPlacement(spec *corev1.PodSpec, placement v1alpha1.VolgaPodSpec) {
+	copied := placement.DeepCopy()
+	spec.NodeSelector = copied.NodeSelector
+	spec.Tolerations = copied.Tolerations
+	spec.Affinity = copied.Affinity
 }
 
 func resolvePullPolicy(global corev1.PullPolicy, component corev1.PullPolicy) corev1.PullPolicy {

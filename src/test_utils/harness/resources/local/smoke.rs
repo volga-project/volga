@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use anyhow::Context;
 
 pub struct LocalClusterResources {
-    storage: LocalStorage,
+    storage: Option<LocalStorage>,
     master: LocalMaster,
     workers: Arc<LocalWorkerPool>,
     worker_ids: Vec<String>,
@@ -131,9 +131,14 @@ impl ClusterBackend for LocalCluster {
 
 impl LocalClusterResources {
     pub async fn launch(launch: PipelineLaunchSpec) -> Result<Self> {
-        let storage = LocalStorage::start().await?;
         let mut spec = launch.pipeline;
-        super::super::install_in_memory_sink(&mut spec, storage.endpoint());
+        let storage = if super::super::pipeline_needs_in_memory_store(&spec) {
+            let storage = LocalStorage::start().await?;
+            super::super::install_in_memory_sink(&mut spec, storage.endpoint());
+            Some(storage)
+        } else {
+            None
+        };
         let local_orchestrator = LocalTestOrchestrator::new(
             launch.worker_count,
             Uuid::new_v4().to_string(),
@@ -198,7 +203,11 @@ impl LocalClusterResources {
     }
 
     pub async fn storage_snapshot(&self) -> Result<InMemoryStorageSnapshot> {
-        self.storage.snapshot().await
+        self.storage
+            .as_ref()
+            .context("pipeline has no in-memory sink")?
+            .snapshot()
+            .await
     }
 
     pub async fn kill_worker(&mut self, worker_id: &str, mode: WorkerKillMode) -> Result<()> {
@@ -219,6 +228,8 @@ impl LocalClusterResources {
         }
         self.workers.stop_all().await;
         self.master.stop().await;
-        self.storage.stop().await;
+        if let Some(storage) = self.storage.as_mut() {
+            storage.stop().await;
+        }
     }
 }
