@@ -59,7 +59,7 @@ impl FunctionTrait for CountSinkFunction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::test_utils::create_test_string_batch;
+    use crate::test_utils::common::create_test_string_batch;
     use crate::runtime::metrics::{
         collect_task_metric_values, init_metrics, METRIC_SINK_RECORDS_WRITTEN,
     };
