@@ -24,14 +24,16 @@ use async_trait::async_trait;
 struct KubeResources {
     pipeline_name: String,
     manifest_path: PathBuf,
-    storage_port_forward: Child,
+    storage_port_forward: Option<Child>,
     master_port_forward: Child,
     master_port: u16,
 }
 
 impl KubeResources {
     fn stop(mut self) -> Result<()> {
-        self.storage_port_forward.kill().ok();
+        if let Some(mut pf) = self.storage_port_forward {
+            pf.kill().ok();
+        }
         self.master_port_forward.kill().ok();
         kubectl(&[
             "-n",
@@ -50,7 +52,7 @@ impl KubeResources {
 
 pub struct KubeClusterResources {
     resources: Option<KubeResources>,
-    storage_endpoint: String,
+    storage_endpoint: Option<String>,
     expected_output_rows: usize,
     worker_ids: Vec<String>,
 }
@@ -149,12 +151,18 @@ impl ClusterBackend for KubeCluster {
 
 impl KubeClusterResources {
     pub async fn launch(launch: PipelineLaunchSpec) -> Result<Self> {
-        start_storage()?;
-        let storage_port = gen_unique_grpc_port();
-        let storage_port_forward = start_storage_port_forward(storage_port)?;
-        let storage_endpoint = format!("http://127.0.0.1:{storage_port}");
-        wait_for_local_port(storage_port, Duration::from_secs(30))?;
-        wait_for_empty_storage(&storage_endpoint).await?;
+        let needs_storage = super::pipeline_needs_in_memory_store(&launch.pipeline);
+        let (storage_port_forward, storage_endpoint) = if needs_storage {
+            start_storage()?;
+            let storage_port = gen_unique_grpc_port();
+            let storage_port_forward = start_storage_port_forward(storage_port)?;
+            let storage_endpoint = format!("http://127.0.0.1:{storage_port}");
+            wait_for_local_port(storage_port, Duration::from_secs(30))?;
+            wait_for_empty_storage(&storage_endpoint).await?;
+            (Some(storage_port_forward), Some(storage_endpoint))
+        } else {
+            (None, None)
+        };
         let pipeline_name = format!("kube-harness-{}", Uuid::new_v4().simple());
         let manifest_path = write_pipeline_manifest(
             &pipeline_name,
@@ -203,7 +211,11 @@ impl KubeClusterResources {
     }
 
     pub async fn storage_snapshot(&self) -> Result<InMemoryStorageSnapshot> {
-        InMemoryStorageClient::new(self.storage_endpoint.clone())
+        let endpoint = self
+            .storage_endpoint
+            .as_ref()
+            .context("pipeline has no in-memory sink")?;
+        InMemoryStorageClient::new(endpoint.clone())
             .await?
             .snapshot()
             .await
@@ -301,10 +313,12 @@ fn write_pipeline_manifest(
     kube_worker_health_poll: bool,
     runtime_consts_profile: crate::runtime::consts::RuntimeConstsProfile,
 ) -> Result<PathBuf> {
-    super::install_in_memory_sink(
-        &mut pipeline,
-        "http://volga-test-storage.default.svc.cluster.local:50071",
-    );
+    if super::pipeline_needs_in_memory_store(&pipeline) {
+        super::install_in_memory_sink(
+            &mut pipeline,
+            "http://volga-test-storage.default.svc.cluster.local:50071",
+        );
+    }
     let sample_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("kubevolga/config/samples/volga_v1alpha1_pipeline.yaml");
     let mut manifest: Value = serde_yaml::from_str(&fs::read_to_string(sample_path)?)?;

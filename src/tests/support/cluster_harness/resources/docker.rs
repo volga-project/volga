@@ -208,7 +208,9 @@ impl ClusterBackend for DockerCluster {
 impl DockerClusterResources {
     pub fn launch(launch: PipelineLaunchSpec) -> Result<Self> {
         let mut spec = launch.pipeline;
-        super::install_in_memory_sink(&mut spec, "http://storage:50071");
+        if super::pipeline_needs_in_memory_store(&spec) {
+            super::install_in_memory_sink(&mut spec, "http://storage:50071");
+        }
         Ok(Self {
             resources: Some(DockerResources::start(
                 &serde_json::to_string(&spec)?,

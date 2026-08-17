@@ -1,9 +1,21 @@
-use std::{fmt};
+use std::fmt;
 
-use crate::{common::Message, runtime::{functions::sink::{sink_function::create_sink_function, parquet::ParquetSinkConfig, SinkFunction, SinkFunctionTrait}, operators::operator::{MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType}, runtime_context::RuntimeContext}};
+use crate::{
+    common::Message,
+    runtime::{
+        functions::sink::{
+            parquet::ParquetSinkConfig, sink_function::create_sink_function, SinkFunction,
+            SinkFunctionTrait,
+        },
+        operators::operator::{
+            MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait,
+            OperatorType,
+        },
+        runtime_context::RuntimeContext,
+    },
+};
 use anyhow::Result;
 use async_trait::async_trait;
-
 
 #[derive(Clone, Debug)]
 pub enum SinkConfig {
@@ -14,6 +26,7 @@ pub enum SinkConfig {
     },
     RequestSinkConfig,
     ParquetSinkConfig(ParquetSinkConfig),
+    CountSinkConfig,
 }
 
 impl SinkConfig {
@@ -41,6 +54,7 @@ impl std::fmt::Display for SinkConfig {
             SinkConfig::InMemoryStorageGrpcSinkConfig { .. } => write!(f, "InMemoryStorageGrpc"),
             SinkConfig::RequestSinkConfig => write!(f, "Request"),
             SinkConfig::ParquetSinkConfig(_) => write!(f, "Parquet"),
+            SinkConfig::CountSinkConfig => write!(f, "Count"),
         }
     }
 }
@@ -94,11 +108,16 @@ impl OperatorTrait for SinkOperator {
 
     async fn poll_next(&mut self) -> OperatorPollResult {
         match self.base.next_input().await {
-            Some(Message::Watermark(watermark)) => OperatorPollResult::Ready(Message::Watermark(watermark)),
+            Some(Message::Watermark(watermark)) => {
+                OperatorPollResult::Ready(Message::Watermark(watermark))
+            }
             Some(Message::CheckpointBarrier(barrier)) => {
                 // Barrier alignment must imply durable sink state for restore safety.
                 let function = self.base.get_function_mut::<SinkFunction>().unwrap();
-                function.flush().await.expect("sink flush before checkpoint barrier");
+                function
+                    .flush()
+                    .await
+                    .expect("sink flush before checkpoint barrier");
                 OperatorPollResult::Ready(Message::CheckpointBarrier(barrier))
             }
             Some(message) => {

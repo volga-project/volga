@@ -57,6 +57,9 @@ pub const METRIC_WORKER_BACKPRESSURE_MAX: &str = "volga_worker_backpressure_max"
 pub const METRIC_WORKER_RSS_BYTES: &str = "volga_worker_rss_bytes";
 pub const METRIC_WORKER_VIRTUAL_BYTES: &str = "volga_worker_virtual_bytes";
 
+/// Records accepted by a Count sink (payload discarded).
+pub const METRIC_SINK_RECORDS_WRITTEN: &str = "volga_sink_records_written";
+
 // Operator metrics
 pub const METRIC_OPERATOR_MESSAGES_SENT: &str = "volga_operator_messages_sent";
 pub const METRIC_OPERATOR_MESSAGES_RECV: &str = "volga_operator_messages_recv";
@@ -82,9 +85,10 @@ pub struct MetricsLabels {
     pub worker_id: String,
 }
 
-
 // Histogram bucket boundaries, milliseconds (Prometheus also emits a trailing +Inf bucket).
-pub const LATENCY_BUCKET_BOUNDARIES: [f64; 12] = [1.0, 2.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0];
+pub const LATENCY_BUCKET_BOUNDARIES: [f64; 12] = [
+    1.0, 2.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0,
+];
 /// Finite Prom buckets plus the trailing `+Inf` cumulative count.
 pub const LATENCY_HISTOGRAM_LEN: usize = LATENCY_BUCKET_BOUNDARIES.len() + 1;
 /// Prom buckets for checkpoint payload size (bytes). 256 B … 1 GiB.
@@ -102,4 +106,3 @@ pub const PAYLOAD_BUCKET_BOUNDARIES: [f64; 12] = [
     268_435_456.0,
     1_073_741_824.0,
 ];
-
