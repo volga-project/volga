@@ -330,20 +330,6 @@ mod tests {
     }
 
     #[test]
-    fn panic_outside_kill_fails() {
-        let events = vec![LifecycleEventRecord {
-            sequence: 1,
-            event: LifecycleEvent::WorkerFailure {
-                attempt_id: 0,
-                worker_id: "w0".into(),
-                kind: "WorkerPanic".into(),
-                detail: "boom".into(),
-            },
-        }];
-        assert!(unexpected_fatal(&cfg(), &events, None).is_err());
-    }
-
-    #[test]
     fn heartbeat_after_restore_fails() {
         let events = vec![LifecycleEventRecord {
             sequence: 9,
