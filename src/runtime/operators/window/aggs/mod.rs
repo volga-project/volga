@@ -1,9 +1,6 @@
 mod accumulator;
 mod registry;
 
-#[cfg(test)]
-pub(crate) mod test_utils;
-
 pub(crate) use accumulator::{
     apply_request_args, build_base_accumulator, coerce_value_type, ensure_value_type,
     infer_value_type,

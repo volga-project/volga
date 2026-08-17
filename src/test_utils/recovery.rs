@@ -7,10 +7,10 @@ use std::time::Duration;
 use crate::api::spec::connectors::SourceSpecKind;
 use crate::api::TaskWorkerAssignmentStrategyType;
 use crate::runtime::master::LifecycleEvent;
-use crate::tests::support::cluster_harness::{
-    MasterHandle, PipelineLaunchSpec, RecoveryReport, RuntimeEnv, TestCluster, WorkerKillMode,
+use crate::test_utils::harness::{
+    MasterHandle, PipelineLaunchSpec, RecoveryReport, RuntimeEnv, VolgaCluster, WorkerKillMode,
 };
-use crate::tests::support::launch_specs::{
+use crate::test_utils::launch_specs::{
     default_pipelined_smoke_launch_spec, smoke_launch_spec,
 };
 
@@ -74,7 +74,7 @@ pub async fn run_workers_kill_recovery(
     kill_count: usize,
 ) -> Result<(Vec<String>, RecoveryReport)> {
     let timeouts = RecoveryTimeouts::for_env(env);
-    let cluster = TestCluster::launch(env, launch).await?;
+    let cluster = VolgaCluster::launch(env, launch).await?;
     let worker_ids = cluster.worker_ids();
     assert!(
         kill_count >= 1 && kill_count <= worker_ids.len(),

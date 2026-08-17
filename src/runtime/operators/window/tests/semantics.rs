@@ -13,7 +13,7 @@ use crate::runtime::operators::window::request::{
 use crate::runtime::operators::window::store::{
     InMemWindowStore, PartitionKey, StateNamespace, WindowOperatorStore,
 };
-use crate::runtime::operators::window::tests::harness::{
+use crate::test_utils::window::harness::{
     assert_window_values, batch, key, keyed_message, runtime_context, watermark_message,
     window_exec_from_sql, Harness, WoWroHarness,
 };

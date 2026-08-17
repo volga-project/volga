@@ -8,12 +8,12 @@ use crate::{
     common::{
         message::Message,
         ports::gen_unique_grpc_port,
-        test_utils::{
-            create_test_string_batch, verify_message_records_match,
-        },
         WatermarkMessage, MAX_WATERMARK_VALUE,
     },
-    tests::support::pipeline_exec,
+    test_utils::common::{
+        create_test_string_batch, verify_message_records_match,
+    },
+    test_utils::pipeline_exec,
     runtime::operators::{
         sink::sink_operator::SinkConfig,
         source::source_operator::{SourceConfig, VectorSourceConfig},

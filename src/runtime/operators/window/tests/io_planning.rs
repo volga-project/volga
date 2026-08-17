@@ -15,7 +15,7 @@ use crate::runtime::operators::window::store::{
 use std::any::Any;
 
 use crate::runtime::state::{OperatorStore, OperatorTaskState};
-use crate::runtime::operators::window::tests::harness::{
+use crate::test_utils::window::harness::{
     assert_window_values, batch, window_exec_from_sql, Harness, WoWroHarness,
 };
 use crate::runtime::operators::window::{TileConfig, TimeGranularity};

@@ -486,7 +486,7 @@ mod tests {
     use super::*;
     use futures::TryStreamExt;
 
-    use crate::runtime::operators::window::aggs::test_utils;
+    use crate::test_utils::window_aggs as test_utils;
     use crate::runtime::operators::window::model::{
         KeyEvaluationState, TileRun, TimeGranularity, WindowTiles, WindowTriggerKind,
     };

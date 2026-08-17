@@ -4,11 +4,11 @@ use anyhow::{anyhow, Result};
 use std::time::{Duration, Instant};
 
 use crate::runtime::master::LifecycleEvent;
-use crate::tests::support::cluster_harness::{
-    LifecycleOracle, MasterHandle, PipelineLaunchSpec, RecoveryReport, RuntimeEnv, TestCluster,
+use crate::test_utils::harness::{
+    LifecycleOracle, MasterHandle, PipelineLaunchSpec, RecoveryReport, RuntimeEnv, VolgaCluster,
     WorkerKillMode,
 };
-use crate::tests::support::recovery::RecoveryTimeouts;
+use crate::test_utils::recovery::RecoveryTimeouts;
 
 use super::launch::CheckpointWorkload;
 use super::sink_oracle::assert_sink_matches_offline_datagen;
@@ -19,7 +19,7 @@ use super::support::{
 };
 
 async fn wait_for_sink_progress(
-    cluster: &TestCluster,
+    cluster: &VolgaCluster,
     after_rows: usize,
     timeout: std::time::Duration,
 ) -> Result<usize> {
@@ -41,7 +41,7 @@ async fn wait_for_sink_progress(
 /// After an intentional kill: restore AttemptStarted + kill-target replaced.
 /// `ReplacementRequested` / `RecoveryStarted` can precede `AttemptStarted`, so both
 /// conditions are tracked in one cursor scan.
-async fn wait_for_kill_restore(
+pub async fn wait_for_kill_restore(
     master: &MasterHandle,
     cursor: &mut u64,
     timeout: Duration,
@@ -133,7 +133,7 @@ pub async fn run_checkpoint_sequential_failures(
     }
     let timeouts = RecoveryTimeouts::for_env(env);
     let idle_timeout = checkpoint_idle_timeout(env);
-    let cluster = TestCluster::launch(env, launch).await?;
+    let cluster = VolgaCluster::launch(env, launch).await?;
     let result = async {
         let worker_ids = cluster.worker_ids();
         if worker_ids.is_empty() {

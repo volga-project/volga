@@ -563,7 +563,6 @@ impl WorkerServer {
         println!("[WORKER_SERVER] WorkerService server stopped");
     }
 
-    #[cfg(test)]
     pub async fn run_until_stopped(
         &mut self,
         mut shutdown_rx: oneshot::Receiver<()>,
@@ -577,7 +576,6 @@ impl WorkerServer {
         }
     }
 
-    #[cfg(test)]
     pub async fn kill_for_testing(&mut self, inject_panic: bool) {
         if inject_panic {
             let _ = self

@@ -1,7 +1,7 @@
 use anyhow::Result;
 
-use crate::tests::support::cluster_harness::RuntimeEnv;
-use crate::tests::support::smoke::{docker_smoke_launch_spec, run_deployment_smoke};
+use crate::test_utils::harness::RuntimeEnv;
+use crate::test_utils::smoke::{docker_smoke_launch_spec, run_deployment_smoke};
 
 #[tokio::test]
 #[ignore]

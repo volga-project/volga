@@ -10,7 +10,7 @@ pub mod cluster;
 pub mod handles;
 pub mod oracle;
 
-pub use cluster::TestCluster;
+pub use cluster::VolgaCluster;
 pub use handles::{MasterHandle, StorageHandle, WorkerHandle};
 pub use oracle::{LifecycleOracle, OutputOracle, RecoveryAttemptReport, RecoveryReport};
 

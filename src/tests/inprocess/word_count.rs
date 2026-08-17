@@ -6,9 +6,9 @@ use crate::{
     common::{
         message::Message,
         ports::gen_unique_grpc_port,
-        test_utils::print_pipeline_state,
     },
-    tests::support::pipeline_exec,
+    test_utils::common::print_pipeline_state,
+    test_utils::pipeline_exec,
     runtime::{
         functions::{
             key_by::KeyByFunction,

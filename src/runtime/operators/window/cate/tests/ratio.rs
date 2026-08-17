@@ -1,6 +1,6 @@
 use datafusion::scalar::ScalarValue;
 
-use crate::runtime::operators::window::aggs::test_utils;
+use crate::test_utils::window_aggs as test_utils;
 use crate::runtime::operators::window::create_window_accumulator;
 
 #[tokio::test]

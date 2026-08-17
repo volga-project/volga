@@ -571,7 +571,7 @@ mod tests {
     use super::*;
     use crate::orchestrator::orchestrator::mock_worker_nodes;
     use crate::orchestrator::task_assignment::{TaskWorkerAssignStrategy, OperatorPerWorkerStrategy};
-    use crate::common::test_utils::IdentityMapFunction;
+    use crate::test_utils::common::IdentityMapFunction;
     use crate::runtime::functions::key_by::KeyByFunction;
     use crate::runtime::operators::sink::sink_operator::SinkConfig;
     use crate::runtime::operators::source::source_operator::{SourceConfig, VectorSourceConfig};

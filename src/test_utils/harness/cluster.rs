@@ -13,12 +13,12 @@ pub(crate) struct ClusterInner {
 }
 
 #[derive(Clone)]
-pub struct TestCluster {
+pub struct VolgaCluster {
     inner: Arc<ClusterInner>,
     worker_ids: BTreeSet<String>,
 }
 
-impl TestCluster {
+impl VolgaCluster {
     pub async fn launch(env: RuntimeEnv, launch: PipelineLaunchSpec) -> Result<Self> {
         let mut backend: Box<dyn ClusterBackend> = match env {
             RuntimeEnv::Local => Box::new(LocalCluster::new()),

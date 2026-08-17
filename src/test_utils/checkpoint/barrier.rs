@@ -5,10 +5,10 @@ use anyhow::{anyhow, Result};
 use crate::runtime::master::{
     CheckpointPropagationPhase, LifecycleEvent, LifecycleEventRecord,
 };
-use crate::tests::support::cluster_harness::{
-    PipelineLaunchSpec, RecoveryReport, RuntimeEnv, TestCluster,
+use crate::test_utils::harness::{
+    PipelineLaunchSpec, RecoveryReport, RuntimeEnv, VolgaCluster,
 };
-use crate::tests::support::recovery::RecoveryTimeouts;
+use crate::test_utils::recovery::RecoveryTimeouts;
 
 use super::support::{
     harness_finish_pipeline, shutdown_after, wait_for_checkpoint_completed,
@@ -21,7 +21,7 @@ pub async fn run_checkpoint_barrier_path(
     launch: PipelineLaunchSpec,
 ) -> Result<u64> {
     let timeouts = RecoveryTimeouts::for_env(env);
-    let cluster = TestCluster::launch(env, launch).await?;
+    let cluster = VolgaCluster::launch(env, launch).await?;
     let result = async {
         let mut cursor = 0;
 

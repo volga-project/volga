@@ -12,7 +12,7 @@ use datafusion::scalar::ScalarValue;
 
 use crate::runtime::operators::window::operator::WindowOperatorConfig;
 use crate::runtime::operators::window::spec::WindowSpec;
-use crate::runtime::operators::window::tests::harness::{
+use crate::test_utils::window::harness::{
     assert_window_values, batch, run_wo, run_wo_scenario, test_input_schema, window_exec_from_sql,
     Harness, WoWroHarness,
 };

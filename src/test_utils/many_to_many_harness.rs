@@ -1,13 +1,13 @@
 use crate::common::message::Message;
 use crate::common::ports::gen_unique_grpc_port;
-use crate::common::test_utils::{create_test_string_batch, IdentityMapFunction};
+use crate::test_utils::common::{create_test_string_batch, IdentityMapFunction};
 use crate::runtime::execution_graph::{gen_edge_id, ExecutionEdge, ExecutionGraph, ExecutionVertex};
 use crate::runtime::functions::map::MapFunction;
 use crate::runtime::operators::operator::OperatorConfig;
 use crate::runtime::partition::PartitionType;
 use crate::runtime::VertexId;
 use crate::transport::channel::Channel;
-use crate::transport::test_utils::{
+use crate::test_utils::transport::{
     TestDataReaderActor, TestDataReaderMessage, TestDataWriterActor, TestDataWriterMessage,
 };
 use crate::transport::transport_backend_actor::{TransportBackendActor, TransportBackendActorMessage};
