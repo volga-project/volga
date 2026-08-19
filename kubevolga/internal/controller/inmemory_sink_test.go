@@ -64,7 +64,7 @@ func TestParseInMemorySinkExternalAddrNotCreated(t *testing.T) {
 	raw := json.RawMessage(`{
 		"sink": {
 			"InMemoryStorageGrpc": {
-				"server_addr": "http://volga-test-storage.default.svc.cluster.local:50071"
+				"server_addr": "http://my-store:50071"
 			}
 		}
 	}`)

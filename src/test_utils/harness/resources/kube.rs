@@ -165,7 +165,6 @@ impl KubeClusterResources {
         let storage_port_forward = start_storage_port_forward(&pipeline_name, storage_port)?;
         let storage_endpoint = format!("http://127.0.0.1:{storage_port}");
         wait_for_local_port(storage_port, Duration::from_secs(30))?;
-        wait_for_empty_storage(&storage_endpoint).await?;
         let master_port = gen_unique_grpc_port();
         let master_port_forward = start_master_port_forward(&pipeline_name, master_port)?;
         wait_for_local_port(master_port, Duration::from_secs(30))?;
@@ -174,11 +173,11 @@ impl KubeClusterResources {
             resources: Some(KubeResources {
                 pipeline_name: pipeline_name.clone(),
                 manifest_path,
-                storage_port_forward,
+                storage_port_forward: Some(storage_port_forward),
                 master_port_forward,
                 master_port,
             }),
-            storage_endpoint,
+            storage_endpoint: Some(storage_endpoint),
             expected_output_rows: launch.expected_output_rows,
             worker_ids: (0..launch.worker_count)
                 .map(|index| format!("{pipeline_name}-worker-{index}"))
@@ -255,26 +254,6 @@ impl KubeClusterResources {
         self.resources
             .as_ref()
             .context("kube resources are stopped")
-    }
-}
-
-async fn wait_for_empty_storage(endpoint: &str) -> Result<()> {
-    let start = tokio::time::Instant::now();
-    loop {
-        let snapshot = InMemoryStorageClient::new(endpoint.to_string())
-            .await?
-            .snapshot()
-            .await?;
-        if snapshot.row_count() == 0 {
-            return Ok(());
-        }
-        if start.elapsed() > Duration::from_secs(30) {
-            return Err(anyhow!(
-                "storage at {endpoint} retained {} rows after reset",
-                snapshot.row_count()
-            ));
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
     }
 }
 

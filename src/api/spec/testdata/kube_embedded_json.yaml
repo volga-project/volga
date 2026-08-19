@@ -32,6 +32,6 @@ sources:
 sink:
   InMemoryStorageGrpc: |
     {
-      "server_addr": "http://volga-test-storage.default.svc.cluster.local:50071"
+      "create": true
     }
 sql: "SELECT value FROM test_table"

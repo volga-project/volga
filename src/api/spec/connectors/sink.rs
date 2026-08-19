@@ -107,13 +107,20 @@ impl SinkSpec {
             ..
         } = self
         {
-            if !*create && !has_in_memory_addr(server_addr.as_deref()) {
-                return Err(
+            let has_addr = has_in_memory_addr(server_addr.as_deref());
+            match (*create, has_addr) {
+                (true, false) => Ok(()),
+                (false, true) => Ok(()),
+                (true, true) => Err(
+                    "InMemoryStorageGrpc create and server_addr are mutually exclusive".to_string(),
+                ),
+                (false, false) => Err(
                     "InMemoryStorageGrpc requires create: true or server_addr".to_string(),
-                );
+                ),
             }
+        } else {
+            Ok(())
         }
-        Ok(())
     }
 }
 
@@ -139,6 +146,13 @@ mod tests {
         assert!(missing.validate().is_err());
         assert!(SinkSpec::in_memory_grpc("http://store:50071").validate().is_ok());
         assert!(SinkSpec::in_memory_upsert(vec!["k".into()]).validate().is_ok());
+
+        let both = SinkSpec::InMemoryStorageGrpc {
+            create: true,
+            server_addr: Some("http://store:50071".into()),
+            upsert_key_columns: Vec::new(),
+        };
+        assert!(both.validate().is_err());
     }
 
     #[test]

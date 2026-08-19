@@ -168,11 +168,8 @@ mod tests {
                 server_addr,
                 ..
             }) => {
-                assert!(!*create);
-                assert_eq!(
-                    server_addr.as_deref(),
-                    Some("http://volga-test-storage.default.svc.cluster.local:50071")
-                );
+                assert!(*create);
+                assert!(server_addr.is_none());
             }
             other => panic!("expected InMemoryStorageGrpc sink, got {:?}", other),
         }
