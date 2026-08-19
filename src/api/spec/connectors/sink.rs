@@ -49,25 +49,20 @@ impl SinkSpec {
         self
     }
 
-    pub fn with_server_addr(mut self, server_addr: impl Into<String>) -> Self {
-        if let Self::InMemoryStorageGrpc {
-            server_addr: addr, ..
-        } = &mut self
-        {
-            *addr = Some(server_addr.into());
-        }
-        self
-    }
-
+    /// Resolve the operator-created store into a concrete external addr.
+    ///
+    /// Keeps the runtime spec consistent with `validate()`: after the fill the
+    /// store exists, so `create` is cleared and `server_addr` carries the DNS.
     pub fn fill_created_store_addr(&mut self, addr: impl Into<String>) {
         if let Self::InMemoryStorageGrpc {
-            create: true,
+            create,
             server_addr,
             ..
         } = self
         {
-            if !has_in_memory_addr(server_addr.as_deref()) {
+            if *create && !has_in_memory_addr(server_addr.as_deref()) {
                 *server_addr = Some(addr.into());
+                *create = false;
             }
         }
     }
@@ -165,7 +160,7 @@ mod tests {
                 server_addr,
                 ..
             } => {
-                assert!(create);
+                assert!(!create);
                 assert_eq!(
                     server_addr.as_deref(),
                     Some("http://p-storage.ns.svc.cluster.local:50071")

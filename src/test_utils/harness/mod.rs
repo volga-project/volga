@@ -135,7 +135,10 @@ impl PipelineLaunchSpec {
 pub(crate) fn install_in_memory_sink(pipeline: &mut PipelineSpec, server_addr: impl Into<String>) {
     let server_addr = server_addr.into();
     pipeline.sink = Some(match pipeline.sink.take() {
-        Some(sink @ SinkSpec::InMemoryStorageGrpc { .. }) => sink.with_server_addr(server_addr),
+        Some(SinkSpec::InMemoryStorageGrpc {
+            upsert_key_columns, ..
+        }) => SinkSpec::in_memory_grpc(server_addr)
+            .with_upsert_key_columns(upsert_key_columns),
         Some(other) => other,
         None => SinkSpec::in_memory_grpc(server_addr),
     });
