@@ -291,7 +291,7 @@ func (r *PipelineReconciler) reconcileInMemoryStore(
 ) error {
 	name := storageResourceName(vp.Name)
 	if !create {
-		return r.deleteCreatedStorage(ctx, vp.Namespace, name)
+		return r.deleteCreatedStorage(ctx, vp, name)
 	}
 	if err := r.reconcileStorageService(ctx, vp, name, labels); err != nil {
 		return err
@@ -368,15 +368,26 @@ func (r *PipelineReconciler) reconcileStorageDeployment(
 	})
 }
 
-func (r *PipelineReconciler) deleteCreatedStorage(ctx context.Context, namespace, name string) error {
+func (r *PipelineReconciler) deleteCreatedStorage(
+	ctx context.Context,
+	vp *v1alpha1.VolgaPipeline,
+	name string,
+) error {
 	deploy := &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name},
+		ObjectMeta: metav1.ObjectMeta{Namespace: vp.Namespace, Name: name},
+	}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(deploy), deploy); err == nil {
+		if !metav1.IsControlledBy(deploy, vp) {
+			return nil
+		}
+	} else if !apierrors.IsNotFound(err) {
+		return err
 	}
 	if err := r.Delete(ctx, deploy); err != nil && !apierrors.IsNotFound(err) {
 		return err
 	}
 	svc := &corev1.Service{
-		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name},
+		ObjectMeta: metav1.ObjectMeta{Namespace: vp.Namespace, Name: name},
 	}
 	if err := r.Delete(ctx, svc); err != nil && !apierrors.IsNotFound(err) {
 		return err

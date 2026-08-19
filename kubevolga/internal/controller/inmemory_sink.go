@@ -18,15 +18,6 @@ func storageResourceName(pipelineName string) string {
 	return fmt.Sprintf("%s-storage", pipelineName)
 }
 
-func storageHTTPAddr(namespace, pipelineName string) string {
-	return fmt.Sprintf(
-		"http://%s.%s.svc.cluster.local:%d",
-		storageResourceName(pipelineName),
-		namespace,
-		storagePort,
-	)
-}
-
 func (sink inMemorySink) createsStore() (bool, error) {
 	if !sink.present {
 		return false, nil
