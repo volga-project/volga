@@ -78,7 +78,7 @@ pub const REQUIRED_PROM_QUERIES: &[PromQuery] = &[
     (
         "checkpoint_completed",
         concat!(
-            "increase(volga_checkpoint_completed_total",
+            "increase(volga_checkpoint_completed",
             r#"{pipeline_id=~".*"}"#,
             "[5m])"
         ),
@@ -86,7 +86,7 @@ pub const REQUIRED_PROM_QUERIES: &[PromQuery] = &[
     (
         "checkpoint_failed",
         concat!(
-            "increase(volga_checkpoint_failed_total",
+            "increase(volga_checkpoint_failed",
             r#"{pipeline_id=~".*"}"#,
             "[5m])"
         ),
@@ -94,7 +94,7 @@ pub const REQUIRED_PROM_QUERIES: &[PromQuery] = &[
     (
         "records_sent_rate",
         concat!(
-            "sum(rate(volga_stream_task_records_sent_total",
+            "sum(rate(volga_stream_task_records_sent",
             r#"{pipeline_id=~".*"}"#,
             "[1m]))"
         ),
@@ -153,7 +153,7 @@ pub const EXTRA_PROM_QUERIES: &[PromQuery] = &[
     (
         "sink_records_rate",
         concat!(
-            "sum(rate(volga_sink_records_written_total",
+            "sum(rate(volga_sink_records_written",
             r#"{pipeline_id=~".*"}"#,
             "[1m]))"
         ),
@@ -169,7 +169,7 @@ pub const EXTRA_PROM_QUERIES: &[PromQuery] = &[
     (
         "wo_late_dropped_rate",
         concat!(
-            "sum(rate(volga_wo_late_dropped_rows_total",
+            "sum(rate(volga_wo_late_dropped_rows",
             r#"{pipeline_id=~".*"}"#,
             "[1m]))"
         ),
@@ -177,7 +177,7 @@ pub const EXTRA_PROM_QUERIES: &[PromQuery] = &[
     (
         "wo_maintain_pruned_rate",
         concat!(
-            "sum(rate(volga_wo_maintain_pruned_rows_total",
+            "sum(rate(volga_wo_maintain_pruned_rows",
             r#"{pipeline_id=~".*"}"#,
             "[1m]))"
         ),

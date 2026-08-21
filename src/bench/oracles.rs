@@ -129,7 +129,10 @@ fn unexpected_fatal(
                     .unwrap_or(false)
                     && matches!(
                         kind.as_str(),
-                        "HeartbeatUnavailable" | "StatePollFailure" | "PodUnhealthy"
+                        "HeartbeatUnavailable"
+                            | "StatePollFailure"
+                            | "PodUnhealthy"
+                            | "TransportDisconnect",
                     );
                 if !expected_kill {
                     return Err(anyhow!(
@@ -359,6 +362,27 @@ mod tests {
                 worker_id: "w0".into(),
                 kind: "HeartbeatUnavailable".into(),
                 detail: "gone".into(),
+            },
+        }];
+        let kill = KillWindow {
+            at_unix: 100.0,
+            restore_at_unix: 110.0,
+            after_checkpoint: 1,
+            seq_lo: 1,
+            seq_hi: 2,
+        };
+        assert!(unexpected_fatal(&cfg(), &events, Some(&kill)).is_ok());
+    }
+
+    #[test]
+    fn transport_disconnect_during_kill_ok() {
+        let events = vec![LifecycleEventRecord {
+            sequence: 1,
+            event: LifecycleEvent::WorkerFailure {
+                attempt_id: 0,
+                worker_id: "w1".into(),
+                kind: "TransportDisconnect".into(),
+                detail: "stream_messages failed".into(),
             },
         }];
         let kill = KillWindow {
