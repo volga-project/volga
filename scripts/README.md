@@ -168,3 +168,44 @@ Stress options:
 
 Timeouts are suite-scoped nextest profiles only (`default` 30s, `inprocess` 90s,
 `docker` 120s, `kube` 90s, `stress` 180s) — no per-test overrides.
+
+## Bench (`volga-bench`)
+
+Long-run job on the same Kind (or remote) cluster as kube tests. Not a
+`scripts/test` profile: YAML is the run spec; CLI only overrides `--env` and
+`--duration-secs`. Count sink + Datagen are fixed in code.
+
+```bash
+# 1) Kind + operator (infra + 2 tainted worker nodes). Recreates kubevolga if
+#    the current cluster is single-node.
+scripts/kube-test-env setup
+
+# 2) Prom + Grafana in namespace volga-bench (infra nodeSelector).
+make -C kubevolga bench
+
+# 3) Reach Prom (oracles/dump) and the Grafana board from the laptop.
+export VOLGA_KUBE_CONTEXT="${VOLGA_KUBE_CONTEXT:-kind-kubevolga}"
+kubectl --context "$VOLGA_KUBE_CONTEXT" -n volga-bench port-forward svc/prometheus 9090:9090 &
+kubectl --context "$VOLGA_KUBE_CONTEXT" -n volga-bench port-forward svc/grafana 3000:3000 &
+
+# 4) Short Kind smoke (example.yaml is a 1h kill scenario; override duration).
+cargo run --bin volga-bench -- \
+  --config kubevolga/hack/bench/example.yaml \
+  --env kube \
+  --duration-secs 120
+```
+
+Grafana: http://localhost:3000 (anonymous viewer; Volga bench is the home
+dashboard). Prom dump/oracles need `prom_url` in the YAML (example uses
+`http://127.0.0.1:9090` after the port-forward).
+
+| | Kind (local / CI wiring) | Remote cluster |
+| --- | --- | --- |
+| Cluster | `scripts/kube-test-env setup` | existing kubeconfig; skip Kind |
+| Context | `VOLGA_KUBE_CONTEXT=kind-kubevolga` | omit, or set to that context |
+| Observability | `make -C kubevolga bench` + port-forward | same manifests; port-forward or in-cluster `prom_url` |
+| Duration | `--duration-secs 120` to see the board | YAML `duration` (example: 1h) |
+| Numbers | scrape/oracles wiring only | overnight; not GitHub-hosted CI |
+
+`make -C kubevolga unbench` removes Prom/Grafana. `scripts/kube-test-env destroy`
+deletes the Kind cluster. Overnight soaks belong on a real cluster, not Kind.
