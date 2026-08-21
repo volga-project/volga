@@ -4,22 +4,29 @@ use anyhow::Result;
 
 use crate::test_utils::checkpoint::{
     assert_checkpoint_multi_restore, assert_checkpoint_restore,
-    checkpoint_multi_failure_launch_spec, checkpoint_recovery_launch_spec,
+    checkpoint_multi_failure_launch_spec, checkpoint_recovery_launch_spec, kube_checkpoint_spec,
     run_checkpoint_barrier_path, run_checkpoint_mid_flight_kill_after_safe,
     run_checkpoint_mid_flight_kill_no_prior, run_checkpoint_sequential_failures,
     run_checkpoint_worker_kill_recovery, CheckpointWorkload, MULTI_FAILURE_COUNT,
     MULTI_WORKER_PARALLELISM, SINGLE_WORKER_PARALLELISM,
 };
-use crate::test_utils::harness::{RuntimeEnv, WorkerKillMode};
+use crate::test_utils::harness::{PipelineLaunchSpec, RuntimeEnv, WorkerKillMode};
+
+fn kube_checkpoint_launch(launch: PipelineLaunchSpec) -> PipelineLaunchSpec {
+    launch
+        .with_kube_worker_health_poll(true)
+        .with_state_maintenance(true, 100)
+        .with_checkpoint(kube_checkpoint_spec())
+}
 
 #[tokio::test]
 #[ignore]
 async fn test_kube_checkpoint_barrier_path_before_complete() -> Result<()> {
     let checkpoint_id = run_checkpoint_barrier_path(
         RuntimeEnv::Kube,
-        checkpoint_recovery_launch_spec(SINGLE_WORKER_PARALLELISM, CheckpointWorkload::PassThrough)
-            .with_kube_worker_health_poll(true)
-            .with_state_maintenance(true, 100),
+        kube_checkpoint_launch(
+            checkpoint_recovery_launch_spec(SINGLE_WORKER_PARALLELISM, CheckpointWorkload::PassThrough),
+        ),
     )
     .await?;
     assert_eq!(checkpoint_id, 1);
@@ -31,9 +38,9 @@ async fn test_kube_checkpoint_barrier_path_before_complete() -> Result<()> {
 async fn test_kube_single_worker_checkpoint_complete_then_worker_kill_restores() -> Result<()> {
     let report = run_checkpoint_worker_kill_recovery(
         RuntimeEnv::Kube,
-        checkpoint_recovery_launch_spec(SINGLE_WORKER_PARALLELISM, CheckpointWorkload::PassThrough)
-            .with_kube_worker_health_poll(true)
-            .with_state_maintenance(true, 100),
+        kube_checkpoint_launch(
+            checkpoint_recovery_launch_spec(SINGLE_WORKER_PARALLELISM, CheckpointWorkload::PassThrough),
+        ),
         WorkerKillMode::Abrupt,
         CheckpointWorkload::PassThrough,
     )
@@ -46,9 +53,9 @@ async fn test_kube_single_worker_checkpoint_complete_then_worker_kill_restores()
 async fn test_kube_multi_worker_checkpoint_complete_then_worker_kill_restores() -> Result<()> {
     let report = run_checkpoint_worker_kill_recovery(
         RuntimeEnv::Kube,
-        checkpoint_recovery_launch_spec(MULTI_WORKER_PARALLELISM, CheckpointWorkload::PassThrough)
-            .with_kube_worker_health_poll(true)
-            .with_state_maintenance(true, 100),
+        kube_checkpoint_launch(
+            checkpoint_recovery_launch_spec(MULTI_WORKER_PARALLELISM, CheckpointWorkload::PassThrough),
+        ),
         WorkerKillMode::Abrupt,
         CheckpointWorkload::PassThrough,
     )
@@ -61,8 +68,7 @@ async fn test_kube_multi_worker_checkpoint_complete_then_worker_kill_restores() 
 async fn test_kube_multi_worker_sequential_checkpoint_failures_restore() -> Result<()> {
     let report = run_checkpoint_sequential_failures(
         RuntimeEnv::Kube,
-        checkpoint_multi_failure_launch_spec().with_kube_worker_health_poll(true)
-            .with_state_maintenance(true, 100),
+        kube_checkpoint_launch(checkpoint_multi_failure_launch_spec()),
         WorkerKillMode::Abrupt,
         MULTI_FAILURE_COUNT,
         CheckpointWorkload::PassThrough,
@@ -76,9 +82,9 @@ async fn test_kube_multi_worker_sequential_checkpoint_failures_restore() -> Resu
 async fn test_kube_mid_flight_checkpoint_kill_restores_none() -> Result<()> {
     run_checkpoint_mid_flight_kill_no_prior(
         RuntimeEnv::Kube,
-        checkpoint_recovery_launch_spec(SINGLE_WORKER_PARALLELISM, CheckpointWorkload::PassThrough)
-            .with_kube_worker_health_poll(true)
-            .with_state_maintenance(true, 100),
+        kube_checkpoint_launch(
+            checkpoint_recovery_launch_spec(SINGLE_WORKER_PARALLELISM, CheckpointWorkload::PassThrough),
+        ),
         WorkerKillMode::Abrupt,
     )
     .await?;
@@ -90,9 +96,9 @@ async fn test_kube_mid_flight_checkpoint_kill_restores_none() -> Result<()> {
 async fn test_kube_mid_flight_checkpoint_kill_after_safe_restores_prior() -> Result<()> {
     run_checkpoint_mid_flight_kill_after_safe(
         RuntimeEnv::Kube,
-        checkpoint_recovery_launch_spec(SINGLE_WORKER_PARALLELISM, CheckpointWorkload::PassThrough)
-            .with_kube_worker_health_poll(true)
-            .with_state_maintenance(true, 100),
+        kube_checkpoint_launch(
+            checkpoint_recovery_launch_spec(SINGLE_WORKER_PARALLELISM, CheckpointWorkload::PassThrough),
+        ),
         WorkerKillMode::Abrupt,
     )
     .await?;
@@ -104,9 +110,9 @@ async fn test_kube_mid_flight_checkpoint_kill_after_safe_restores_prior() -> Res
 async fn test_kube_single_worker_window_checkpoint_restore() -> Result<()> {
     let report = run_checkpoint_worker_kill_recovery(
         RuntimeEnv::Kube,
-        checkpoint_recovery_launch_spec(SINGLE_WORKER_PARALLELISM, CheckpointWorkload::Window)
-            .with_kube_worker_health_poll(true)
-            .with_state_maintenance(true, 100),
+        kube_checkpoint_launch(
+            checkpoint_recovery_launch_spec(SINGLE_WORKER_PARALLELISM, CheckpointWorkload::Window),
+        ),
         WorkerKillMode::Abrupt,
         CheckpointWorkload::Window,
     )
@@ -119,9 +125,9 @@ async fn test_kube_single_worker_window_checkpoint_restore() -> Result<()> {
 async fn test_kube_multi_worker_window_checkpoint_restore() -> Result<()> {
     let report = run_checkpoint_worker_kill_recovery(
         RuntimeEnv::Kube,
-        checkpoint_recovery_launch_spec(MULTI_WORKER_PARALLELISM, CheckpointWorkload::Window)
-            .with_kube_worker_health_poll(true)
-            .with_state_maintenance(true, 100),
+        kube_checkpoint_launch(
+            checkpoint_recovery_launch_spec(MULTI_WORKER_PARALLELISM, CheckpointWorkload::Window),
+        ),
         WorkerKillMode::Abrupt,
         CheckpointWorkload::Window,
     )

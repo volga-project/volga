@@ -4,16 +4,19 @@ use anyhow::{anyhow, bail, Result};
 
 use crate::test_utils::harness::RuntimeEnv;
 
+use super::config::{apply_file, SoakFile};
 use super::run::run_soak;
-use super::spec::{SoakScenario, SoakSpec};
+use super::spec::SoakSpec;
 
 const USAGE: &str = "\
 Usage:
-  volga-longrun soak [--env local|kube|docker] [--scenario steady|kill] [--duration-secs N] [--kill-after-checkpoint N]
+  volga-longrun soak [--config FILE] [--env local|kube|docker] [--duration-secs N]
   volga-longrun bench
 
 v1 implements soak only. Default duration: local 120s, kube/docker 3600s.
-Checkpoints use prod consts (30s interval). Count sink. Sliding RANGE window job.";
+YAML (`--config`) is the soak spec: scenario, dump, Prom, oracles, job overlay.
+Count sink and Datagen source are fixed. CLI only overrides env and duration.
+Omit `--config` for the default window job (steady, local).";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LongrunCommand {
@@ -23,8 +26,8 @@ pub enum LongrunCommand {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SoakArgs {
-    pub env: RuntimeEnv,
-    pub scenario: SoakScenario,
+    pub config: Option<std::path::PathBuf>,
+    pub env: Option<RuntimeEnv>,
     pub duration_secs: Option<u64>,
 }
 
@@ -34,13 +37,7 @@ where
     S: AsRef<str>,
 {
     match parse_args(args)? {
-        LongrunCommand::Soak(args) => {
-            let duration_secs = args
-                .duration_secs
-                .unwrap_or_else(|| SoakSpec::default_duration_secs(args.env));
-            let spec = SoakSpec::new(args.env, args.scenario, Duration::from_secs(duration_secs));
-            run_soak(spec).await
-        }
+        LongrunCommand::Soak(args) => run_soak(build_spec(args)?).await,
         LongrunCommand::Bench => {
             bail!("`volga-longrun bench` is not implemented in v1; use `soak`")
         }
@@ -69,28 +66,22 @@ where
 }
 
 fn parse_soak(args: &[String]) -> Result<SoakArgs> {
-    let mut env = RuntimeEnv::Local;
-    let mut scenario_kill = false;
+    let mut config = None;
+    let mut env = None;
     let mut duration_secs = None;
-    let mut kill_after = 1u64;
-    let mut kill_after_set = false;
     let mut i = 0;
     while i < args.len() {
         let arg = args[i].as_str();
         let (flag, inline) = split_flag(arg);
         match flag {
+            "--config" => {
+                config = Some(std::path::PathBuf::from(take_value(flag, inline, args, &mut i)?));
+            }
             "--env" => {
                 let value = take_value(flag, inline, args, &mut i)?;
-                env = RuntimeEnv::parse(&value)
-                    .ok_or_else(|| anyhow!("invalid --env `{value}` (local|kube|docker)"))?;
-            }
-            "--scenario" => {
-                let value = take_value(flag, inline, args, &mut i)?;
-                scenario_kill = match value.as_str() {
-                    "steady" => false,
-                    "kill" => true,
-                    other => bail!("invalid --scenario `{other}` (steady|kill)"),
-                };
+                env = Some(RuntimeEnv::parse(&value).ok_or_else(|| {
+                    anyhow!("invalid --env `{value}` (local|kube|docker)")
+                })?);
             }
             "--duration-secs" => {
                 let value = take_value(flag, inline, args, &mut i)?;
@@ -102,36 +93,32 @@ fn parse_soak(args: &[String]) -> Result<SoakArgs> {
                 }
                 duration_secs = Some(n);
             }
-            "--kill-after-checkpoint" => {
-                let value = take_value(flag, inline, args, &mut i)?;
-                let n: u64 = value
-                    .parse()
-                    .map_err(|_| anyhow!("invalid --kill-after-checkpoint `{value}`"))?;
-                if n == 0 {
-                    bail!("--kill-after-checkpoint must be >= 1");
-                }
-                kill_after = n;
-                kill_after_set = true;
-            }
             other => bail!("unknown soak flag `{other}`\n{USAGE}"),
         }
         i += 1;
     }
-    if kill_after_set && !scenario_kill {
-        bail!("--kill-after-checkpoint requires --scenario kill");
-    }
-    let scenario = if scenario_kill {
-        SoakScenario::KillAfterCheckpoint {
-            after_checkpoint: kill_after,
-        }
-    } else {
-        SoakScenario::Steady
-    };
     Ok(SoakArgs {
+        config,
         env,
-        scenario,
         duration_secs,
     })
+}
+
+fn build_spec(args: SoakArgs) -> Result<SoakSpec> {
+    let file = match &args.config {
+        Some(path) => SoakFile::load(path)?,
+        None => SoakFile::default(),
+    };
+    let mut spec = apply_file(&file)?;
+    if let Some(env) = args.env {
+        spec.env = env;
+    }
+    if let Some(secs) = args.duration_secs {
+        spec.duration = Duration::from_secs(secs);
+    } else if file.duration.is_none() {
+        spec.duration = Duration::from_secs(SoakSpec::default_duration_secs(spec.env));
+    }
+    Ok(spec)
 }
 
 fn split_flag(arg: &str) -> (&str, Option<&str>) {
@@ -154,35 +141,43 @@ fn take_value(flag: &str, inline: Option<&str>, args: &[String], i: &mut usize) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::longrun::spec::SoakScenario;
 
     #[test]
-    fn parse_soak_kill_kube() {
+    fn config_file_then_cli_override() {
+        let path = std::env::temp_dir().join("volga-soak-config-test.yaml");
+        std::fs::write(
+            &path,
+            r#"
+env: docker
+duration: 99s
+scenario: kill
+kill_after_checkpoint: 1
+launch:
+  sql: SELECT timestamp, key, value FROM datagen_source
+  checkpoint:
+    interval: 30s
+"#,
+        )
+        .unwrap();
         let LongrunCommand::Soak(args) = parse_args([
             "soak",
-            "--env",
-            "kube",
-            "--scenario",
-            "kill",
-            "--duration-secs",
-            "3600",
-            "--kill-after-checkpoint",
-            "2",
+            &format!("--config={}", path.display()),
+            "--env=kube",
+            "--duration-secs=3600",
         ])
         .unwrap() else {
             panic!("expected soak");
         };
-        assert_eq!(args.env, RuntimeEnv::Kube);
+        let spec = build_spec(args).unwrap();
+        assert_eq!(spec.env, RuntimeEnv::Kube);
+        assert_eq!(spec.duration, Duration::from_secs(3600));
         assert_eq!(
-            args.scenario,
+            spec.scenario,
             SoakScenario::KillAfterCheckpoint {
-                after_checkpoint: 2
+                after_checkpoint: 1
             }
         );
-        assert_eq!(args.duration_secs, Some(3600));
-    }
-
-    #[test]
-    fn parse_rejects_kill_flag_on_steady() {
-        assert!(parse_args(["soak", "--kill-after-checkpoint", "1"]).is_err());
+        let _ = std::fs::remove_file(path);
     }
 }

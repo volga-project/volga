@@ -128,6 +128,11 @@ impl PipelineLaunchSpec {
         self.pipeline.state.maintenance_interval_ms = interval_ms.max(1);
         self
     }
+
+    pub fn with_checkpoint(mut self, checkpoint: crate::api::CheckpointSpec) -> Self {
+        self.pipeline.state.checkpoint = checkpoint;
+        self
+    }
 }
 
 /// Install/replace the in-memory gRPC sink address, preserving any upsert keys already on the pipeline.

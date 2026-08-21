@@ -9,7 +9,7 @@ use std::sync::Arc;
 use crate::api::spec::connectors::{SinkSpec, SourceSpec, SourceSpecKind};
 use crate::api::spec::operators::{OperatorOverride, OperatorTuningSpec};
 use crate::api::spec::pipeline::ExecutionProfile;
-use crate::api::{PipelineSpecBuilder, TaskWorkerAssignmentStrategyType};
+use crate::api::{CheckpointSpec, PipelineSpecBuilder, TaskWorkerAssignmentStrategyType};
 use crate::runtime::functions::source::datagen_source::{DatagenSpec, FieldGenerator};
 use crate::runtime::operators::window::spec::WindowSpec;
 use crate::runtime::operators::window::{TileConfig, TimeGranularity};
@@ -27,7 +27,23 @@ pub const MULTI_FAILURE_COUNT: usize = 2;
 /// Hang guard only (per attempt `open`); harness finishes via `MasterHandle::stop_sources`.
 const SAFETY_DATAGEN_RUN_FOR_S: f64 = 300.0;
 const DATAGEN_RATE: f32 = 200.0;
-pub(super) const WINDOW_RANGE_MS: i64 = 10_000;
+pub const WINDOW_RANGE_MS: i64 = 10_000;
+
+pub fn local_checkpoint_spec() -> CheckpointSpec {
+    CheckpointSpec {
+        interval_ms: Some(500),
+        timeout_ms: Some(5_000),
+        retention: Some(2),
+    }
+}
+
+pub fn kube_checkpoint_spec() -> CheckpointSpec {
+    CheckpointSpec {
+        interval_ms: Some(2_000),
+        timeout_ms: Some(60_000),
+        retention: Some(2),
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckpointWorkload {
@@ -144,12 +160,18 @@ pub fn checkpoint_recovery_launch_spec(
         }
     };
 
+    let checkpoint = local_checkpoint_spec();
     let pipeline = builder
         .sql(sql)
         .with_sink(SinkSpec::in_memory_upsert(vec![
             "key".to_string(),
             "timestamp".to_string(),
         ]))
+        .with_checkpoint(
+            checkpoint.interval_ms,
+            checkpoint.timeout_ms,
+            checkpoint.retention,
+        )
         .build();
 
     PipelineLaunchSpec::new(pipeline, worker_count, None)

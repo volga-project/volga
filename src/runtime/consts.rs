@@ -27,12 +27,6 @@ pub const MASTER_STATE_POLL_TIMEOUT: &str = "master.state_poll_timeout";
 pub const MASTER_RESET_WORKER_TIMEOUT: &str = "master.reset_worker_timeout";
 /// Sleep between worker-registry readiness polls (discovery / replacement wait).
 pub const MASTER_REGISTRY_WAIT_TICK: &str = "master.registry_wait_tick";
-/// Periodic checkpoint trigger while an attempt is running. `0s` disables interval checkpoints.
-pub const MASTER_CHECKPOINT_INTERVAL: &str = "master.checkpoint_interval";
-/// Fail the attempt if an in-flight checkpoint does not complete within this budget.
-pub const MASTER_CHECKPOINT_TIMEOUT: &str = "master.checkpoint_timeout";
-/// Max completed checkpoints to retain. Oldest are pruned; must be ≥ 1.
-pub const MASTER_CHECKPOINT_RETENTION: &str = "master.checkpoint_retention";
 pub const KUBE_WORKER_HEALTH_POLL_INTERVAL: &str = "kube.worker_health_poll_interval";
 pub const KUBE_WORKER_HEALTH_UNHEALTHY_GRACE_TICKS: &str =
     "kube.worker_health_unhealthy_grace_ticks";
@@ -67,8 +61,6 @@ const DURATION_KEYS: &[&str] = &[
     MASTER_STATE_POLL_TIMEOUT,
     MASTER_RESET_WORKER_TIMEOUT,
     MASTER_REGISTRY_WAIT_TICK,
-    MASTER_CHECKPOINT_INTERVAL,
-    MASTER_CHECKPOINT_TIMEOUT,
     KUBE_WORKER_HEALTH_POLL_INTERVAL,
     WORKER_HEARTBEAT_SEND_INTERVAL,
     WORKER_HEARTBEAT_MASTER_SILENCE_TIMEOUT,
@@ -82,7 +74,6 @@ const U64_KEYS: &[&str] = &[
     MASTER_RECOVERY_BUDGET,
     MASTER_RPC_MAX_RETRIES,
     MASTER_HEARTBEAT_MAX_STREAM_ATTEMPTS,
-    MASTER_CHECKPOINT_RETENTION,
     KUBE_WORKER_HEALTH_UNHEALTHY_GRACE_TICKS,
     WORKER_REGISTER_MAX_RETRIES,
     TRANSPORT_GRPC_CONNECT_MAX_RETRIES,

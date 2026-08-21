@@ -64,6 +64,11 @@
     "state": {
       "$ref": "#/$defs/StateSpec",
       "default": {
+        "checkpoint": {
+          "interval_ms": 0,
+          "retention": 1,
+          "timeout_ms": 60000
+        },
         "checkpoint_store": "in_memory",
         "maintenance_enabled": true,
         "maintenance_interval_ms": 1000,
@@ -93,6 +98,36 @@
   },
   "additionalProperties": false,
   "$defs": {
+    "CheckpointSpec": {
+      "description": "Job checkpoint knobs. Spec is the only source.\n`interval_ms: 0` disables interval checkpoints. Missing fields are off / no timeout\nat runtime (no panic); [`crate::api::PipelineSpec::validate`] requires all three.",
+      "type": "object",
+      "properties": {
+        "interval_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "retention": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "timeout_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      }
+    },
     "CheckpointStoreConfig": {
       "type": "string",
       "enum": [
@@ -184,6 +219,15 @@
     "StateSpec": {
       "type": "object",
       "properties": {
+        "checkpoint": {
+          "description": "Per-job checkpoint interval / timeout / retention. Spec is the only source.\n`interval_ms: 0` disables interval checkpoints.",
+          "$ref": "#/$defs/CheckpointSpec",
+          "default": {
+            "interval_ms": 0,
+            "retention": 1,
+            "timeout_ms": 60000
+          }
+        },
         "checkpoint_store": {
           "$ref": "#/$defs/CheckpointStoreConfig",
           "default": "in_memory"

@@ -36,6 +36,10 @@ spec:
       operator_backend: in_memory
       maintenance_enabled: true
       maintenance_interval_ms: 1000
+      checkpoint:
+        interval_ms: 2000
+        timeout_ms: 60000
+        retention: 2
     task_assignment_strategy:
       Pipelined:
         slots_per_node: 2
