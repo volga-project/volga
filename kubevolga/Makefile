@@ -3,7 +3,7 @@ SHELL := /bin/bash
 KUBECTL ?= kubectl
 KUSTOMIZE ?= $(KUBECTL) kustomize
 
-.PHONY: install uninstall deploy undeploy sample unsample render
+.PHONY: install uninstall deploy undeploy sample unsample render bench unbench
 
 install:
 	$(KUSTOMIZE) config/crd | $(KUBECTL) apply -f -
@@ -25,3 +25,10 @@ unsample:
 
 render:
 	$(KUSTOMIZE) config/default
+
+# Prom + Grafana on infra (kubevolga/hack/bench). Opt-in; not part of kube tests.
+bench:
+	$(KUSTOMIZE) hack/bench | $(KUBECTL) apply -f -
+
+unbench:
+	$(KUSTOMIZE) hack/bench | $(KUBECTL) delete --ignore-not-found=true -f -
