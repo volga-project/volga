@@ -14,3 +14,4 @@ go.work.sum
 
 # Local working notes (not for review)
 docs/metrics-redesign-plan.md
+docs/longrun-soak-plan.md

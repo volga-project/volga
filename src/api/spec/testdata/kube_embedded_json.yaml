@@ -32,6 +32,7 @@ sources:
 sink:
   InMemoryStorageGrpc: |
     {
-      "server_addr": "http://volga-test-storage.default.svc.cluster.local:50071"
+      "create": true,
+      "server_addr": "http://sample-pipeline-storage.default.svc.cluster.local:50071"
     }
 sql: "SELECT value FROM test_table"

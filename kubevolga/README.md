@@ -79,19 +79,20 @@ go test ./internal/controller -v
 
 Test file:
 
-- `src/runtime/tests/kube_entrypoints_test.rs`
+- `src/tests/kube/smoke.rs`
 
 Behavior summary:
 
-- Applies `kubevolga/config/test-storage` (`volga-test-storage` deployment/service).
 - Reads `kubevolga/config/samples/volga_v1alpha1_pipeline.yaml`.
 - Patches at runtime:
   - pipeline `metadata.name` (unique UUID-based name)
-  - sink `server_addr` (embedded JSON string under `sink.InMemoryStorageGrpc`)
+  - CR sink `InMemoryStorageGrpc.create: true` plus `server_addr` `http://{name}-storage.default.svc.cluster.local:50071` when the job needs the store; Count left alone
   - datagen `limit` and `batch_size` (embedded JSON string under `sources[0].source.Datagen`)
   - worker replicas (computed from logical graph)
-- Applies generated CR JSON with `kubectl`.
-- Waits for phase `Running`, port-forwards test storage, and asserts sink records.
+- Applies generated CR JSON with `kubectl`. Does not apply `kubevolga/config/test-storage` (kept for Docker/manual).
+- Kube operator starts `{name}-storage` when `create: true` and `server_addr` is that Service DNS.
+  Engine `SinkSpec` has no `create` field (`get_spec` is plain deserialize).
+- Waits for phase `Running`, port-forwards `svc/{pipeline}-storage` when a store was created, and asserts sink records.
 
 Run manually:
 

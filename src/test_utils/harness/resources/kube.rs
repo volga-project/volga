@@ -8,6 +8,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::api::PipelineSpec;
+use crate::api::spec::connectors::SinkSpec;
 use crate::common::grpc::master::master_client;
 use crate::common::grpc::GrpcConfig;
 use crate::common::ports::gen_unique_grpc_port;
@@ -104,7 +105,10 @@ impl ClusterBackend for KubeCluster {
             .await
     }
 
-    async fn lifecycle_events_since(&mut self, sequence: u64) -> Result<Vec<LifecycleEventRecord>> {
+    async fn lifecycle_events_since(
+        &mut self,
+        sequence: u64,
+    ) -> Result<Vec<LifecycleEventRecord>> {
         let master_port = self
             .resources
             .as_ref()
@@ -137,10 +141,7 @@ impl ClusterBackend for KubeCluster {
     }
 
     async fn apply_fault(&mut self, fault: FaultAction) -> Result<()> {
-        let resources = self
-            .resources
-            .as_ref()
-            .context("kube cluster is not launched")?;
+        let resources = self.resources.as_ref().context("kube cluster is not launched")?;
         match fault {
             FaultAction::KillWorker { worker_id, mode: _ }
             | FaultAction::RestartWorker { worker_id } => resources.delete_worker_pod(&worker_id),
@@ -151,28 +152,28 @@ impl ClusterBackend for KubeCluster {
 
 impl KubeClusterResources {
     pub async fn launch(launch: PipelineLaunchSpec) -> Result<Self> {
-        let needs_storage = super::pipeline_needs_in_memory_store(&launch.pipeline);
-        let (storage_port_forward, storage_endpoint) = if needs_storage {
-            start_storage()?;
-            let storage_port = gen_unique_grpc_port();
-            let storage_port_forward = start_storage_port_forward(storage_port)?;
-            let storage_endpoint = format!("http://127.0.0.1:{storage_port}");
-            wait_for_local_port(storage_port, Duration::from_secs(30))?;
-            wait_for_empty_storage(&storage_endpoint).await?;
-            (Some(storage_port_forward), Some(storage_endpoint))
-        } else {
-            (None, None)
-        };
         let pipeline_name = format!("kube-harness-{}", Uuid::new_v4().simple());
+        let needs_store = super::pipeline_needs_in_memory_store(&launch.pipeline);
         let manifest_path = write_pipeline_manifest(
             &pipeline_name,
             launch.pipeline,
             launch.worker_count,
             launch.kube_worker_health_poll,
             launch.runtime_consts_profile,
+            needs_store,
         )?;
         kubectl(&["apply", "-f", manifest_path.to_str().unwrap()])?;
         wait_for_pipeline(&pipeline_name)?;
+
+        let (storage_port_forward, storage_endpoint) = if needs_store {
+            let storage_port = gen_unique_grpc_port();
+            let pf = start_storage_port_forward(&pipeline_name, storage_port)?;
+            wait_for_local_port(storage_port, Duration::from_secs(30))?;
+            (Some(pf), Some(format!("http://127.0.0.1:{storage_port}")))
+        } else {
+            (None, None)
+        };
+
         let master_port = gen_unique_grpc_port();
         let master_port_forward = start_master_port_forward(&pipeline_name, master_port)?;
         wait_for_local_port(master_port, Duration::from_secs(30))?;
@@ -265,63 +266,14 @@ impl KubeClusterResources {
     }
 }
 
-async fn wait_for_empty_storage(endpoint: &str) -> Result<()> {
-    let start = tokio::time::Instant::now();
-    loop {
-        let snapshot = InMemoryStorageClient::new(endpoint.to_string())
-            .await?
-            .snapshot()
-            .await?;
-        if snapshot.row_count() == 0 {
-            return Ok(());
-        }
-        if start.elapsed() > Duration::from_secs(30) {
-            return Err(anyhow!(
-                "storage at {endpoint} retained {} rows after reset",
-                snapshot.row_count()
-            ));
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-}
-
-fn start_storage() -> Result<()> {
-    let manifest_dir =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("kubevolga/config/test-storage");
-    kubectl(&[
-        "-n",
-        "default",
-        "delete",
-        "deployment/volga-test-storage",
-        "--ignore-not-found=true",
-        "--wait=true",
-    ])?;
-    wait_for_no_pods("app.kubernetes.io/name=volga-test-storage")?;
-    kubectl(&["apply", "-k", manifest_dir.to_str().unwrap()])?;
-    kubectl(&[
-        "-n",
-        "default",
-        "rollout",
-        "status",
-        "deployment/volga-test-storage",
-        "--timeout=120s",
-    ])?;
-    Ok(())
-}
-
 fn write_pipeline_manifest(
     pipeline_name: &str,
-    mut pipeline: PipelineSpec,
+    pipeline: PipelineSpec,
     worker_count: usize,
     kube_worker_health_poll: bool,
     runtime_consts_profile: crate::runtime::consts::RuntimeConstsProfile,
+    needs_store: bool,
 ) -> Result<PathBuf> {
-    if super::pipeline_needs_in_memory_store(&pipeline) {
-        super::install_in_memory_sink(
-            &mut pipeline,
-            "http://volga-test-storage.default.svc.cluster.local:50071",
-        );
-    }
     let sample_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("kubevolga/config/samples/volga_v1alpha1_pipeline.yaml");
     let mut manifest: Value = serde_yaml::from_str(&fs::read_to_string(sample_path)?)?;
@@ -343,7 +295,28 @@ fn write_pipeline_manifest(
         crate::orchestrator::kube::RUNTIME_CONSTS_PROFILE_ANNOTATION.to_string(),
         Value::String(runtime_consts_profile.as_str().to_string()),
     );
-    manifest["spec"]["pipelineSpec"] = serde_json::to_value(pipeline)?;
+
+    // Engine sink is server_addr only. Kube operator uses create: true plus that DNS.
+    let mut pipeline_json = serde_json::to_value(&pipeline)?;
+    if needs_store {
+        let upsert_key_columns = match &pipeline.sink {
+            Some(SinkSpec::InMemoryStorageGrpc {
+                upsert_key_columns, ..
+            }) => upsert_key_columns.clone(),
+            _ => Vec::new(),
+        };
+        let server_addr = format!(
+            "http://{pipeline_name}-storage.default.svc.cluster.local:50071"
+        );
+        pipeline_json["sink"] = serde_json::json!({
+            "InMemoryStorageGrpc": {
+                "create": true,
+                "server_addr": server_addr,
+                "upsert_key_columns": upsert_key_columns,
+            }
+        });
+    }
+    manifest["spec"]["pipelineSpec"] = pipeline_json;
     manifest["spec"]["workers"]["replicas"] = Value::Number(worker_count.into());
 
     let path = std::env::temp_dir().join(format!("{pipeline_name}-pipeline.json"));
@@ -376,8 +349,14 @@ fn wait_for_pipeline(pipeline_name: &str) -> Result<()> {
 fn wait_for_pipeline_deleted(pipeline_name: &str) -> Result<()> {
     let start = std::time::Instant::now();
     loop {
-        let pipeline_deleted =
-            kubectl(&["-n", "default", "get", "volgapipeline", pipeline_name]).is_err();
+        let pipeline_deleted = kubectl(&[
+            "-n",
+            "default",
+            "get",
+            "volgapipeline",
+            pipeline_name,
+        ])
+        .is_err();
         let pods_deleted = kubectl(&[
             "-n",
             "default",
@@ -402,38 +381,13 @@ fn wait_for_pipeline_deleted(pipeline_name: &str) -> Result<()> {
     }
 }
 
-fn wait_for_no_pods(label: &str) -> Result<()> {
-    let start = std::time::Instant::now();
-    loop {
-        let pods = kubectl(&[
-            "-n",
-            "default",
-            "get",
-            "pods",
-            "-l",
-            label,
-            "-o",
-            "jsonpath={.items[*].metadata.name}",
-        ])?;
-        if pods.trim().is_empty() {
-            return Ok(());
-        }
-        if start.elapsed() > Duration::from_secs(120) {
-            return Err(anyhow!(
-                "timeout waiting for pods matching {label} to terminate"
-            ));
-        }
-        std::thread::sleep(Duration::from_secs(1));
-    }
-}
-
-fn start_storage_port_forward(local_port: u16) -> Result<Child> {
+fn start_storage_port_forward(pipeline_name: &str, local_port: u16) -> Result<Child> {
     kubectl_command()
         .args([
             "-n",
             "default",
             "port-forward",
-            "svc/volga-test-storage",
+            &format!("svc/{pipeline_name}-storage"),
             &format!("{local_port}:50071"),
         ])
         .stdout(Stdio::null())
@@ -476,7 +430,8 @@ async fn fetch_lifecycle_events(
     master_port: u16,
     sequence: u64,
 ) -> Result<Vec<LifecycleEventRecord>> {
-    let mut client = master_client(&format!("127.0.0.1:{master_port}"), &GrpcConfig::new()).await?;
+    let mut client =
+        master_client(&format!("127.0.0.1:{master_port}"), &GrpcConfig::new()).await?;
     client
         .get_lifecycle_events(tonic::Request::new(GetLifecycleEventsRequest {
             after_sequence: sequence,
@@ -486,8 +441,8 @@ async fn fetch_lifecycle_events(
         .events
         .into_iter()
         .map(|record| {
-            let event: LifecycleEvent =
-                bincode::deserialize(&record.event_bytes).with_context(|| {
+            let event: LifecycleEvent = bincode::deserialize(&record.event_bytes)
+                .with_context(|| {
                     format!(
                         "failed to decode lifecycle event sequence={} bytes={}",
                         record.sequence,
@@ -505,7 +460,8 @@ async fn fetch_lifecycle_events(
 async fn master_latest_pipeline_snapshot(
     master_port: u16,
 ) -> Result<Option<crate::runtime::observability::PipelineSnapshot>> {
-    let mut client = master_client(&format!("127.0.0.1:{master_port}"), &GrpcConfig::new()).await?;
+    let mut client =
+        master_client(&format!("127.0.0.1:{master_port}"), &GrpcConfig::new()).await?;
     let response = client
         .get_latest_pipeline_snapshot(tonic::Request::new(
             crate::runtime::master::server::master_service::GetLatestPipelineSnapshotRequest {},
@@ -519,7 +475,8 @@ async fn master_latest_pipeline_snapshot(
 }
 
 async fn master_stop_sources(master_port: u16) -> Result<()> {
-    let mut client = master_client(&format!("127.0.0.1:{master_port}"), &GrpcConfig::new()).await?;
+    let mut client =
+        master_client(&format!("127.0.0.1:{master_port}"), &GrpcConfig::new()).await?;
     let response = client
         .stop_sources(tonic::Request::new(
             crate::runtime::master::server::master_service::StopSourcesRequest {},

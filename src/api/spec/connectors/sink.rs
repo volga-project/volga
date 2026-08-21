@@ -25,7 +25,7 @@ impl SinkSpec {
         }
     }
 
-    /// In-memory sink with upsert keys; address is filled in by the harness/deployer.
+    /// Upsert keys only; local/docker harness installs a concrete `server_addr`.
     pub fn in_memory_upsert(key_columns: Vec<String>) -> Self {
         Self::InMemoryStorageGrpc {
             server_addr: String::new(),
@@ -58,8 +58,13 @@ impl SinkSpec {
             SinkSpec::InMemoryStorageGrpc {
                 server_addr,
                 upsert_key_columns,
-            } => SinkConfig::in_memory_grpc(server_addr.clone())
-                .with_upsert_key_columns(upsert_key_columns.clone()),
+            } => {
+                if server_addr.trim().is_empty() {
+                    panic!("InMemoryStorageGrpc server_addr must be set before to_sink_config");
+                }
+                SinkConfig::in_memory_grpc(server_addr.clone())
+                    .with_upsert_key_columns(upsert_key_columns.clone())
+            }
             SinkSpec::Request => SinkConfig::RequestSinkConfig,
             SinkSpec::Parquet(spec) => SinkConfig::ParquetSinkConfig(spec.to_config()),
             SinkSpec::Count => SinkConfig::CountSinkConfig,
