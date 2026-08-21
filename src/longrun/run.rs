@@ -238,7 +238,7 @@ async fn teardown_observe(
             .context("prometheus query_range dump")?;
         prom_dump = Some(dump);
     } else {
-        println!("[volga-longrun] no --prom-url; skipping Prom dump and Prom oracles");
+        println!("[volga-longrun] no prom_url; skipping Prom dump and Prom oracles");
     }
 
     if let Some(dir) = &spec.dump {

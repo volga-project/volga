@@ -41,7 +41,7 @@ const DEFAULT_SQL: &str = "SELECT timestamp, key, value, \
      WINDOW w AS (PARTITION BY key ORDER BY timestamp \
      RANGE BETWEEN INTERVAL '10000' MILLISECOND PRECEDING AND CURRENT ROW)";
 
-/// On-disk soak/bench run file. CLI flags override these fields.
+/// On-disk soak spec. CLI `--env` / `--duration-secs` override these two fields.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SoakFile {
