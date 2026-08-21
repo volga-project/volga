@@ -49,16 +49,16 @@ where
         let (flag, inline) = split_flag(arg);
         match flag {
             "--config" => {
-                config = Some(std::path::PathBuf::from(take_value(flag, inline, args, &mut i)?));
+                config = Some(std::path::PathBuf::from(take_value(flag, inline, &args, &mut i)?));
             }
             "--env" => {
-                let value = take_value(flag, inline, args, &mut i)?;
+                let value = take_value(flag, inline, &args, &mut i)?;
                 env = Some(RuntimeEnv::parse(&value).ok_or_else(|| {
                     anyhow!("invalid --env `{value}` (local|kube|docker)")
                 })?);
             }
             "--duration-secs" => {
-                let value = take_value(flag, inline, args, &mut i)?;
+                let value = take_value(flag, inline, &args, &mut i)?;
                 let n: u64 = value
                     .parse()
                     .map_err(|_| anyhow!("invalid --duration-secs `{value}`"))?;
