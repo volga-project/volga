@@ -4,28 +4,20 @@ use anyhow::{anyhow, bail, Result};
 
 use crate::test_utils::harness::RuntimeEnv;
 
-use super::config::{apply_file, SoakFile};
-use super::run::run_soak;
-use super::spec::SoakSpec;
+use super::config::{apply_file, BenchFile};
+use super::run::run_bench;
+use super::spec::BenchSpec;
 
 const USAGE: &str = "\
 Usage:
-  volga-longrun soak [--config FILE] [--env local|kube|docker] [--duration-secs N]
-  volga-longrun bench
+  volga-bench [--config FILE] [--env local|kube|docker] [--duration-secs N]
 
-v1 implements soak only. Default duration: local 120s, kube/docker 3600s.
-YAML (`--config`) is the soak spec: scenario, dump, Prom, oracles, job overlay.
+YAML (`--config`) is the run spec: scenario, dump, Prom, oracles, job overlay.
 Count sink and Datagen source are fixed. CLI only overrides env and duration.
-Omit `--config` for the default window job (steady, local).";
+Omit `--config` for the default window job (steady, local, 120s).";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LongrunCommand {
-    Soak(SoakArgs),
-    Bench,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SoakArgs {
+pub struct Args {
     pub config: Option<std::path::PathBuf>,
     pub env: Option<RuntimeEnv>,
     pub duration_secs: Option<u64>,
@@ -36,36 +28,18 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
-    match parse_args(args)? {
-        LongrunCommand::Soak(args) => run_soak(build_spec(args)?).await,
-        LongrunCommand::Bench => {
-            bail!("`volga-longrun bench` is not implemented in v1; use `soak`")
-        }
-    }
+    run_bench(build_spec(parse_args(args)?)?).await
 }
 
-pub fn parse_args<I, S>(args: I) -> Result<LongrunCommand>
+pub fn parse_args<I, S>(args: I) -> Result<Args>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
     let args: Vec<String> = args.into_iter().map(|s| s.as_ref().to_string()).collect();
-    if args.is_empty() || args.iter().any(|a| a == "--help" || a == "-h") {
+    if args.iter().any(|a| a == "--help" || a == "-h") {
         bail!("{USAGE}");
     }
-    match args[0].as_str() {
-        "soak" => Ok(LongrunCommand::Soak(parse_soak(&args[1..])?)),
-        "bench" => {
-            if args.len() > 1 {
-                bail!("bench takes no arguments\n{USAGE}");
-            }
-            Ok(LongrunCommand::Bench)
-        }
-        other => bail!("unknown command `{other}`\n{USAGE}"),
-    }
-}
-
-fn parse_soak(args: &[String]) -> Result<SoakArgs> {
     let mut config = None;
     let mut env = None;
     let mut duration_secs = None;
@@ -75,16 +49,16 @@ fn parse_soak(args: &[String]) -> Result<SoakArgs> {
         let (flag, inline) = split_flag(arg);
         match flag {
             "--config" => {
-                config = Some(std::path::PathBuf::from(take_value(flag, inline, args, &mut i)?));
+                config = Some(std::path::PathBuf::from(take_value(flag, inline, &args, &mut i)?));
             }
             "--env" => {
-                let value = take_value(flag, inline, args, &mut i)?;
+                let value = take_value(flag, inline, &args, &mut i)?;
                 env = Some(RuntimeEnv::parse(&value).ok_or_else(|| {
                     anyhow!("invalid --env `{value}` (local|kube|docker)")
                 })?);
             }
             "--duration-secs" => {
-                let value = take_value(flag, inline, args, &mut i)?;
+                let value = take_value(flag, inline, &args, &mut i)?;
                 let n: u64 = value
                     .parse()
                     .map_err(|_| anyhow!("invalid --duration-secs `{value}`"))?;
@@ -93,21 +67,21 @@ fn parse_soak(args: &[String]) -> Result<SoakArgs> {
                 }
                 duration_secs = Some(n);
             }
-            other => bail!("unknown soak flag `{other}`\n{USAGE}"),
+            other => bail!("unknown flag `{other}`\n{USAGE}"),
         }
         i += 1;
     }
-    Ok(SoakArgs {
+    Ok(Args {
         config,
         env,
         duration_secs,
     })
 }
 
-fn build_spec(args: SoakArgs) -> Result<SoakSpec> {
+fn build_spec(args: Args) -> Result<BenchSpec> {
     let file = match &args.config {
-        Some(path) => SoakFile::load(path)?,
-        None => SoakFile::default(),
+        Some(path) => BenchFile::load(path)?,
+        None => BenchFile::default(),
     };
     let mut spec = apply_file(&file)?;
     if let Some(env) = args.env {
@@ -116,7 +90,7 @@ fn build_spec(args: SoakArgs) -> Result<SoakSpec> {
     if let Some(secs) = args.duration_secs {
         spec.duration = Duration::from_secs(secs);
     } else if file.duration.is_none() {
-        spec.duration = Duration::from_secs(SoakSpec::default_duration_secs(spec.env));
+        spec.duration = Duration::from_secs(BenchSpec::default_duration_secs(spec.env));
     }
     Ok(spec)
 }
@@ -141,11 +115,11 @@ fn take_value(flag: &str, inline: Option<&str>, args: &[String], i: &mut usize) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::longrun::spec::SoakScenario;
+    use crate::bench::spec::Scenario;
 
     #[test]
     fn config_file_then_cli_override() {
-        let path = std::env::temp_dir().join("volga-soak-config-test.yaml");
+        let path = std::env::temp_dir().join("volga-bench-config-test.yaml");
         std::fs::write(
             &path,
             r#"
@@ -160,21 +134,18 @@ launch:
 "#,
         )
         .unwrap();
-        let LongrunCommand::Soak(args) = parse_args([
-            "soak",
+        let args = parse_args([
             &format!("--config={}", path.display()),
             "--env=kube",
             "--duration-secs=3600",
         ])
-        .unwrap() else {
-            panic!("expected soak");
-        };
+        .unwrap();
         let spec = build_spec(args).unwrap();
         assert_eq!(spec.env, RuntimeEnv::Kube);
         assert_eq!(spec.duration, Duration::from_secs(3600));
         assert_eq!(
             spec.scenario,
-            SoakScenario::KillAfterCheckpoint {
+            Scenario::KillAfterCheckpoint {
                 after_checkpoint: 1
             }
         );

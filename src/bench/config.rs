@@ -21,7 +21,7 @@ use crate::runtime::operators::window::tile::TileConfig;
 use crate::test_utils::harness::{PipelineLaunchSpec, RuntimeEnv};
 
 use super::dump::extra_prom_queries;
-use super::spec::{SoakOracleConfig, SoakScenario, SoakSpec};
+use super::spec::{OracleConfig, Scenario, BenchSpec};
 
 const DEFAULT_PARALLELISM: usize = 4;
 const DEFAULT_SLOTS_PER_NODE: usize = 2;
@@ -41,18 +41,18 @@ const DEFAULT_SQL: &str = "SELECT timestamp, key, value, \
      WINDOW w AS (PARTITION BY key ORDER BY timestamp \
      RANGE BETWEEN INTERVAL '10000' MILLISECOND PRECEDING AND CURRENT ROW)";
 
-/// On-disk soak spec. CLI `--env` / `--duration-secs` override these two fields.
+/// On-disk bench spec. CLI `--env` / `--duration-secs` override these two fields.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SoakFile {
+pub struct BenchFile {
     pub env: Option<String>,
     pub duration: Option<String>,
     pub scenario: Option<String>,
     pub kill_after_checkpoint: Option<u64>,
     pub dump: Option<PathBuf>,
     pub prom_url: Option<String>,
-    pub launch: Option<SoakLaunchFile>,
-    pub oracles: Option<SoakOracleFile>,
+    pub launch: Option<LaunchFile>,
+    pub oracles: Option<OracleFile>,
     /// Dump-only PromQL (`name` + `query`). Required oracle queries stay in code.
     #[serde(default)]
     pub extra_prom_queries: Option<Vec<NamedPromQuery>>,
@@ -61,19 +61,19 @@ pub struct SoakFile {
 /// Job overlay compiled into `PipelineSpec`. Count sink + Datagen source are fixed in code.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SoakLaunchFile {
+pub struct LaunchFile {
     pub sql: Option<String>,
     pub parallelism: Option<usize>,
     pub slots_per_node: Option<usize>,
     pub threads_per_task: Option<usize>,
-    pub checkpoint: Option<SoakCheckpointFile>,
-    pub datagen: Option<SoakDatagenFile>,
-    pub window: Option<SoakWindowFile>,
+    pub checkpoint: Option<CheckpointFile>,
+    pub datagen: Option<DatagenFile>,
+    pub window: Option<WindowFile>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SoakCheckpointFile {
+pub struct CheckpointFile {
     pub interval: Option<String>,
     pub timeout: Option<String>,
     pub retention: Option<u64>,
@@ -81,7 +81,7 @@ pub struct SoakCheckpointFile {
 
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SoakDatagenFile {
+pub struct DatagenFile {
     pub rate: Option<f32>,
     pub batch_size: Option<usize>,
     pub num_unique: Option<usize>,
@@ -89,7 +89,7 @@ pub struct SoakDatagenFile {
 
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SoakWindowFile {
+pub struct WindowFile {
     pub tiling: Option<Vec<String>>,
     pub out_of_orderness_ms: Option<u64>,
     pub allowed_lateness_ms: Option<i64>,
@@ -104,7 +104,7 @@ pub struct NamedPromQuery {
 /// Duration fields accept `1h` / `30s` / `500ms`.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SoakOracleFile {
+pub struct OracleFile {
     pub watermark_stale_while_sending: Option<String>,
     pub lag_p99: Option<String>,
     pub lag_p99_sustain: Option<String>,
@@ -114,11 +114,11 @@ pub struct SoakOracleFile {
     pub allow_unexpected_fatal: Option<bool>,
 }
 
-impl SoakFile {
+impl BenchFile {
     pub fn load(path: &Path) -> Result<Self> {
         let raw = std::fs::read_to_string(path)
-            .with_context(|| format!("read soak config {}", path.display()))?;
-        serde_yaml::from_str(&raw).with_context(|| format!("parse soak config {}", path.display()))
+            .with_context(|| format!("read bench config {}", path.display()))?;
+        serde_yaml::from_str(&raw).with_context(|| format!("parse bench config {}", path.display()))
     }
 
     pub fn env(&self) -> Result<Option<RuntimeEnv>> {
@@ -131,7 +131,7 @@ impl SoakFile {
             .transpose()
     }
 
-    pub fn scenario(&self) -> Result<Option<SoakScenario>> {
+    pub fn scenario(&self) -> Result<Option<Scenario>> {
         if let Some(n) = self.kill_after_checkpoint {
             if n == 0 {
                 bail!("config kill_after_checkpoint must be >= 1");
@@ -142,8 +142,8 @@ impl SoakFile {
         }
         match self.scenario.as_deref() {
             None => Ok(None),
-            Some("steady") => Ok(Some(SoakScenario::Steady)),
-            Some("kill") => Ok(Some(SoakScenario::KillAfterCheckpoint {
+            Some("steady") => Ok(Some(Scenario::Steady)),
+            Some("kill") => Ok(Some(Scenario::KillAfterCheckpoint {
                 after_checkpoint: self.kill_after_checkpoint.unwrap_or(1),
             })),
             Some(other) => bail!("invalid config scenario `{other}` (steady|kill)"),
@@ -151,14 +151,14 @@ impl SoakFile {
     }
 }
 
-/// Build a soak spec from the run file. Omitted `launch` uses the default window job.
-pub fn apply_file(file: &SoakFile) -> Result<SoakSpec> {
+/// Build a bench spec from the run file. Omitted `launch` uses the default window job.
+pub fn apply_file(file: &BenchFile) -> Result<BenchSpec> {
     let env = file.env()?.unwrap_or(RuntimeEnv::Local);
     let duration = match &file.duration {
         Some(raw) => parse_duration(raw)?,
-        None => Duration::from_secs(SoakSpec::default_duration_secs(env)),
+        None => Duration::from_secs(BenchSpec::default_duration_secs(env)),
     };
-    let mut oracles = SoakOracleConfig::default();
+    let mut oracles = OracleConfig::default();
     if let Some(file_oracles) = &file.oracles {
         apply_oracles(&mut oracles, file_oracles)?;
     }
@@ -169,10 +169,10 @@ pub fn apply_file(file: &SoakFile) -> Result<SoakSpec> {
             .collect(),
         None => extra_prom_queries(),
     };
-    Ok(SoakSpec {
+    Ok(BenchSpec {
         env,
-        launch: soak_launch(file.launch.as_ref())?,
-        scenario: file.scenario()?.unwrap_or(SoakScenario::Steady),
+        launch: compile_launch(file.launch.as_ref())?,
+        scenario: file.scenario()?.unwrap_or(Scenario::Steady),
         duration,
         oracles,
         dump: file.dump.clone(),
@@ -181,7 +181,7 @@ pub fn apply_file(file: &SoakFile) -> Result<SoakSpec> {
     })
 }
 
-fn soak_launch(launch: Option<&SoakLaunchFile>) -> Result<PipelineLaunchSpec> {
+fn compile_launch(launch: Option<&LaunchFile>) -> Result<PipelineLaunchSpec> {
     let launch = launch.cloned().unwrap_or_default();
     let parallelism = nonzero_usize(launch.parallelism, DEFAULT_PARALLELISM, "launch.parallelism")?;
     let slots_per_node =
@@ -203,10 +203,10 @@ fn soak_launch(launch: Option<&SoakLaunchFile>) -> Result<PipelineLaunchSpec> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .unwrap_or(DEFAULT_SQL);
-    let (interval_ms, timeout_ms, retention) = soak_checkpoint(launch.checkpoint.as_ref())?;
-    let datagen = soak_datagen(launch.datagen.as_ref(), parallelism)?;
+    let (interval_ms, timeout_ms, retention) = checkpoint_from_file(launch.checkpoint.as_ref())?;
+    let datagen = datagen_from_file(launch.datagen.as_ref(), parallelism)?;
     let (tiling, out_of_orderness_ms, allowed_lateness_ms) =
-        soak_window(launch.window.as_ref())?;
+        window_from_file(launch.window.as_ref())?;
 
     let schema = Arc::new(Schema::new(vec![
         Field::new(
@@ -250,7 +250,7 @@ fn soak_launch(launch: Option<&SoakLaunchFile>) -> Result<PipelineLaunchSpec> {
     )
 }
 
-fn soak_checkpoint(file: Option<&SoakCheckpointFile>) -> Result<(u64, u64, u64)> {
+fn checkpoint_from_file(file: Option<&CheckpointFile>) -> Result<(u64, u64, u64)> {
     let file = file.cloned().unwrap_or_default();
     let interval_ms = duration_ms(
         file.interval.as_deref(),
@@ -275,7 +275,7 @@ fn soak_checkpoint(file: Option<&SoakCheckpointFile>) -> Result<(u64, u64, u64)>
     Ok((interval_ms, timeout_ms, retention))
 }
 
-fn soak_datagen(file: Option<&SoakDatagenFile>, parallelism: usize) -> Result<DatagenSpec> {
+fn datagen_from_file(file: Option<&DatagenFile>, parallelism: usize) -> Result<DatagenSpec> {
     let file = file.cloned().unwrap_or_default();
     let rate = file.rate.unwrap_or(DEFAULT_DATAGEN_RATE);
     if rate <= 0.0 {
@@ -322,7 +322,7 @@ fn soak_datagen(file: Option<&SoakDatagenFile>, parallelism: usize) -> Result<Da
     })
 }
 
-fn soak_window(file: Option<&SoakWindowFile>) -> Result<(TileConfig, u64, i64)> {
+fn window_from_file(file: Option<&WindowFile>) -> Result<(TileConfig, u64, i64)> {
     let file = file.cloned().unwrap_or_default();
     let tiling_raw = file
         .tiling
@@ -407,7 +407,7 @@ fn parse_granularity(raw: &str) -> Result<TimeGranularity> {
     bail!("invalid window tiling `{raw}` (use Ns, Nm, or Nh)")
 }
 
-fn apply_oracles(oracles: &mut SoakOracleConfig, file: &SoakOracleFile) -> Result<()> {
+fn apply_oracles(oracles: &mut OracleConfig, file: &OracleFile) -> Result<()> {
     if let Some(raw) = &file.watermark_stale_while_sending {
         oracles.watermark_stale_while_sending = parse_duration(raw)?;
     }
@@ -477,7 +477,7 @@ mod tests {
 
     #[test]
     fn apply_file_sets_oracles_and_launch() {
-        let file: SoakFile = serde_yaml::from_str(
+        let file: BenchFile = serde_yaml::from_str(
             r#"
 env: kube
 duration: 1h
@@ -511,7 +511,7 @@ extra_prom_queries:
         assert_eq!(spec.duration, Duration::from_secs(3600));
         assert_eq!(
             spec.scenario,
-            SoakScenario::KillAfterCheckpoint {
+            Scenario::KillAfterCheckpoint {
                 after_checkpoint: 2
             }
         );

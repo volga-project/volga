@@ -17,7 +17,7 @@ use crate::test_utils::recovery::RecoveryTimeouts;
 use super::dump::{dump_prom_series, prom_queries};
 use super::oracles::{self, KillWindow, PromSeriesSet};
 use super::spec::{
-    resolved_checkpoint_interval, resolved_checkpoint_timeout, SoakScenario, SoakSpec,
+    resolved_checkpoint_interval, resolved_checkpoint_timeout, Scenario, BenchSpec,
 };
 
 const PROM_STEP: &str = "5s";
@@ -37,11 +37,11 @@ fn checkpoint_idle(checkpoint: &CheckpointSpec) -> Duration {
     resolved_checkpoint_timeout(checkpoint) + resolved_checkpoint_interval(checkpoint)
 }
 
-pub async fn run_soak(spec: SoakSpec) -> Result<()> {
+pub async fn run_bench(spec: BenchSpec) -> Result<()> {
     init_runtime_consts_profile(RuntimeConstsProfile::Prod);
 
     println!(
-        "[volga-longrun] env={} scenario={} duration={:?}",
+        "[volga-bench] env={} scenario={} duration={:?}",
         spec.env,
         spec.scenario.as_str(),
         spec.duration
@@ -64,7 +64,7 @@ pub async fn run_soak(spec: SoakSpec) -> Result<()> {
             ) => result,
             failed = watch_pipeline_failed(&cluster) => Err(failed),
             _ = shutdown_signal() => {
-                println!("[volga-longrun] interrupt, dumping then shutting down");
+                println!("[volga-bench] interrupt, dumping then shutting down");
                 Ok(ScenarioOutcome {
                     kill: None,
                     started_unix,
@@ -97,7 +97,7 @@ pub async fn run_soak(spec: SoakSpec) -> Result<()> {
 async fn run_scenario(
     cluster: &VolgaCluster,
     env: RuntimeEnv,
-    scenario: SoakScenario,
+    scenario: Scenario,
     duration: Duration,
     started_unix: f64,
     checkpoint: &CheckpointSpec,
@@ -108,11 +108,11 @@ async fn run_scenario(
     let started = Instant::now();
 
     wait_until_attempt0_running(&cluster.master(), &mut cursor, timeouts.attempt_running).await?;
-    println!("[volga-longrun] attempt 0 running");
+    println!("[volga-bench] attempt 0 running");
 
     let kill = match scenario {
-        SoakScenario::Steady => None,
-        SoakScenario::KillAfterCheckpoint { after_checkpoint } => Some(
+        Scenario::Steady => None,
+        Scenario::KillAfterCheckpoint { after_checkpoint } => Some(
             run_kill_after_checkpoint(
                 cluster,
                 &timeouts,
@@ -126,12 +126,12 @@ async fn run_scenario(
 
     let remaining = duration.saturating_sub(started.elapsed());
     if remaining > Duration::ZERO {
-        println!("[volga-longrun] running for remaining {remaining:?}");
+        println!("[volga-bench] running for remaining {remaining:?}");
         tokio::time::sleep(remaining).await;
     }
 
     println!(
-        "[volga-longrun] soak finished elapsed={:?}",
+        "[volga-bench] finished elapsed={:?}",
         started.elapsed()
     );
     Ok(ScenarioOutcome { kill, started_unix })
@@ -168,7 +168,7 @@ async fn run_kill_after_checkpoint(
     for n in 1..=after_checkpoint {
         checkpoint_id =
             wait_for_checkpoint_completed(&cluster.master(), cursor, checkpoint_wait(checkpoint)).await?;
-        println!("[volga-longrun] checkpoint {checkpoint_id} completed ({n}/{after_checkpoint})");
+        println!("[volga-bench] checkpoint {checkpoint_id} completed ({n}/{after_checkpoint})");
     }
 
     wait_until_checkpoints_idle(&cluster.master(), checkpoint_idle(checkpoint)).await?;
@@ -177,7 +177,7 @@ async fn run_kill_after_checkpoint(
     let target = worker_ids
         .first()
         .ok_or_else(|| anyhow!("expected at least one worker"))?;
-    println!("[volga-longrun] kill worker={target} after checkpoint>={checkpoint_id}");
+    println!("[volga-bench] kill worker={target} after checkpoint>={checkpoint_id}");
     let seq_lo = *cursor + 1;
     let at_unix = unix_now();
     cluster
@@ -206,7 +206,7 @@ async fn run_kill_after_checkpoint(
     )
     .await?;
     let restore_at_unix = unix_now();
-    println!("[volga-longrun] restore attempt={attempt_id} running");
+    println!("[volga-bench] restore attempt={attempt_id} running");
     Ok(KillWindow {
         at_unix,
         restore_at_unix,
@@ -218,7 +218,7 @@ async fn run_kill_after_checkpoint(
 
 async fn teardown_observe(
     cluster: &VolgaCluster,
-    spec: &SoakSpec,
+    spec: &BenchSpec,
     outcome: &ScenarioOutcome,
 ) -> Result<()> {
     let events = cluster.master().lifecycle_events_since(0).await?;
@@ -226,7 +226,7 @@ async fn teardown_observe(
 
     let mut prom_dump = None;
     if let Some(prom_url) = spec.prom_url.as_deref() {
-        println!("[volga-longrun] dumping Prom query_range from {prom_url}");
+        println!("[volga-bench] dumping Prom query_range from {prom_url}");
         let dump = dump_prom_series(
             prom_url,
             outcome.started_unix,
@@ -238,12 +238,12 @@ async fn teardown_observe(
             .context("prometheus query_range dump")?;
         prom_dump = Some(dump);
     } else {
-        println!("[volga-longrun] no prom_url; skipping Prom dump and Prom oracles");
+        println!("[volga-bench] no prom_url; skipping Prom dump and Prom oracles");
     }
 
     if let Some(dir) = &spec.dump {
         write_dump(dir, &events, prom_dump.as_ref())?;
-        println!("[volga-longrun] wrote dump to {}", dir.display());
+        println!("[volga-bench] wrote dump to {}", dir.display());
     }
 
     let prom_series = match &prom_dump {
@@ -257,7 +257,7 @@ async fn teardown_observe(
         prom_series.as_ref(),
         &spec.launch.pipeline.state.checkpoint,
     )?;
-    println!("[volga-longrun] oracles passed");
+    println!("[volga-bench] oracles passed");
     Ok(())
 }
 
