@@ -4,6 +4,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CLUSTER_NAME="${VOLGA_KIND_CLUSTER:-kubevolga}"
 CONTEXT="kind-$CLUSTER_NAME"
+KIND_CONFIG="$ROOT/kubevolga/hack/kind-multi.yaml"
+MIN_WORKER_NODES=2
+MIN_INFRA_NODES=1
 ACTION="${1:-setup}"
 REBUILD="${2:-}"
 
@@ -21,6 +24,32 @@ cluster_exists() {
 
 kubectl_test() {
   kubectl --context "$CONTEXT" "$@"
+}
+
+node_count_by_role() {
+  local role="$1"
+  kubectl_test get nodes -l "volga.io/role=$role" --no-headers 2>/dev/null |
+    wc -l |
+    tr -d ' '
+}
+
+cluster_has_topology() {
+  local workers infra
+  workers="$(node_count_by_role worker)"
+  infra="$(node_count_by_role infra)"
+  [[ "${workers:-0}" -ge "$MIN_WORKER_NODES" && "${infra:-0}" -ge "$MIN_INFRA_NODES" ]]
+}
+
+ensure_cluster() {
+  if cluster_exists; then
+    if cluster_has_topology; then
+      echo "using existing Kind cluster: $CLUSTER_NAME"
+      return
+    fi
+    echo "Kind cluster $CLUSTER_NAME is missing infra/worker topology; recreating"
+    kind delete cluster --name "$CLUSTER_NAME"
+  fi
+  kind create cluster --name "$CLUSTER_NAME" --config "$KIND_CONFIG"
 }
 
 cleanup_resources() {
@@ -48,12 +77,8 @@ setup() {
   require make
   docker info >/dev/null
 
-  if cluster_exists; then
-    echo "using existing Kind cluster: $CLUSTER_NAME"
-  else
-    kind create cluster --name "$CLUSTER_NAME"
-  fi
-  kubectl_test wait --for=condition=Ready nodes --all --timeout=120s
+  ensure_cluster
+  kubectl_test wait --for=condition=Ready nodes --all --timeout=180s
 
   # Shared Buildx/GHA cache with the docker job (scope=volga-image).
   if [[ "$REBUILD" == "--rebuild" ]]; then

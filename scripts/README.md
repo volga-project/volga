@@ -90,7 +90,9 @@ docker/kube jobs unless you pick an env-only profile).
 `all` runs `unit` + `inprocess` first, then docker/Kind setup only when those
 suites start. `scripts/docker-test-env setup` prefetches testcontainers images
 (LocalStack, Redpanda) before building `volga:latest`. Kube uses the Kind
-cluster named by `VOLGA_KIND_CLUSTER` (default: `kubevolga`).
+cluster named by `VOLGA_KIND_CLUSTER` (default: `kubevolga`), created from
+`kubevolga/hack/kind-multi.yaml` (control-plane + infra + 2 tainted worker
+nodes). A cluster without that topology is deleted and recreated.
 
 ### CI image cache
 

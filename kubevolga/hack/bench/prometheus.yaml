@@ -18,16 +18,8 @@ spec:
         app.kubernetes.io/part-of: volga-bench
     spec:
       serviceAccountName: prometheus
-      affinity:
-        nodeAffinity:
-          preferredDuringSchedulingIgnoredDuringExecution:
-            - weight: 100
-              preference:
-                matchExpressions:
-                  - key: volga.io/role
-                    operator: In
-                    values:
-                      - infra
+      nodeSelector:
+        volga.io/role: infra
       containers:
         - name: prometheus
           image: prom/prometheus:v2.54.1
