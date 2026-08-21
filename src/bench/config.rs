@@ -292,12 +292,11 @@ fn datagen_from_file(file: Option<&DatagenFile>, parallelism: usize) -> Result<D
         "launch.datagen.num_unique",
     )?;
     let mut fields = HashMap::new();
+    // Wall-clock event time so watermark lag is `now − watermark`, not ~55 years
+    // (IncrementalTimestamp starts at 1s and lag uses UNIX epoch ms).
     fields.insert(
         "timestamp".to_string(),
-        FieldGenerator::IncrementalTimestamp {
-            start_ms: 1_000,
-            step_ms: 1_000,
-        },
+        FieldGenerator::ProcessingTimestamp,
     );
     fields.insert(
         "key".to_string(),

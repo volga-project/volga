@@ -7,7 +7,7 @@
   ],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "refresh": "5s",
   "time": {
     "from": "now-15m",
@@ -22,7 +22,7 @@
           "type": "prometheus",
           "uid": "prometheus"
         },
-        "query": "label_values(volga_checkpoint_completed_total, pipeline_id)",
+        "query": "label_values(volga_stream_task_busy_time_ms_per_second, pipeline_id)",
         "includeAll": true,
         "multi": true,
         "allValue": ".*",
@@ -32,20 +32,74 @@
         },
         "refresh": 2,
         "sort": 1,
-        "hide": 0
+        "hide": 0,
+        "label": "pipeline"
+      },
+      {
+        "name": "worker",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "query": "label_values(volga_stream_task_busy_time_ms_per_second{pipeline_id=~\"$pipeline\"}, worker_id)",
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*",
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "refresh": 2,
+        "sort": 1,
+        "hide": 0,
+        "label": "worker"
+      },
+      {
+        "name": "task",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "query": "label_values(volga_stream_task_busy_time_ms_per_second{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\"}, task_id)",
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*",
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "refresh": 2,
+        "sort": 1,
+        "hide": 0,
+        "label": "task"
       }
     ]
   },
   "panels": [
     {
-      "id": 1,
-      "type": "timeseries",
-      "title": "Job health",
+      "id": 10,
+      "type": "row",
+      "title": "Job",
       "gridPos": {
-        "h": 8,
+        "h": 1,
         "w": 24,
         "x": 0,
         "y": 0
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Checkpoints",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 1
       },
       "datasource": {
         "type": "prometheus",
@@ -58,7 +112,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "increase(volga_checkpoint_completed_total{pipeline_id=~\"$pipeline\"}[5m])",
+          "expr": "increase(volga_checkpoint_completed{pipeline_id=~\"$pipeline\"}[5m])",
           "legendFormat": "completed",
           "editorMode": "code",
           "instant": false,
@@ -70,14 +124,61 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "increase(volga_checkpoint_failed_total{pipeline_id=~\"$pipeline\"}[5m])",
+          "expr": "increase(volga_checkpoint_failed{pipeline_id=~\"$pipeline\"}[5m])",
           "legendFormat": "failed",
           "editorMode": "code",
           "instant": false,
           "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
         },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Master counters (metrics crate does not add _total). Empty if scrape missed the master."
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Checkpoint duration p99",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
         {
-          "refId": "C",
+          "refId": "A",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -94,162 +195,8 @@
           "custom": {
             "drawStyle": "line",
             "lineInterpolation": "smooth",
-            "fillOpacity": 8,
-            "lineWidth": 1,
-            "pointSize": 5,
-            "showPoints": "never",
-            "spanNulls": true,
-            "stacking": {
-              "mode": "none",
-              "group": "A"
-            }
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "description": "Job-level checkpoint counters and success-only duration histogram."
-    },
-    {
-      "id": 2,
-      "type": "timeseries",
-      "title": "Task time (ms / s, stack \u2248 1000)",
-      "gridPos": {
-        "h": 8,
-        "w": 24,
-        "x": 0,
-        "y": 8
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "avg by (task_id) (volga_stream_task_busy_time_ms_per_second{pipeline_id=~\"$pipeline\"})",
-          "legendFormat": "busy {{task_id}}",
-          "editorMode": "code",
-          "instant": false,
-          "range": true
-        },
-        {
-          "refId": "B",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "avg by (task_id) (volga_stream_task_idle_time_ms_per_second{pipeline_id=~\"$pipeline\"})",
-          "legendFormat": "idle {{task_id}}",
-          "editorMode": "code",
-          "instant": false,
-          "range": true
-        },
-        {
-          "refId": "C",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "avg by (task_id) (volga_stream_task_backpressured_time_ms_per_second{pipeline_id=~\"$pipeline\"})",
-          "legendFormat": "backpressured {{task_id}}",
-          "editorMode": "code",
-          "instant": false,
-          "range": true
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "smooth",
-            "fillOpacity": 20,
-            "lineWidth": 1,
-            "pointSize": 5,
-            "showPoints": "never",
-            "spanNulls": true,
-            "stacking": {
-              "mode": "normal",
-              "group": "A"
-            }
-          },
-          "unit": "ms"
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      }
-    },
-    {
-      "id": 3,
-      "type": "timeseries",
-      "title": "Event-time lag",
-      "gridPos": {
-        "h": 8,
-        "w": 24,
-        "x": 0,
-        "y": 16
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "quantile(0.50, volga_stream_task_watermark_lag_ms{pipeline_id=~\"$pipeline\"})",
-          "legendFormat": "lag p50",
-          "editorMode": "code",
-          "instant": false,
-          "range": true
-        },
-        {
-          "refId": "B",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "quantile(0.99, volga_stream_task_watermark_lag_ms{pipeline_id=~\"$pipeline\"})",
-          "legendFormat": "lag p99",
-          "editorMode": "code",
-          "instant": false,
-          "range": true
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "smooth",
-            "fillOpacity": 8,
-            "lineWidth": 1,
+            "fillOpacity": 10,
+            "lineWidth": 2,
             "pointSize": 5,
             "showPoints": "never",
             "spanNulls": true,
@@ -273,17 +220,30 @@
           "sort": "desc"
         }
       },
-      "description": "Per-task lag gauges; quantile across tasks (not a histogram)."
+      "description": "Success-only histogram. Sparse on a 2-minute / 30s-checkpoint run \u2014 expect a flat-ish line."
     },
     {
-      "id": 4,
+      "id": 20,
+      "type": "row",
+      "title": "Flow",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 9
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 21,
       "type": "timeseries",
       "title": "Throughput",
       "gridPos": {
         "h": 8,
-        "w": 24,
+        "w": 12,
         "x": 0,
-        "y": 24
+        "y": 10
       },
       "datasource": {
         "type": "prometheus",
@@ -296,7 +256,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(rate(volga_stream_task_records_sent_total{pipeline_id=~\"$pipeline\"}[1m]))",
+          "expr": "sum(rate(volga_stream_task_records_sent{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"}[1m]))",
           "legendFormat": "records sent / s",
           "editorMode": "code",
           "instant": false,
@@ -308,7 +268,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(rate(volga_sink_records_written_total{pipeline_id=~\"$pipeline\"}[1m]))",
+          "expr": "sum(rate(volga_sink_records_written{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"}[1m]))",
           "legendFormat": "sink records / s",
           "editorMode": "code",
           "instant": false,
@@ -320,8 +280,8 @@
           "custom": {
             "drawStyle": "line",
             "lineInterpolation": "smooth",
-            "fillOpacity": 8,
-            "lineWidth": 1,
+            "fillOpacity": 10,
+            "lineWidth": 2,
             "pointSize": 5,
             "showPoints": "never",
             "spanNulls": true,
@@ -346,14 +306,14 @@
       }
     },
     {
-      "id": 5,
+      "id": 22,
       "type": "timeseries",
-      "title": "Window operator",
+      "title": "Event-time lag",
       "gridPos": {
         "h": 8,
-        "w": 24,
-        "x": 0,
-        "y": 32
+        "w": 12,
+        "x": 12,
+        "y": 10
       },
       "datasource": {
         "type": "prometheus",
@@ -366,7 +326,189 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(volga_wo_ingest_ms_bucket{pipeline_id=~\"$pipeline\"}[1m])))",
+          "expr": "quantile(0.50, volga_stream_task_watermark_lag_ms{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"})",
+          "legendFormat": "lag p50",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "quantile(0.99, volga_stream_task_watermark_lag_ms{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"})",
+          "legendFormat": "lag p99",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "wall_now_ms \u2212 watermark. Needs wall-clock event time (ProcessingTimestamp)."
+    },
+    {
+      "id": 30,
+      "type": "row",
+      "title": "Task time (pick a task above \u2014 three lines: busy / idle / backpressured \u2248 1000 ms/s)",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 18
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 31,
+      "type": "timeseries",
+      "title": "Task time",
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 19
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "avg by (task_id) (volga_stream_task_busy_time_ms_per_second{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"})",
+          "legendFormat": "busy {{task_id}}",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "avg by (task_id) (volga_stream_task_idle_time_ms_per_second{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"})",
+          "legendFormat": "idle {{task_id}}",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "avg by (task_id) (volga_stream_task_backpressured_time_ms_per_second{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"})",
+          "legendFormat": "bp {{task_id}}",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Select one task in the dropdown for three readable lines. All-tasks view is noisy."
+    },
+    {
+      "id": 40,
+      "type": "row",
+      "title": "Window operator",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 29
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 41,
+      "type": "timeseries",
+      "title": "Window ingest / drops",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 30
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(volga_wo_ingest_ms_bucket{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"}[1m])))",
           "legendFormat": "ingest p99",
           "editorMode": "code",
           "instant": false,
@@ -378,7 +520,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(rate(volga_wo_late_dropped_rows_total{pipeline_id=~\"$pipeline\"}[1m]))",
+          "expr": "sum(rate(volga_wo_late_dropped_rows{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"}[1m]))",
           "legendFormat": "late dropped / s",
           "editorMode": "code",
           "instant": false,
@@ -390,20 +532,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(rate(volga_wo_maintain_pruned_rows_total{pipeline_id=~\"$pipeline\"}[1m]))",
+          "expr": "sum(rate(volga_wo_maintain_pruned_rows{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"}[1m]))",
           "legendFormat": "pruned / s",
-          "editorMode": "code",
-          "instant": false,
-          "range": true
-        },
-        {
-          "refId": "D",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "sum(volga_wo_state_raw_bytes{pipeline_id=~\"$pipeline\"}) + sum(volga_wo_state_tiles_bytes{pipeline_id=~\"$pipeline\"}) + sum(volga_wo_state_triggers_bytes{pipeline_id=~\"$pipeline\"}) + sum(volga_wo_state_key_states_bytes{pipeline_id=~\"$pipeline\"})",
-          "legendFormat": "state bytes",
           "editorMode": "code",
           "instant": false,
           "range": true
@@ -414,8 +544,8 @@
           "custom": {
             "drawStyle": "line",
             "lineInterpolation": "smooth",
-            "fillOpacity": 8,
-            "lineWidth": 1,
+            "fillOpacity": 10,
+            "lineWidth": 2,
             "pointSize": 5,
             "showPoints": "never",
             "spanNulls": true,
@@ -438,7 +568,186 @@
           "sort": "desc"
         }
       },
-      "description": "Empty until a window operator emits series."
+      "description": "Ingest latency vs drop rates. State size is the next panel (different scale)."
+    },
+    {
+      "id": 42,
+      "type": "timeseries",
+      "title": "Window state size",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 30
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(volga_wo_state_raw_bytes{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"})",
+          "legendFormat": "raw",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(volga_wo_state_tiles_bytes{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"})",
+          "legendFormat": "tiles",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(volga_wo_state_triggers_bytes{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"})",
+          "legendFormat": "triggers",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(volga_wo_state_key_states_bytes{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"})",
+          "legendFormat": "key states",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 50,
+      "type": "row",
+      "title": "Operator (poll gauges)",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 38
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 51,
+      "type": "timeseries",
+      "title": "Operator records",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 39
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (operator_id) (volga_operator_records_sent{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\"})",
+          "legendFormat": "sent {{operator_id}}",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (operator_id) (volga_operator_records_recv{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\"})",
+          "legendFormat": "recv {{operator_id}}",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Worker poll-time gauges, labeled by operator_id."
     }
   ]
 }
