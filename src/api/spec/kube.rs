@@ -102,6 +102,7 @@ impl TryFrom<KubePipelineSpec> for PipelineSpec {
             ),
             None => None,
         };
+        // Kube may include `create` on InMemoryStorageGrpc; engine SinkSpec ignores it.
         let sink: Option<SinkSpec> = match spec.sink {
             Some(v) => Some(
                 serde_json::from_value(normalize_json_strings(v)).context("invalid sink")?,
@@ -163,13 +164,11 @@ mod tests {
             })
         );
         match &spec.sink {
-            Some(SinkSpec::InMemoryStorageGrpc {
-                create,
-                server_addr,
-                ..
-            }) => {
-                assert!(*create);
-                assert!(server_addr.is_none());
+            Some(SinkSpec::InMemoryStorageGrpc { server_addr, .. }) => {
+                assert_eq!(
+                    server_addr,
+                    "http://sample-pipeline-storage.default.svc.cluster.local:50071"
+                );
             }
             other => panic!("expected InMemoryStorageGrpc sink, got {:?}", other),
         }

@@ -18,21 +18,25 @@ func storageResourceName(pipelineName string) string {
 	return fmt.Sprintf("%s-storage", pipelineName)
 }
 
-func (sink inMemorySink) createsStore() (bool, error) {
+func storageHTTPAddr(namespace, pipelineName string) string {
+	return fmt.Sprintf("http://%s-storage.%s.svc.cluster.local:%d", pipelineName, namespace, storagePort)
+}
+
+func (sink inMemorySink) createsStore(namespace, pipelineName string) (bool, error) {
 	if !sink.present {
 		return false, nil
 	}
-	hasAddr := sink.addr != ""
-	switch {
-	case sink.create && !hasAddr:
-		return true, nil
-	case !sink.create && hasAddr:
-		return false, nil
-	case sink.create && hasAddr:
-		return false, fmt.Errorf("InMemoryStorageGrpc create and server_addr are mutually exclusive")
-	default:
-		return false, fmt.Errorf("InMemoryStorageGrpc requires create: true or server_addr")
+	if sink.addr == "" {
+		return false, fmt.Errorf("InMemoryStorageGrpc requires server_addr")
 	}
+	if !sink.create {
+		return false, nil
+	}
+	want := storageHTTPAddr(namespace, pipelineName)
+	if sink.addr != want {
+		return false, fmt.Errorf("InMemoryStorageGrpc create: true requires server_addr %s, got %s", want, sink.addr)
+	}
+	return true, nil
 }
 
 func parseInMemorySink(pipelineSpec json.RawMessage) (inMemorySink, error) {

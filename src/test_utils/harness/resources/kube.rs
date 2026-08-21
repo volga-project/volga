@@ -8,6 +8,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::api::PipelineSpec;
+use crate::api::spec::connectors::SinkSpec;
 use crate::common::grpc::master::master_client;
 use crate::common::grpc::GrpcConfig;
 use crate::common::ports::gen_unique_grpc_port;
@@ -152,19 +153,27 @@ impl ClusterBackend for KubeCluster {
 impl KubeClusterResources {
     pub async fn launch(launch: PipelineLaunchSpec) -> Result<Self> {
         let pipeline_name = format!("kube-harness-{}", Uuid::new_v4().simple());
+        let needs_store = super::pipeline_needs_in_memory_store(&launch.pipeline);
         let manifest_path = write_pipeline_manifest(
             &pipeline_name,
             launch.pipeline,
             launch.worker_count,
             launch.kube_worker_health_poll,
             launch.runtime_consts_profile,
+            needs_store,
         )?;
         kubectl(&["apply", "-f", manifest_path.to_str().unwrap()])?;
         wait_for_pipeline(&pipeline_name)?;
-        let storage_port = gen_unique_grpc_port();
-        let storage_port_forward = start_storage_port_forward(&pipeline_name, storage_port)?;
-        let storage_endpoint = format!("http://127.0.0.1:{storage_port}");
-        wait_for_local_port(storage_port, Duration::from_secs(30))?;
+
+        let (storage_port_forward, storage_endpoint) = if needs_store {
+            let storage_port = gen_unique_grpc_port();
+            let pf = start_storage_port_forward(&pipeline_name, storage_port)?;
+            wait_for_local_port(storage_port, Duration::from_secs(30))?;
+            (Some(pf), Some(format!("http://127.0.0.1:{storage_port}")))
+        } else {
+            (None, None)
+        };
+
         let master_port = gen_unique_grpc_port();
         let master_port_forward = start_master_port_forward(&pipeline_name, master_port)?;
         wait_for_local_port(master_port, Duration::from_secs(30))?;
@@ -173,11 +182,11 @@ impl KubeClusterResources {
             resources: Some(KubeResources {
                 pipeline_name: pipeline_name.clone(),
                 manifest_path,
-                storage_port_forward: Some(storage_port_forward),
+                storage_port_forward,
                 master_port_forward,
                 master_port,
             }),
-            storage_endpoint: Some(storage_endpoint),
+            storage_endpoint,
             expected_output_rows: launch.expected_output_rows,
             worker_ids: (0..launch.worker_count)
                 .map(|index| format!("{pipeline_name}-worker-{index}"))
@@ -259,12 +268,12 @@ impl KubeClusterResources {
 
 fn write_pipeline_manifest(
     pipeline_name: &str,
-    mut pipeline: PipelineSpec,
+    pipeline: PipelineSpec,
     worker_count: usize,
     kube_worker_health_poll: bool,
     runtime_consts_profile: crate::runtime::consts::RuntimeConstsProfile,
+    needs_store: bool,
 ) -> Result<PathBuf> {
-    super::install_created_in_memory_sink(&mut pipeline);
     let sample_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("kubevolga/config/samples/volga_v1alpha1_pipeline.yaml");
     let mut manifest: Value = serde_yaml::from_str(&fs::read_to_string(sample_path)?)?;
@@ -286,7 +295,28 @@ fn write_pipeline_manifest(
         crate::orchestrator::kube::RUNTIME_CONSTS_PROFILE_ANNOTATION.to_string(),
         Value::String(runtime_consts_profile.as_str().to_string()),
     );
-    manifest["spec"]["pipelineSpec"] = serde_json::to_value(pipeline)?;
+
+    // Engine sink is server_addr only. Kube operator uses create: true plus that DNS.
+    let mut pipeline_json = serde_json::to_value(&pipeline)?;
+    if needs_store {
+        let upsert_key_columns = match &pipeline.sink {
+            Some(SinkSpec::InMemoryStorageGrpc {
+                upsert_key_columns, ..
+            }) => upsert_key_columns.clone(),
+            _ => Vec::new(),
+        };
+        let server_addr = format!(
+            "http://{pipeline_name}-storage.default.svc.cluster.local:50071"
+        );
+        pipeline_json["sink"] = serde_json::json!({
+            "InMemoryStorageGrpc": {
+                "create": true,
+                "server_addr": server_addr,
+                "upsert_key_columns": upsert_key_columns,
+            }
+        });
+    }
+    manifest["spec"]["pipelineSpec"] = pipeline_json;
     manifest["spec"]["workers"]["replicas"] = Value::Number(worker_count.into());
 
     let path = std::env::temp_dir().join(format!("{pipeline_name}-pipeline.json"));

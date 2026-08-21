@@ -5,6 +5,8 @@ import (
 	"testing"
 )
 
+const testStorageAddr = "http://p-storage.ns.svc.cluster.local:50071"
+
 func TestInMemorySinkCreateTable(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -13,13 +15,18 @@ func TestInMemorySinkCreateTable(t *testing.T) {
 		wantErr    bool
 	}{
 		{
-			name:       "create true no addr embedded",
-			raw:        `{"sink":{"InMemoryStorageGrpc":"{\n  \"create\": true\n}"}}`,
+			name: "create true matching addr embedded",
+			raw: `{"sink":{"InMemoryStorageGrpc":"{\n  \"create\": true,\n  \"server_addr\": \"http://p-storage.ns.svc.cluster.local:50071\"\n}"}}`,
 			wantCreate: true,
 		},
 		{
-			name:    "create true plus addr",
+			name:    "create true wrong addr",
 			raw:     `{"sink":{"InMemoryStorageGrpc":{"create":true,"server_addr":"http://x:50071"}}}`,
+			wantErr: true,
+		},
+		{
+			name:    "create true no addr",
+			raw:     `{"sink":{"InMemoryStorageGrpc":{"create":true}}}`,
 			wantErr: true,
 		},
 		{
@@ -43,7 +50,7 @@ func TestInMemorySinkCreateTable(t *testing.T) {
 			if err != nil {
 				t.Fatalf("parse: %v", err)
 			}
-			creates, err := sink.createsStore()
+			creates, err := sink.createsStore("ns", "p")
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("got create=%v, want error", creates)
@@ -72,7 +79,7 @@ func TestParseInMemorySinkExternalAddrNotCreated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	creates, err := sink.createsStore()
+	creates, err := sink.createsStore("ns", "p")
 	if err != nil {
 		t.Fatalf("createsStore: %v", err)
 	}
@@ -87,11 +94,17 @@ func TestParseCountSinkCreatesNothing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	creates, err := sink.createsStore()
+	creates, err := sink.createsStore("ns", "p")
 	if err != nil {
 		t.Fatalf("createsStore: %v", err)
 	}
 	if sink.present || creates {
 		t.Fatalf("Count must not create a store: %+v", sink)
+	}
+}
+
+func TestStorageHTTPAddr(t *testing.T) {
+	if got := storageHTTPAddr("ns", "p"); got != testStorageAddr {
+		t.Fatalf("got %s, want %s", got, testStorageAddr)
 	}
 }

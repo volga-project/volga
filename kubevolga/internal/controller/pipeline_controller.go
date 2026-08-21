@@ -127,7 +127,7 @@ func (r *PipelineReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	createsStore, err := sink.createsStore()
+	createsStore, err := sink.createsStore(vp.Namespace, vp.Name)
 	if err != nil {
 		if statusErr := r.updatePipelineStatus(ctx, req.NamespacedName, pipelineID, "", "InvalidSpec"); statusErr != nil {
 			return ctrl.Result{}, statusErr

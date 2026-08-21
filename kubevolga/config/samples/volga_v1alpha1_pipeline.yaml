@@ -67,6 +67,7 @@ spec:
     sink:
       InMemoryStorageGrpc: |
         {
-          "create": true
+          "create": true,
+          "server_addr": "http://sample-pipeline-storage.default.svc.cluster.local:50071"
         }
     sql: "SELECT value FROM test_table"

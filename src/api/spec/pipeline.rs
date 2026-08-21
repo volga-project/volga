@@ -5,7 +5,6 @@ use arrow::datatypes::Schema;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::api::spec::connectors::sink::created_in_memory_store_http_addr;
 use crate::api::spec::connectors::{RequestSourceSinkSpec, SinkSpec, SourceSpec};
 use crate::api::spec::event_time::EventTimeSpec;
 use crate::api::spec::operators::{OperatorOverride, OperatorOverrides};
@@ -254,17 +253,7 @@ impl PipelineSpec {
         if self.execution_mode == ExecutionMode::Request && self.state.request_store.is_none() {
             return Err("request mode requires a request store".to_string());
         }
-        if let Some(sink) = &self.sink {
-            sink.validate()?;
-        }
         Ok(())
-    }
-
-    /// Fill cluster DNS when the sink asked the operator to create the store.
-    pub fn fill_created_in_memory_store_addr(&mut self, namespace: &str, pipeline_name: &str) {
-        if let Some(sink) = &mut self.sink {
-            sink.fill_created_store_addr(created_in_memory_store_http_addr(namespace, pipeline_name));
-        }
     }
 
     pub fn transport_overrides_queue_records(&self) -> HashMap<String, u32> {
