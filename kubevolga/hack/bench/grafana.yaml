@@ -17,16 +17,8 @@ spec:
         app.kubernetes.io/name: grafana
         app.kubernetes.io/part-of: volga-bench
     spec:
-      affinity:
-        nodeAffinity:
-          preferredDuringSchedulingIgnoredDuringExecution:
-            - weight: 100
-              preference:
-                matchExpressions:
-                  - key: volga.io/role
-                    operator: In
-                    values:
-                      - infra
+      nodeSelector:
+        volga.io/role: infra
       containers:
         - name: grafana
           image: grafana/grafana:11.3.1
