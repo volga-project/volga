@@ -1,9 +1,9 @@
 {
-  "uid": "volga-soak",
-  "title": "Volga soak",
+  "uid": "volga-bench",
+  "title": "Volga bench",
   "tags": [
     "volga",
-    "soak"
+    "bench"
   ],
   "timezone": "browser",
   "schemaVersion": 39,
