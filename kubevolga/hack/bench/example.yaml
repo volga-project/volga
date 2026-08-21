@@ -1,4 +1,4 @@
-# Soak spec for `volga-longrun soak --config`. CLI only overrides `--env` and `--duration-secs`.
+# Bench spec for `volga-bench --config`. CLI only overrides `--env` and `--duration-secs`.
 # Count sink + Datagen source are fixed in code (`run_for_s` unset). `launch` is the job overlay.
 
 env: kube

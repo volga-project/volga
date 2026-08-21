@@ -8,7 +8,7 @@ use crate::runtime::master::LifecycleEventRecord;
 
 use super::dump::{PromQueryRange, Sample};
 use super::spec::{
-    resolved_checkpoint_interval, resolved_checkpoint_timeout, SoakOracleConfig,
+    resolved_checkpoint_interval, resolved_checkpoint_timeout, OracleConfig,
 };
 
 #[derive(Clone, Debug)]
@@ -69,7 +69,7 @@ fn parse_named(
 
 /// Fail the process if any oracle fails. Prom checks are skipped when `prom` is None.
 pub fn evaluate(
-    oracles: &SoakOracleConfig,
+    oracles: &OracleConfig,
     events: &[LifecycleEventRecord],
     kill: Option<&KillWindow>,
     prom: Option<&PromSeriesSet>,
@@ -101,12 +101,12 @@ pub fn evaluate(
     if failures.is_empty() {
         Ok(())
     } else {
-        Err(anyhow!("soak oracles failed:\n  - {}", failures.join("\n  - ")))
+        Err(anyhow!("bench oracles failed:\n  - {}", failures.join("\n  - ")))
     }
 }
 
 fn unexpected_fatal(
-    oracles: &SoakOracleConfig,
+    oracles: &OracleConfig,
     events: &[LifecycleEventRecord],
     kill: Option<&KillWindow>,
 ) -> Result<()> {
@@ -143,7 +143,7 @@ fn unexpected_fatal(
     Ok(())
 }
 
-fn watermark_advancing(oracles: &SoakOracleConfig, prom: &PromSeriesSet) -> Result<()> {
+fn watermark_advancing(oracles: &OracleConfig, prom: &PromSeriesSet) -> Result<()> {
     let lag = &prom.watermark_lag_p99;
     let sent = &prom.records_sent_rate;
     if lag.len() < 2 {
@@ -173,7 +173,7 @@ fn watermark_advancing(oracles: &SoakOracleConfig, prom: &PromSeriesSet) -> Resu
     Ok(())
 }
 
-fn lag_p99(oracles: &SoakOracleConfig, prom: &PromSeriesSet) -> Result<()> {
+fn lag_p99(oracles: &OracleConfig, prom: &PromSeriesSet) -> Result<()> {
     let lag = &prom.watermark_lag_p99;
     if lag.is_empty() {
         return Err(anyhow!("lag p99: no watermark_lag_p99 series"));
@@ -201,7 +201,7 @@ fn lag_p99(oracles: &SoakOracleConfig, prom: &PromSeriesSet) -> Result<()> {
 }
 
 fn checkpoint_health(
-    oracles: &SoakOracleConfig,
+    oracles: &OracleConfig,
     prom: &PromSeriesSet,
     kill: Option<&KillWindow>,
     checkpoint: &CheckpointSpec,
@@ -252,7 +252,7 @@ fn checkpoint_health(
 }
 
 fn restore_catchup(
-    oracles: &SoakOracleConfig,
+    oracles: &OracleConfig,
     prom: &PromSeriesSet,
     kill: &KillWindow,
 ) -> Result<()> {
@@ -304,8 +304,8 @@ mod tests {
     use super::*;
     use crate::runtime::master::LifecycleEventRecord;
 
-    fn cfg() -> SoakOracleConfig {
-        SoakOracleConfig::default()
+    fn cfg() -> OracleConfig {
+        OracleConfig::default()
     }
 
     fn sample_range(start: f64, step: f64, values: &[f64]) -> Vec<Sample> {

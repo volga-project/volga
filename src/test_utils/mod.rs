@@ -1,4 +1,4 @@
-//! Shared test / soak helpers. Always compiled so `volga-longrun` can link the cluster.
+//! Shared test helpers. Always compiled so `volga-bench` can link the cluster.
 
 #[cfg(test)]
 pub mod common;

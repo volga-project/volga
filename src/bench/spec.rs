@@ -15,13 +15,13 @@ pub fn resolved_checkpoint_timeout(checkpoint: &CheckpointSpec) -> Duration {
 }
 
 /// Default lag p99 bound when the run file does not set `oracles.lag_p99`.
-pub fn soak_lag_p99_bound() -> Duration {
+pub fn lag_p99_bound() -> Duration {
     Duration::from_secs(10)
 }
 
-/// Kind-calibrated defaults. Evaluated at soak teardown (Prom `query_range` + lifecycle).
+/// Kind-calibrated defaults. Evaluated at teardown (Prom `query_range` + lifecycle).
 #[derive(Clone, Debug)]
-pub struct SoakOracleConfig {
+pub struct OracleConfig {
     /// Fail if watermark lag is unchanged this long while `records_sent` still increases.
     pub watermark_stale_while_sending: Duration,
     /// Fail if lag p99 exceeds this for [`Self::lag_p99_sustain`].
@@ -37,11 +37,11 @@ pub struct SoakOracleConfig {
     pub restore_catchup: Duration,
 }
 
-impl Default for SoakOracleConfig {
+impl Default for OracleConfig {
     fn default() -> Self {
         Self {
             watermark_stale_while_sending: Duration::from_secs(30),
-            lag_p99: soak_lag_p99_bound(),
+            lag_p99: lag_p99_bound(),
             lag_p99_sustain: Duration::from_secs(60),
             checkpoint_silence_intervals: 3,
             allow_checkpoint_fail_outside_kill: false,
@@ -52,12 +52,12 @@ impl Default for SoakOracleConfig {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SoakScenario {
+pub enum Scenario {
     Steady,
     KillAfterCheckpoint { after_checkpoint: u64 },
 }
 
-impl SoakScenario {
+impl Scenario {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Steady => "steady",
@@ -68,12 +68,12 @@ impl SoakScenario {
 
 /// What [`PipelineLaunchSpec`] does not have: env, scenario, duration, later dump/oracles.
 #[derive(Clone, Debug)]
-pub struct SoakSpec {
+pub struct BenchSpec {
     pub env: RuntimeEnv,
     pub launch: PipelineLaunchSpec,
-    pub scenario: SoakScenario,
+    pub scenario: Scenario,
     pub duration: Duration,
-    pub oracles: SoakOracleConfig,
+    pub oracles: OracleConfig,
     /// Teardown Prom dump directory (`query_range` JSON + oracle report).
     pub dump: Option<PathBuf>,
     /// Prometheus HTTP API (laptop port-forward). Required for Prom dump / Prom oracles.
@@ -82,11 +82,11 @@ pub struct SoakSpec {
     pub extra_prom_queries: Vec<(String, String)>,
 }
 
-impl SoakSpec {
+impl BenchSpec {
     pub fn new(
         env: RuntimeEnv,
         launch: PipelineLaunchSpec,
-        scenario: SoakScenario,
+        scenario: Scenario,
         duration: Duration,
     ) -> Self {
         Self {
@@ -94,7 +94,7 @@ impl SoakSpec {
             launch,
             scenario,
             duration,
-            oracles: SoakOracleConfig::default(),
+            oracles: OracleConfig::default(),
             dump: None,
             prom_url: None,
             extra_prom_queries: extra_prom_queries(),
