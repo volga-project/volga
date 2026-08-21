@@ -123,6 +123,31 @@ func (r *PipelineReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return ctrl.Result{}, nil
 	}
 
+	sink, err := parseInMemorySink(vp.Spec.PipelineSpec)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	createsStore, err := sink.createsStore(vp.Namespace, vp.Name)
+	if err != nil {
+		if statusErr := r.updatePipelineStatus(ctx, req.NamespacedName, pipelineID, "", "InvalidSpec"); statusErr != nil {
+			return ctrl.Result{}, statusErr
+		}
+		logger.Error(err, "invalid InMemoryStorageGrpc sink; skipping resource reconciliation")
+		return ctrl.Result{}, nil
+	}
+	storageLabels := cloneAndAdd(baseLabels, map[string]string{"volga.io/component": "storage"})
+	if err := r.reconcileInMemoryStore(
+		ctx,
+		&vp,
+		createsStore,
+		volgaImage,
+		masterPullPolicy,
+		masterResources,
+		storageLabels,
+	); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	if err := r.reconcileMasterService(ctx, &vp, masterServiceName, masterLabels); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -152,18 +177,20 @@ func (r *PipelineReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	); err != nil {
 		return ctrl.Result{}, err
 	}
-	if err := r.reconcileWorkerStatefulSet(
-		ctx,
-		&vp,
-		workerServiceName,
-		volgaImage,
-		workerPullPolicy,
-		workerResources,
-		workerLabels,
-		replicas,
-		masterServiceAddr,
-	); err != nil {
-		return ctrl.Result{}, err
+	if r.storageReady(ctx, vp.Namespace, vp.Name, createsStore) {
+		if err := r.reconcileWorkerStatefulSet(
+			ctx,
+			&vp,
+			workerServiceName,
+			volgaImage,
+			workerPullPolicy,
+			workerResources,
+			workerLabels,
+			replicas,
+			masterServiceAddr,
+		); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	phase := "Starting"
@@ -174,13 +201,17 @@ func (r *PipelineReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		}
 		var sts appsv1.StatefulSet
 		if err := r.Get(ctx, client.ObjectKey{Namespace: vp.Namespace, Name: fmt.Sprintf("%s-worker", vp.Name)}, &sts); err == nil {
-			if masterPod.Status.Phase == corev1.PodRunning && sts.Status.ReadyReplicas == replicas {
+			if masterPod.Status.Phase == corev1.PodRunning &&
+				sts.Status.ReadyReplicas == replicas &&
+				r.storageReady(ctx, vp.Namespace, vp.Name, createsStore) {
 				phase = "Running"
 			}
 		}
 	}
 
-	if vp.Status.MasterServiceAddr != masterServiceAddr || vp.Status.Phase != phase || vp.Status.PipelineID != pipelineID {
+	if vp.Status.MasterServiceAddr != masterServiceAddr ||
+		vp.Status.Phase != phase ||
+		vp.Status.PipelineID != pipelineID {
 		if err := r.updatePipelineStatus(ctx, req.NamespacedName, pipelineID, masterServiceAddr, phase); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -247,6 +278,132 @@ func (r *PipelineReconciler) reconcileWorkerHeadlessService(
 		return err
 	})
 	return err
+}
+
+func (r *PipelineReconciler) reconcileInMemoryStore(
+	ctx context.Context,
+	vp *v1alpha1.VolgaPipeline,
+	create bool,
+	image string,
+	imagePullPolicy corev1.PullPolicy,
+	resources corev1.ResourceRequirements,
+	labels map[string]string,
+) error {
+	name := storageResourceName(vp.Name)
+	if !create {
+		return r.deleteCreatedStorage(ctx, vp, name)
+	}
+	if err := r.reconcileStorageService(ctx, vp, name, labels); err != nil {
+		return err
+	}
+	return r.reconcileStorageDeployment(ctx, vp, name, image, imagePullPolicy, resources, labels)
+}
+
+func (r *PipelineReconciler) reconcileStorageService(
+	ctx context.Context,
+	vp *v1alpha1.VolgaPipeline,
+	name string,
+	labels map[string]string,
+) error {
+	var svc corev1.Service
+	svc.Namespace = vp.Namespace
+	svc.Name = name
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		_, err := controllerutil.CreateOrUpdate(ctx, r.Client, &svc, func() error {
+			if err := controllerutil.SetControllerReference(vp, &svc, r.Scheme); err != nil {
+				return err
+			}
+			svc.Labels = labels
+			svc.Spec.Selector = labels
+			svc.Spec.Ports = []corev1.ServicePort{{
+				Name: "grpc",
+				Port: storagePort,
+			}}
+			return nil
+		})
+		return err
+	})
+}
+
+func (r *PipelineReconciler) reconcileStorageDeployment(
+	ctx context.Context,
+	vp *v1alpha1.VolgaPipeline,
+	name string,
+	image string,
+	imagePullPolicy corev1.PullPolicy,
+	resources corev1.ResourceRequirements,
+	labels map[string]string,
+) error {
+	var deploy appsv1.Deployment
+	deploy.Namespace = vp.Namespace
+	deploy.Name = name
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		_, err := controllerutil.CreateOrUpdate(ctx, r.Client, &deploy, func() error {
+			if err := controllerutil.SetControllerReference(vp, &deploy, r.Scheme); err != nil {
+				return err
+			}
+			deploy.Labels = labels
+			deploy.Spec.Replicas = ptr.To(int32(1))
+			deploy.Spec.Selector = &metav1.LabelSelector{MatchLabels: labels}
+			deploy.Spec.Template.ObjectMeta.Labels = labels
+			deploy.Spec.Template.Spec.Containers = []corev1.Container{{
+				Name:            "storage",
+				Image:           image,
+				ImagePullPolicy: imagePullPolicy,
+				Resources:       cloneResourceRequirements(resources),
+				Command:         []string{"volga-test-storage"},
+				Env: []corev1.EnvVar{{
+					Name:  "VOLGA_TEST_STORAGE_BIND_ADDR",
+					Value: "0.0.0.0:" + strconv.FormatInt(int64(storagePort), 10),
+				}},
+				Ports: []corev1.ContainerPort{{
+					ContainerPort: storagePort,
+					Name:          "grpc",
+				}},
+			}}
+			applyPodPlacement(&deploy.Spec.Template.Spec, vp.Spec.Master)
+			return nil
+		})
+		return err
+	})
+}
+
+func (r *PipelineReconciler) deleteCreatedStorage(
+	ctx context.Context,
+	vp *v1alpha1.VolgaPipeline,
+	name string,
+) error {
+	deploy := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Namespace: vp.Namespace, Name: name},
+	}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(deploy), deploy); err == nil {
+		if !metav1.IsControlledBy(deploy, vp) {
+			return nil
+		}
+	} else if !apierrors.IsNotFound(err) {
+		return err
+	}
+	if err := r.Delete(ctx, deploy); err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+	svc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Namespace: vp.Namespace, Name: name},
+	}
+	if err := r.Delete(ctx, svc); err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+	return nil
+}
+
+func (r *PipelineReconciler) storageReady(ctx context.Context, namespace, pipelineName string, create bool) bool {
+	if !create {
+		return true
+	}
+	var deploy appsv1.Deployment
+	if err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: storageResourceName(pipelineName)}, &deploy); err != nil {
+		return false
+	}
+	return deploy.Status.ReadyReplicas >= 1
 }
 
 func (r *PipelineReconciler) reconcileMasterPod(
@@ -600,6 +757,7 @@ func cloneResourceRequirements(in corev1.ResourceRequirements) corev1.ResourceRe
 func (r *PipelineReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.VolgaPipeline{}).
+		Owns(&appsv1.Deployment{}).
 		Owns(&appsv1.StatefulSet{}).
 		Owns(&corev1.Pod{}).
 		Owns(&corev1.Service{}).
