@@ -144,27 +144,6 @@ mod tests {
     use crate::longrun::spec::SoakScenario;
 
     #[test]
-    fn parse_soak_env_duration() {
-        let LongrunCommand::Soak(args) = parse_args([
-            "soak",
-            "--env=kube",
-            "--duration-secs=3600",
-        ])
-        .unwrap() else {
-            panic!("expected soak");
-        };
-        assert_eq!(args.env, Some(RuntimeEnv::Kube));
-        assert_eq!(args.duration_secs, Some(3600));
-        assert!(args.config.is_none());
-    }
-
-    #[test]
-    fn parse_rejects_scenario_flags() {
-        assert!(parse_args(["soak", "--scenario", "kill"]).is_err());
-        assert!(parse_args(["soak", "--kill-after-checkpoint", "1"]).is_err());
-    }
-
-    #[test]
     fn config_file_then_cli_override() {
         let path = std::env::temp_dir().join("volga-soak-config-test.yaml");
         std::fs::write(

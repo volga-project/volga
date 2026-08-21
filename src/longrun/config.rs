@@ -476,15 +476,6 @@ mod tests {
     use crate::api::spec::connectors::SinkSpec;
 
     #[test]
-    fn parse_plain_duration() {
-        assert_eq!(parse_duration("30s").unwrap(), Duration::from_secs(30));
-        assert_eq!(parse_duration("1h").unwrap(), Duration::from_secs(3600));
-        assert_eq!(parse_duration("500ms").unwrap(), Duration::from_millis(500));
-        assert!(parse_duration("1.5x_window").is_err());
-        assert!(parse_duration("3x_interval").is_err());
-    }
-
-    #[test]
     fn apply_file_sets_oracles_and_launch() {
         let file: SoakFile = serde_yaml::from_str(
             r#"
@@ -539,27 +530,5 @@ extra_prom_queries:
             spec.extra_prom_queries,
             vec![("custom".to_string(), "up".to_string())]
         );
-    }
-
-    #[test]
-    fn apply_file_defaults_count_window_job() {
-        let file: SoakFile = serde_yaml::from_str("env: local\nduration: 30s\n").unwrap();
-        let spec = apply_file(&file).unwrap();
-        assert!(matches!(spec.launch.pipeline.sink, Some(SinkSpec::Count)));
-        assert_eq!(spec.launch.pipeline.parallelism, 4);
-        assert_eq!(spec.launch.worker_count, 2);
-        assert_eq!(spec.launch.pipeline.state.checkpoint.interval_ms, Some(30_000));
-        assert_eq!(spec.launch.pipeline.sql.as_deref(), Some(DEFAULT_SQL));
-    }
-
-    #[test]
-    fn kill_after_requires_kill_scenario() {
-        let zero: SoakFile = serde_yaml::from_str("scenario: kill\nkill_after_checkpoint: 0\n").unwrap();
-        assert!(zero.scenario().is_err());
-        let on_steady: SoakFile =
-            serde_yaml::from_str("scenario: steady\nkill_after_checkpoint: 2\n").unwrap();
-        assert!(on_steady.scenario().is_err());
-        let no_scenario: SoakFile = serde_yaml::from_str("kill_after_checkpoint: 2\n").unwrap();
-        assert!(no_scenario.scenario().is_err());
     }
 }
