@@ -2,11 +2,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::api::CheckpointSpec;
-use crate::test_utils::checkpoint::WINDOW_RANGE_MS;
 use crate::test_utils::harness::{PipelineLaunchSpec, RuntimeEnv};
 
 use super::dump::extra_prom_queries;
-use super::job::soak_window_launch_spec;
 
 pub fn resolved_checkpoint_interval(checkpoint: &CheckpointSpec) -> Duration {
     checkpoint.interval().unwrap_or(Duration::ZERO)
@@ -16,9 +14,9 @@ pub fn resolved_checkpoint_timeout(checkpoint: &CheckpointSpec) -> Duration {
     checkpoint.timeout().unwrap_or(Duration::ZERO)
 }
 
-/// Soak window RANGE + event-time OOO (0). Used as the default lag p99 bound.
+/// Default lag p99 bound when the run file does not set `oracles.lag_p99`.
 pub fn soak_lag_p99_bound() -> Duration {
-    Duration::from_millis(WINDOW_RANGE_MS as u64)
+    Duration::from_secs(10)
 }
 
 /// Kind-calibrated defaults. Evaluated at soak teardown (Prom `query_range` + lifecycle).
@@ -85,10 +83,15 @@ pub struct SoakSpec {
 }
 
 impl SoakSpec {
-    pub fn new(env: RuntimeEnv, scenario: SoakScenario, duration: Duration) -> Self {
+    pub fn new(
+        env: RuntimeEnv,
+        launch: PipelineLaunchSpec,
+        scenario: SoakScenario,
+        duration: Duration,
+    ) -> Self {
         Self {
             env,
-            launch: soak_window_launch_spec(),
+            launch,
             scenario,
             duration,
             oracles: SoakOracleConfig::default(),

@@ -1,6 +1,5 @@
-# Soak run file for `volga-longrun soak --config`. CLI flags override these fields.
-# Checkpoint knobs live on the job (`PipelineSpec.state.checkpoint`), not here.
-# `Nx_interval` multiplies that job interval (30s on the default soak job).
+# Soak run file for `volga-longrun soak --config`. CLI flags override run knobs.
+# Count sink + Datagen source are fixed in code (`run_for_s` unset). `launch` is the job overlay.
 
 env: kube
 duration: 1h
@@ -9,12 +8,37 @@ kill_after_checkpoint: 1
 dump: /tmp/soak
 prom_url: http://127.0.0.1:9090
 launch:
-  worker_count: 2
+  parallelism: 4
+  slots_per_node: 2
+  checkpoint:
+    interval: 30s
+    timeout: 60s
+    retention: 1
+  datagen:
+    rate: 200
+    batch_size: 20
+  window:
+    tiling: [1s, 5s]
+    out_of_orderness_ms: 0
+    allowed_lateness_ms: 0
+  sql: |
+    SELECT timestamp, key, value,
+      SUM(value) OVER w AS sum_val,
+      COUNT(value) OVER w AS cnt_val,
+      AVG(value) OVER w AS avg_val,
+      MIN(value) OVER w AS min_val,
+      MAX(value) OVER w AS max_val
+    FROM datagen_source
+    WINDOW w AS (PARTITION BY key ORDER BY timestamp
+    RANGE BETWEEN INTERVAL '10000' MILLISECOND PRECEDING AND CURRENT ROW)
 oracles:
   watermark_stale_while_sending: 30s
-  lag_p99: 1.5x_window
+  lag_p99: 15s
   lag_p99_sustain: 60s
   checkpoint_silence_intervals: 3
-  restore_catchup: 3x_interval
+  restore_catchup: 90s
   allow_checkpoint_fail_outside_kill: false
   allow_unexpected_fatal: false
+# extra_prom_queries:
+#   - name: checkpoint_duration_p99
+#     query: 'histogram_quantile(0.99, sum by (le) (rate(volga_checkpoint_duration_ms_bucket{pipeline_id=~".*"}[1m])))'

@@ -15,8 +15,8 @@ Usage:
   volga-longrun bench
 
 v1 implements soak only. Default duration: local 120s, kube/docker 3600s.
-Checkpoints come from the job spec (30s / 60s / 1). Count sink. Sliding RANGE window job.
---config YAML sets env/duration/scenario/dump/oracles (duration: 1h or 3600s); CLI flags override the file.
+--config YAML sets env/duration/scenario/dump/oracles and a job overlay (sql, checkpoint, parallelism, datagen, window).
+Count sink and Datagen source are fixed. CLI flags override run knobs.
 --dump writes lifecycle.json (and prom.json when --prom-url is set).";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -159,12 +159,7 @@ fn build_spec(args: SoakArgs) -> Result<SoakSpec> {
         Some(path) => SoakFile::load(path)?,
         None => SoakFile::default(),
     };
-    let mut spec = SoakSpec::new(
-        RuntimeEnv::Local,
-        SoakScenario::Steady,
-        Duration::from_secs(SoakSpec::default_duration_secs(RuntimeEnv::Local)),
-    );
-    spec = apply_file(spec, &file)?;
+    let mut spec = apply_file(&file)?;
     if let Some(env) = args.env {
         spec.env = env;
     }
@@ -252,7 +247,16 @@ mod tests {
         let path = std::env::temp_dir().join("volga-soak-config-test.yaml");
         std::fs::write(
             &path,
-            "env: docker\nduration: 99s\nscenario: kill\nkill_after_checkpoint: 1\n",
+            r#"
+env: docker
+duration: 99s
+scenario: kill
+kill_after_checkpoint: 1
+launch:
+  sql: SELECT timestamp, key, value FROM datagen_source
+  checkpoint:
+    interval: 30s
+"#,
         )
         .unwrap();
         let LongrunCommand::Soak(args) = parse_args([
