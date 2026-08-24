@@ -24,7 +24,6 @@ impl TestDataReaderActor {
         let reader = DataReader::new(
             vertex_id,
             transport_client_config.reader_receivers.unwrap(),
-            None,
         );
         let (reader_message_stream, _control) = reader.message_stream_with_control();
         Self {

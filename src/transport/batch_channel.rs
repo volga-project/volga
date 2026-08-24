@@ -167,10 +167,6 @@ pub struct BatchReceiver {
 }
 
 impl BatchReceiver {
-    pub fn queued_records(&self) -> u32 {
-        self.queued_messages.load(Ordering::Relaxed)
-    }
-
     pub fn queued_records_handle(&self) -> Arc<AtomicU32> {
         self.queued_messages.clone()
     }

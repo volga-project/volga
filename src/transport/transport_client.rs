@@ -3,7 +3,7 @@ use metrics::gauge;
 use std::collections::HashMap;
 use crate::{common::message::Message, runtime::{health::{WorkerFatalReason, WorkerHealth}, metrics::{MetricsLabels, LABEL_PIPELINE_ID, LABEL_SOURCE_TASK_ID, LABEL_TARGET_TASK_ID, LABEL_TASK_ID, LABEL_WORKER_ID, METRIC_STREAM_TASK_BACKPRESSURE_RATIO, METRIC_STREAM_TASK_RX_QUEUED_RECORDS, METRIC_STREAM_TASK_TX_QUEUE_REM, METRIC_STREAM_TASK_TX_QUEUE_SIZE}, operators::operator::MessageStream}, transport::{batch_channel::{BatchReceiver, BatchSender, BackpressureTracker}, channel::Channel}};
 use std::time::Duration;
-use tokio::{sync::mpsc::error::SendError, time};
+use tokio::{sync::mpsc::error::SendError, task::JoinHandle, time};
 use tokio::sync::Notify;
 use futures::stream;
 use crate::transport::batcher::BatcherConfig;
@@ -49,66 +49,12 @@ impl TransportClientConfig {
     }
 }
 
-/// Live input-queue depths for Prom. Survives `message_stream` consuming the receivers.
-#[derive(Debug, Clone)]
-pub struct RxQueueSnapshot {
-    vertex_id: VertexId,
-    /// `(source_task_id, queued_records)`
-    channels: Vec<(String, Arc<AtomicU32>)>,
-    metrics_labels: Option<MetricsLabels>,
-}
+/// Aborts the dest-side queue ticker when the stream task ends (close / panic).
+pub(crate) struct RxQueueTicker(JoinHandle<()>);
 
-impl RxQueueSnapshot {
-    pub fn publish(&self) {
-        for (source_task_id, queued) in &self.channels {
-            let value = queued.load(Ordering::Relaxed) as f64;
-            if let Some(labels) = &self.metrics_labels {
-                gauge!(
-                    METRIC_STREAM_TASK_RX_QUEUED_RECORDS,
-                    LABEL_TASK_ID => self.vertex_id.clone(),
-                    LABEL_SOURCE_TASK_ID => source_task_id.clone(),
-                    LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
-                    LABEL_WORKER_ID => labels.worker_id.clone(),
-                )
-                .set(value);
-            } else {
-                gauge!(
-                    METRIC_STREAM_TASK_RX_QUEUED_RECORDS,
-                    LABEL_TASK_ID => self.vertex_id.clone(),
-                    LABEL_SOURCE_TASK_ID => source_task_id.clone(),
-                )
-                .set(value);
-            }
-        }
-    }
-
-    /// 1s ticker so depths stay live while the task is blocked in `poll_next`.
-    pub fn spawn_publisher(self) -> RxQueuePublisher {
-        let stop = Arc::new(AtomicBool::new(false));
-        let stop_flag = stop.clone();
-        tokio::spawn(async move {
-            let mut interval = time::interval(Duration::from_secs(1));
-            interval.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
-            while !stop_flag.load(Ordering::Relaxed) {
-                interval.tick().await;
-                if stop_flag.load(Ordering::Relaxed) {
-                    break;
-                }
-                self.publish();
-            }
-        });
-        RxQueuePublisher { stop }
-    }
-}
-
-#[derive(Debug)]
-pub struct RxQueuePublisher {
-    stop: Arc<AtomicBool>,
-}
-
-impl Drop for RxQueuePublisher {
+impl Drop for RxQueueTicker {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
+        self.0.abort();
     }
 }
 
@@ -116,7 +62,6 @@ impl Drop for RxQueuePublisher {
 pub struct DataReader {
     vertex_id: VertexId,
     receivers: HashMap<String, BatchReceiver>,
-    metrics_labels: Option<MetricsLabels>,
 }
 
 #[derive(Debug)]
@@ -175,21 +120,15 @@ impl DataReaderControl {
 }
 
 impl DataReader {
-    pub fn new(
-        vertex_id: VertexId,
-        receivers: HashMap<String, BatchReceiver>,
-        metrics_labels: Option<MetricsLabels>,
-    ) -> Self {
+    pub fn new(vertex_id: VertexId, receivers: HashMap<String, BatchReceiver>) -> Self {
         Self {
             vertex_id,
             receivers,
-            metrics_labels,
         }
     }
 
-    pub fn queue_snapshot(&self) -> RxQueueSnapshot {
-        let channels = self
-            .receivers
+    pub fn queued_by_source(&self) -> Vec<(String, Arc<AtomicU32>)> {
+        self.receivers
             .iter()
             .map(|(channel_id, receiver)| {
                 let source_task_id = channel_id
@@ -199,12 +138,40 @@ impl DataReader {
                     .to_string();
                 (source_task_id, receiver.queued_records_handle())
             })
-            .collect();
-        RxQueueSnapshot {
-            vertex_id: self.vertex_id.clone(),
-            channels,
-            metrics_labels: self.metrics_labels.clone(),
-        }
+            .collect()
+    }
+
+    /// 1s dest-side sample so depths stay live while the operator is in `process` / blocked on send.
+    pub(crate) fn spawn_rx_queue_ticker(&self, labels: Option<MetricsLabels>) -> RxQueueTicker {
+        let channels = self.queued_by_source();
+        let vertex_id = self.vertex_id.clone();
+        RxQueueTicker(tokio::spawn(async move {
+            let mut interval = time::interval(Duration::from_secs(1));
+            interval.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                for (source_task_id, queued) in &channels {
+                    let value = queued.load(Ordering::Relaxed) as f64;
+                    if let Some(labels) = &labels {
+                        gauge!(
+                            METRIC_STREAM_TASK_RX_QUEUED_RECORDS,
+                            LABEL_TASK_ID => vertex_id.clone(),
+                            LABEL_SOURCE_TASK_ID => source_task_id.clone(),
+                            LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
+                            LABEL_WORKER_ID => labels.worker_id.clone(),
+                        )
+                        .set(value);
+                    } else {
+                        gauge!(
+                            METRIC_STREAM_TASK_RX_QUEUED_RECORDS,
+                            LABEL_TASK_ID => vertex_id.clone(),
+                            LABEL_SOURCE_TASK_ID => source_task_id.clone(),
+                        )
+                        .set(value);
+                    }
+                }
+            }
+        }))
     }
 
     pub fn message_stream(self) -> MessageStream {
@@ -441,11 +408,7 @@ impl TransportClient {
         let TransportClientConfig { reader_receivers, writer_senders, metrics_labels, .. } = config;
 
         if let Some(receivers) = reader_receivers {
-            reader = Some(DataReader::new(
-                vertex_id.clone(),
-                receivers,
-                metrics_labels.clone(),
-            ));
+            reader = Some(DataReader::new(vertex_id.clone(), receivers));
         }
         if let Some(senders) = writer_senders {
             writer = Some(DataWriter::new(
