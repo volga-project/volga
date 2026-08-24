@@ -1,6 +1,7 @@
 //! Per-logical-edge TCP hop: one connection, one pump, queue + TCP window for flow control.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::io;
 use std::net::SocketAddr;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -50,6 +51,19 @@ pub struct EdgeIdentity {
     pub channel_id: String,
     pub task_id: String,
     pub target_task_id: String,
+}
+
+/// Docker compose advertises DNS names (`worker-0`); kube uses pod IPs. Do not parse as `SocketAddr`.
+#[derive(Clone, Debug)]
+pub struct RemoteEndpoint {
+    pub host: String,
+    pub port: u16,
+}
+
+impl fmt::Display for RemoteEndpoint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}", self.host, self.port)
+    }
 }
 
 async fn write_frame(stream: &mut TcpStream, payload: &[u8]) -> io::Result<()> {
@@ -125,7 +139,7 @@ fn record_disconnect(identity: &EdgeIdentity, labels: Option<&MetricsLabels>) {
     }
 }
 
-async fn connect_with_retry(addr: SocketAddr, running: &AtomicBool) -> io::Result<TcpStream> {
+async fn connect_with_retry(endpoint: &RemoteEndpoint, running: &AtomicBool) -> io::Result<TcpStream> {
     let max_attempts = runtime_consts()
         .u64(TRANSPORT_TCP_CONNECT_MAX_RETRIES)
         .max(1);
@@ -138,7 +152,7 @@ async fn connect_with_retry(addr: SocketAddr, running: &AtomicBool) -> io::Resul
                 "transport shutting down",
             ));
         }
-        match TcpStream::connect(addr).await {
+        match TcpStream::connect((endpoint.host.as_str(), endpoint.port)).await {
             Ok(stream) => {
                 let _ = stream.set_nodelay(true);
                 return Ok(stream);
@@ -157,13 +171,13 @@ async fn connect_with_retry(addr: SocketAddr, running: &AtomicBool) -> io::Resul
 /// Drain one egress queue onto a dedicated TCP connection.
 pub async fn pump_egress(
     mut rx: BatchReceiver,
-    addr: SocketAddr,
+    endpoint: RemoteEndpoint,
     identity: EdgeIdentity,
     worker_health: Arc<WorkerHealth>,
     running: Arc<AtomicBool>,
     labels: Option<MetricsLabels>,
 ) {
-    let mut stream = match connect_with_retry(addr, &running).await {
+    let mut stream = match connect_with_retry(&endpoint, &running).await {
         Ok(stream) => stream,
         Err(e) => {
             if running.load(Ordering::Relaxed) {
@@ -172,7 +186,7 @@ pub async fn pump_egress(
                     WorkerFatalReason::TransportDisconnect,
                     format!(
                         "[TCP] connect failed channel {} addr {}: {}",
-                        identity.channel_id, addr, e
+                        identity.channel_id, endpoint, e
                     ),
                 );
             }
@@ -469,5 +483,20 @@ mod tests {
             .unwrap();
         let err = read_frame(&mut server).await.unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[tokio::test]
+    async fn connect_resolves_localhost_hostname() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let running = AtomicBool::new(true);
+        let endpoint = RemoteEndpoint {
+            host: "localhost".into(),
+            port,
+        };
+        let connect =
+            tokio::spawn(async move { connect_with_retry(&endpoint, &running).await.unwrap() });
+        let (_server, _) = listener.accept().await.unwrap();
+        connect.await.unwrap();
     }
 }

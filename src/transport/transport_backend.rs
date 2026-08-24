@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
@@ -13,7 +12,7 @@ use crate::runtime::metrics::MetricsLabels;
 use crate::runtime::VertexId;
 use crate::transport::batch_channel::{batch_bounded_channel, BatchReceiver, BatchSender};
 use crate::transport::channel::Channel;
-use crate::transport::tcp::{self, EdgeIdentity};
+use crate::transport::tcp::{self, EdgeIdentity, RemoteEndpoint};
 use crate::transport::TransportBackendTrait;
 
 use super::transport_client::TransportClientConfig;
@@ -24,7 +23,7 @@ type ReaderReceivers = HashMap<ChannelId, BatchReceiver>;
 type WriterSenders = HashMap<ChannelId, BatchSender>;
 
 type RemoteReaderSenders = HashMap<ChannelId, (EdgeIdentity, BatchSender)>;
-type RemoteWriterReceivers = HashMap<ChannelId, (EdgeIdentity, SocketAddr, BatchReceiver)>;
+type RemoteWriterReceivers = HashMap<ChannelId, (EdgeIdentity, RemoteEndpoint, BatchReceiver)>;
 
 type LocalChannels = HashMap<ChannelId, (BatchSender, Option<BatchReceiver>)>;
 
@@ -105,17 +104,18 @@ impl TransportBackend {
         }
     }
 
-    fn remote_addr(channel: &Channel) -> SocketAddr {
+    fn remote_endpoint(channel: &Channel) -> RemoteEndpoint {
         match channel {
             Channel::Remote {
                 target_node_ip,
                 target_transport_port,
                 ..
-            } => format!("{target_node_ip}:{target_transport_port}")
-                .parse()
-                .unwrap_or_else(|_| {
-                    panic!("invalid remote addr {target_node_ip}:{target_transport_port}")
+            } => RemoteEndpoint {
+                host: target_node_ip.clone(),
+                port: u16::try_from(*target_transport_port).unwrap_or_else(|_| {
+                    panic!("invalid transport port {target_transport_port}")
                 }),
+            },
             Channel::Local { .. } => panic!("Expected remote channel"),
         }
     }
@@ -166,7 +166,7 @@ impl TransportBackend {
                         channel_id,
                         (
                             Self::edge_identity(&channel),
-                            Self::remote_addr(&channel),
+                            Self::remote_endpoint(&channel),
                             rx,
                         ),
                     );
@@ -292,12 +292,12 @@ impl TransportBackendTrait for TransportBackend {
         }
 
         if let Some(remote_writer_receivers) = self.remote_writer_receivers.take() {
-            for (_channel_id, (identity, addr, rx)) in remote_writer_receivers {
+            for (_channel_id, (identity, endpoint, rx)) in remote_writer_receivers {
                 let worker_health = self.worker_health.clone();
                 let running = self.running.clone();
                 let labels = self.metrics_labels.clone();
                 self.pump_handles.push(tokio::spawn(async move {
-                    tcp::pump_egress(rx, addr, identity, worker_health, running, labels).await;
+                    tcp::pump_egress(rx, endpoint, identity, worker_health, running, labels).await;
                 }));
             }
         }
@@ -360,5 +360,33 @@ impl TransportBackendTrait for TransportBackend {
         self.remote_writer_receivers = Some(remote_writer_receivers);
 
         transport_client_configs
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transport::channel::Channel;
+
+    #[test]
+    fn remote_endpoint_keeps_compose_hostname() {
+        let channel = Channel::new_remote(
+            "src".into(),
+            "dst".into(),
+            "worker-0".into(),
+            "worker-0".into(),
+            "worker-1".into(),
+            "worker-1".into(),
+            60052,
+        );
+        let endpoint = TransportBackend::remote_endpoint(&channel);
+        assert_eq!(endpoint.host, "worker-1");
+        assert_eq!(endpoint.port, 60052);
+        assert!(
+            format!("{endpoint}")
+                .parse::<std::net::SocketAddr>()
+                .is_err(),
+            "compose DNS names are not SocketAddr"
+        );
     }
 }
