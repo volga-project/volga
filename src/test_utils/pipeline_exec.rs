@@ -8,7 +8,6 @@ use crate::api::{LogicalGraph, PipelineSpec};
 use crate::common::types::PipelineId;
 use crate::runtime::observability::{PipelineSnapshot, WorkerSnapshot};
 use crate::runtime::worker::{Close, GetState, RunTestLifecycle, Worker, WorkerConfig};
-use crate::transport::transport_backend_actor::TransportBackendType;
 
 pub async fn execute_with_state_updates(
     spec: PipelineSpec,
@@ -22,7 +21,9 @@ pub async fn execute_with_state_updates(
     let worker_id = "single_worker".to_string();
 
     let num_threads_per_task = match spec.execution_profile.clone().unwrap() {
-        ExecutionProfile::SingleWorker { num_threads_per_task } => num_threads_per_task,
+        ExecutionProfile::SingleWorker {
+            num_threads_per_task,
+        } => num_threads_per_task,
         _ => panic!("Execution profile must be SingleWorker"),
     };
 
@@ -39,7 +40,6 @@ pub async fn execute_with_state_updates(
         execution_graph,
         vertex_ids,
         num_threads_per_task,
-        TransportBackendType::Grpc,
     )
     .with_state_spec(&state);
     let worker = Worker::spawn_configured(worker_config).await;

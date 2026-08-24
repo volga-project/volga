@@ -1,7 +1,6 @@
 pub mod master;
 pub mod storage;
 pub mod stubs;
-pub mod transport;
 pub mod worker;
 
 use std::net::SocketAddr;
@@ -85,14 +84,12 @@ impl_client_limits! {
     stubs::master_service::master_service_client::MasterServiceClient<Channel>,
     stubs::worker_service::worker_service_client::WorkerServiceClient<Channel>,
     stubs::in_memory_storage_service::in_memory_storage_service_client::InMemoryStorageServiceClient<Channel>,
-    stubs::message_stream::message_stream_service_client::MessageStreamServiceClient<Channel>,
 }
 
 impl_server_limits! {
     stubs::master_service::master_service_server::MasterServiceServer<T>,
     stubs::worker_service::worker_service_server::WorkerServiceServer<T>,
     stubs::in_memory_storage_service::in_memory_storage_service_server::InMemoryStorageServiceServer<T>,
-    stubs::message_stream::message_stream_service_server::MessageStreamServiceServer<T>,
 }
 
 fn normalize_endpoint(addr: &str) -> String {

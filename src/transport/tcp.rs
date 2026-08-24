@@ -1,0 +1,377 @@
+//! Per-logical-edge TCP hop: one connection, one pump, queue + TCP window for flow control.
+
+use std::collections::HashMap;
+use std::io;
+use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use metrics::{counter, gauge};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::oneshot;
+
+use crate::common::grpc::GRPC_MAX_MESSAGE_BYTES;
+use crate::common::message::Message;
+use crate::runtime::consts::{
+    runtime_consts, TRANSPORT_GRPC_CONNECT_MAX_RETRIES, TRANSPORT_GRPC_CONNECT_RETRY_DELAY,
+};
+use crate::runtime::health::{WorkerFatalReason, WorkerHealth};
+use crate::runtime::metrics::{
+    MetricsLabels, LABEL_PIPELINE_ID, LABEL_TARGET_TASK_ID, LABEL_TASK_ID, LABEL_WORKER_ID,
+    METRIC_STREAM_TASK_TRANSPORT_DISCONNECTS,
+    METRIC_STREAM_TASK_TRANSPORT_WRITE_BLOCK_MS_PER_SECOND,
+};
+use crate::transport::batch_channel::{BatchReceiver, BatchSender};
+
+const MAX_FRAME_BYTES: u32 = GRPC_MAX_MESSAGE_BYTES as u32;
+
+#[derive(Clone, Debug)]
+pub struct EdgeIdentity {
+    pub channel_id: String,
+    pub task_id: String,
+    pub target_task_id: String,
+}
+
+async fn write_frame(stream: &mut TcpStream, payload: &[u8]) -> io::Result<()> {
+    let len = u32::try_from(payload.len())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "transport frame exceeds u32"))?;
+    if len > MAX_FRAME_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("transport frame {len} exceeds max {MAX_FRAME_BYTES}"),
+        ));
+    }
+    stream.write_all(&len.to_le_bytes()).await?;
+    stream.write_all(payload).await?;
+    stream.flush().await
+}
+
+async fn read_frame(stream: &mut TcpStream) -> io::Result<Option<Vec<u8>>> {
+    let mut len_buf = [0u8; 4];
+    match stream.read_exact(&mut len_buf).await {
+        Ok(_) => {}
+        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(e) => return Err(e),
+    }
+    let len = u32::from_le_bytes(len_buf);
+    if len > MAX_FRAME_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("transport frame {len} exceeds max {MAX_FRAME_BYTES}"),
+        ));
+    }
+    let mut buf = vec![0u8; len as usize];
+    stream.read_exact(&mut buf).await?;
+    Ok(Some(buf))
+}
+
+fn publish_write_block(identity: &EdgeIdentity, labels: Option<&MetricsLabels>, ms_per_s: f64) {
+    if let Some(labels) = labels {
+        gauge!(
+            METRIC_STREAM_TASK_TRANSPORT_WRITE_BLOCK_MS_PER_SECOND,
+            LABEL_TASK_ID => identity.task_id.clone(),
+            LABEL_TARGET_TASK_ID => identity.target_task_id.clone(),
+            LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
+            LABEL_WORKER_ID => labels.worker_id.clone()
+        )
+        .set(ms_per_s);
+    } else {
+        gauge!(
+            METRIC_STREAM_TASK_TRANSPORT_WRITE_BLOCK_MS_PER_SECOND,
+            LABEL_TASK_ID => identity.task_id.clone(),
+            LABEL_TARGET_TASK_ID => identity.target_task_id.clone()
+        )
+        .set(ms_per_s);
+    }
+}
+
+fn record_disconnect(identity: &EdgeIdentity, labels: Option<&MetricsLabels>) {
+    if let Some(labels) = labels {
+        counter!(
+            METRIC_STREAM_TASK_TRANSPORT_DISCONNECTS,
+            LABEL_TASK_ID => identity.task_id.clone(),
+            LABEL_TARGET_TASK_ID => identity.target_task_id.clone(),
+            LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
+            LABEL_WORKER_ID => labels.worker_id.clone()
+        )
+        .increment(1);
+    } else {
+        counter!(
+            METRIC_STREAM_TASK_TRANSPORT_DISCONNECTS,
+            LABEL_TASK_ID => identity.task_id.clone(),
+            LABEL_TARGET_TASK_ID => identity.target_task_id.clone()
+        )
+        .increment(1);
+    }
+}
+
+async fn connect_with_retry(addr: SocketAddr, running: &AtomicBool) -> io::Result<TcpStream> {
+    let max_attempts = runtime_consts()
+        .u64(TRANSPORT_GRPC_CONNECT_MAX_RETRIES)
+        .max(1);
+    let delay = runtime_consts().duration(TRANSPORT_GRPC_CONNECT_RETRY_DELAY);
+    let mut last_err = None;
+    for attempt in 0..max_attempts {
+        if !running.load(Ordering::Relaxed) {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "transport shutting down",
+            ));
+        }
+        match TcpStream::connect(addr).await {
+            Ok(stream) => {
+                let _ = stream.set_nodelay(true);
+                return Ok(stream);
+            }
+            Err(e) => {
+                last_err = Some(e);
+                if attempt + 1 < max_attempts {
+                    tokio::time::sleep(delay).await;
+                }
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| io::Error::other("tcp connect failed")))
+}
+
+/// Drain one egress queue onto a dedicated TCP connection.
+pub async fn pump_egress(
+    mut rx: BatchReceiver,
+    addr: SocketAddr,
+    identity: EdgeIdentity,
+    worker_health: Arc<WorkerHealth>,
+    running: Arc<AtomicBool>,
+    labels: Option<MetricsLabels>,
+) {
+    let mut stream = match connect_with_retry(addr, &running).await {
+        Ok(stream) => stream,
+        Err(e) => {
+            if running.load(Ordering::Relaxed) {
+                record_disconnect(&identity, labels.as_ref());
+                worker_health.report_fatal(
+                    WorkerFatalReason::TransportDisconnect,
+                    format!(
+                        "[TCP] connect failed channel {} addr {}: {}",
+                        identity.channel_id, addr, e
+                    ),
+                );
+            }
+            return;
+        }
+    };
+
+    if let Err(e) = write_frame(&mut stream, identity.channel_id.as_bytes()).await {
+        if running.load(Ordering::Relaxed) {
+            record_disconnect(&identity, labels.as_ref());
+            worker_health.report_fatal(
+                WorkerFatalReason::TransportDisconnect,
+                format!(
+                    "[TCP] handshake write failed channel {}: {}",
+                    identity.channel_id, e
+                ),
+            );
+        }
+        return;
+    }
+
+    let mut window_start = Instant::now();
+    let mut blocked_ns: u64 = 0;
+
+    loop {
+        if !running.load(Ordering::Relaxed) {
+            return;
+        }
+        let message = match tokio::time::timeout(Duration::from_millis(100), rx.recv()).await {
+            Ok(Some(message)) => message,
+            Ok(None) => return,
+            Err(_) => {
+                flush_write_block(
+                    &identity,
+                    labels.as_ref(),
+                    &mut window_start,
+                    &mut blocked_ns,
+                );
+                continue;
+            }
+        };
+
+        let bytes = message.to_bytes();
+        let write_start = Instant::now();
+        if let Err(e) = write_frame(&mut stream, &bytes).await {
+            if running.load(Ordering::Relaxed) {
+                record_disconnect(&identity, labels.as_ref());
+                worker_health.report_fatal(
+                    WorkerFatalReason::TransportDisconnect,
+                    format!("[TCP] write failed channel {}: {}", identity.channel_id, e),
+                );
+            }
+            return;
+        }
+        blocked_ns = blocked_ns.saturating_add(write_start.elapsed().as_nanos() as u64);
+        flush_write_block(
+            &identity,
+            labels.as_ref(),
+            &mut window_start,
+            &mut blocked_ns,
+        );
+    }
+}
+
+fn flush_write_block(
+    identity: &EdgeIdentity,
+    labels: Option<&MetricsLabels>,
+    window_start: &mut Instant,
+    blocked_ns: &mut u64,
+) {
+    let elapsed = window_start.elapsed();
+    if elapsed < Duration::from_secs(1) {
+        return;
+    }
+    let ms_per_s = (*blocked_ns as f64 / 1_000_000.0) / elapsed.as_secs_f64();
+    publish_write_block(identity, labels, ms_per_s.min(1000.0));
+    *blocked_ns = 0;
+    *window_start = Instant::now();
+}
+
+/// Bind the per-worker ingress port. Call before spawning egress pumps so connect retries are not racing bind.
+pub async fn bind_ingress(port: i32) -> std::io::Result<TcpListener> {
+    let addr: SocketAddr = format!("0.0.0.0:{port}")
+        .parse()
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    let listener = TcpListener::bind(addr).await?;
+    println!("[TCP] listening on {addr}");
+    Ok(listener)
+}
+
+/// Accept connections and spawn one ingress pump per logical edge.
+pub async fn listen_ingress(
+    listener: TcpListener,
+    senders: Arc<HashMap<String, (EdgeIdentity, BatchSender)>>,
+    worker_health: Arc<WorkerHealth>,
+    running: Arc<AtomicBool>,
+    labels: Option<MetricsLabels>,
+    shutdown_rx: oneshot::Receiver<()>,
+) {
+    tokio::pin!(shutdown_rx);
+    loop {
+        tokio::select! {
+            _ = &mut shutdown_rx => {
+                println!("[TCP] listen shutdown");
+                return;
+            }
+            accept = listener.accept() => {
+                match accept {
+                    Ok((mut stream, peer)) => {
+                        let _ = stream.set_nodelay(true);
+                        let senders = senders.clone();
+                        let worker_health = worker_health.clone();
+                        let running = running.clone();
+                        let labels = labels.clone();
+                        tokio::spawn(async move {
+                            serve_ingress(
+                                &mut stream,
+                                peer,
+                                senders,
+                                worker_health,
+                                running,
+                                labels,
+                            )
+                            .await;
+                        });
+                    }
+                    Err(e) => {
+                        if running.load(Ordering::Relaxed) {
+                            worker_health.report_fatal(
+                                WorkerFatalReason::TransportDisconnect,
+                                format!("[TCP] accept failed: {e}"),
+                            );
+                        }
+                        return;
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn serve_ingress(
+    stream: &mut TcpStream,
+    peer: SocketAddr,
+    senders: Arc<HashMap<String, (EdgeIdentity, BatchSender)>>,
+    worker_health: Arc<WorkerHealth>,
+    running: Arc<AtomicBool>,
+    labels: Option<MetricsLabels>,
+) {
+    let handshake = match read_frame(stream).await {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => return,
+        Err(e) => {
+            if running.load(Ordering::Relaxed) {
+                worker_health.report_fatal(
+                    WorkerFatalReason::TransportDisconnect,
+                    format!("[TCP] handshake read from {peer} failed: {e}"),
+                );
+            }
+            return;
+        }
+    };
+    let channel_id = match String::from_utf8(handshake) {
+        Ok(id) => id,
+        Err(_) => {
+            worker_health.report_fatal(
+                WorkerFatalReason::TransportDisconnect,
+                format!("[TCP] invalid handshake from {peer}"),
+            );
+            return;
+        }
+    };
+    let Some((identity, sender)) = senders.get(&channel_id).cloned() else {
+        worker_health.report_fatal(
+            WorkerFatalReason::TransportDisconnect,
+            format!("[TCP] unknown channel {channel_id} from {peer}"),
+        );
+        return;
+    };
+
+    loop {
+        if !running.load(Ordering::Relaxed) {
+            return;
+        }
+        let payload = match read_frame(stream).await {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => {
+                if running.load(Ordering::Relaxed) {
+                    record_disconnect(&identity, labels.as_ref());
+                    worker_health.report_fatal(
+                        WorkerFatalReason::TransportDisconnect,
+                        format!("[TCP] peer closed channel {}", identity.channel_id),
+                    );
+                }
+                return;
+            }
+            Err(e) => {
+                if running.load(Ordering::Relaxed) {
+                    record_disconnect(&identity, labels.as_ref());
+                    worker_health.report_fatal(
+                        WorkerFatalReason::TransportDisconnect,
+                        format!("[TCP] read failed channel {}: {}", identity.channel_id, e),
+                    );
+                }
+                return;
+            }
+        };
+        let message = Message::from_bytes(&payload);
+        if sender.send(message, None).await.is_err() {
+            if running.load(Ordering::Relaxed) {
+                record_disconnect(&identity, labels.as_ref());
+                worker_health.report_fatal(
+                    WorkerFatalReason::TransportDisconnect,
+                    format!("[TCP] local queue closed channel {}", identity.channel_id),
+                );
+            }
+            return;
+        }
+    }
+}

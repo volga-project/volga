@@ -7,7 +7,7 @@ use crate::test_utils::many_to_many_harness::{
 };
 use crate::transport::{TransportBackend, TransportBackendTrait};
 
-fn grpc_backend() -> Box<dyn TransportBackendTrait> {
+fn tcp_backend() -> Box<dyn TransportBackendTrait> {
     Box::new(TransportBackend::new(Arc::new(WorkerHealth::new())))
 }
 
@@ -47,27 +47,25 @@ fn slow_consumer(mode: MeshChannelMode) -> MeshTestConfig {
 
 #[tokio::test]
 async fn test_many_to_many_local_only_harness() {
-    run_many_to_many_case(happy_path(MeshChannelMode::LocalOnly), grpc_backend).await;
+    run_many_to_many_case(happy_path(MeshChannelMode::LocalOnly), tcp_backend).await;
 }
 
 #[tokio::test]
 async fn test_many_to_many_remote_only_harness() {
-    run_many_to_many_case(happy_path(MeshChannelMode::RemoteOnly), grpc_backend).await;
+    run_many_to_many_case(happy_path(MeshChannelMode::RemoteOnly), tcp_backend).await;
 }
 
 #[tokio::test]
 async fn test_many_to_many_mixed_local_remote_harness() {
-    run_many_to_many_case(happy_path(MeshChannelMode::MixedLocalRemote), grpc_backend).await;
+    run_many_to_many_case(happy_path(MeshChannelMode::MixedLocalRemote), tcp_backend).await;
 }
 
 #[tokio::test]
 async fn test_many_to_many_local_slow_consumer() {
-    run_many_to_many_case(slow_consumer(MeshChannelMode::LocalOnly), grpc_backend).await;
+    run_many_to_many_case(slow_consumer(MeshChannelMode::LocalOnly), tcp_backend).await;
 }
 
-/// Shared gRPC ingress demux: one full dest pins the hop. Un-ignore in #229 (per-edge TCP).
 #[tokio::test]
-#[ignore = "shared gRPC HOL; un-ignore in #229"]
 async fn test_many_to_many_remote_slow_consumer() {
-    run_many_to_many_case(slow_consumer(MeshChannelMode::RemoteOnly), grpc_backend).await;
+    run_many_to_many_case(slow_consumer(MeshChannelMode::RemoteOnly), tcp_backend).await;
 }

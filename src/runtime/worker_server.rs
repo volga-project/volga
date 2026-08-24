@@ -27,8 +27,7 @@ use crate::runtime::worker::{
     Start, StopSources, TriggerBarrier, Worker, WorkerConfig,
 };
 use crate::runtime::worker_config_utils::{
-    build_execution_graph, resolve_num_threads_per_task, resolve_transport_backend_type,
-    WorkerInitPayload,
+    build_execution_graph, resolve_num_threads_per_task, WorkerInitPayload,
 };
 
 /// Re-export generated stubs (single include lives in `common::grpc::stubs`).
@@ -64,9 +63,7 @@ impl WorkerServiceImpl {
         }
     }
 
-    fn map_handler_err<M: std::fmt::Debug>(
-        error: kameo::error::SendError<M, String>,
-    ) -> Status {
+    fn map_handler_err<M: std::fmt::Debug>(error: kameo::error::SendError<M, String>) -> Status {
         match error {
             kameo::error::SendError::HandlerError(msg) => Status::failed_precondition(msg),
             other => Status::internal(format!("worker ask failed: {other:?}")),
@@ -87,8 +84,8 @@ impl WorkerService for WorkerServiceImpl {
         let execution_attempt_id = req.execution_attempt_id;
         let restoring = req.restoring;
         let payload_len = req.init_payload_bytes.len();
-        let payload: WorkerInitPayload = serde_json::from_slice(&req.init_payload_bytes)
-            .map_err(|e| {
+        let payload: WorkerInitPayload =
+            serde_json::from_slice(&req.init_payload_bytes).map_err(|e| {
                 Status::invalid_argument(format!(
                     "Invalid worker init payload bytes: {} (len={})",
                     e, payload_len
@@ -142,8 +139,6 @@ impl WorkerService for WorkerServiceImpl {
             )));
         }
 
-        let transport_backend_type =
-            resolve_transport_backend_type(&execution_graph, &payload.vertex_ids);
         let num_threads_per_task = resolve_num_threads_per_task(&spec);
 
         let mut worker_config = WorkerConfig::new(
@@ -152,7 +147,6 @@ impl WorkerService for WorkerServiceImpl {
             execution_graph,
             vertex_ids,
             num_threads_per_task.max(1),
-            transport_backend_type,
         );
         worker_config.execution_attempt_id = execution_attempt_id;
         worker_config.task_restore_data = task_restore_data;
@@ -189,9 +183,8 @@ impl WorkerService for WorkerServiceImpl {
             })
             .await
             .map_err(Self::map_handler_err)?;
-        let state_bytes = bincode::serialize(&state).map_err(|e| {
-            Status::internal(format!("Failed to serialize worker state: {}", e))
-        })?;
+        let state_bytes = bincode::serialize(&state)
+            .map_err(|e| Status::internal(format!("Failed to serialize worker state: {}", e)))?;
 
         Ok(Response::new(GetWorkerStateResponse {
             worker_state_bytes: state_bytes,
@@ -375,9 +368,7 @@ impl WorkerService for WorkerServiceImpl {
     }
 }
 
-fn heartbeat_message(
-    identity: &crate::runtime::worker::WorkerIdentity,
-) -> WorkerHeartbeatMessage {
+fn heartbeat_message(identity: &crate::runtime::worker::WorkerIdentity) -> WorkerHeartbeatMessage {
     let (healthy, fatal_reason, fatal_message) = match &identity.last_fatal {
         Some(f) => (
             false,

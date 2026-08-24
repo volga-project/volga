@@ -48,6 +48,12 @@ pub const METRIC_STREAM_TASK_IDLE_TIME_MS_PER_SECOND: &str =
     "volga_stream_task_idle_time_ms_per_second";
 pub const METRIC_STREAM_TASK_BACKPRESSURED_TIME_MS_PER_SECOND: &str =
     "volga_stream_task_backpressured_time_ms_per_second";
+/// Per-edge TCP pump time spent in `write` (window / peer not reading), ms in the last second.
+pub const METRIC_STREAM_TASK_TRANSPORT_WRITE_BLOCK_MS_PER_SECOND: &str =
+    "volga_stream_task_transport_write_block_ms_per_second";
+/// Per-edge TCP disconnects. Close is fatal; this counts drops for Grafana.
+pub const METRIC_STREAM_TASK_TRANSPORT_DISCONNECTS: &str =
+    "volga_stream_task_transport_disconnects";
 
 /// Job-level checkpoint wall time (master `started_at` → complete only).
 pub const METRIC_CHECKPOINT_DURATION_MS: &str = "volga_checkpoint_duration_ms";

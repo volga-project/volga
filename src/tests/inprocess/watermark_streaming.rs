@@ -19,7 +19,6 @@ use crate::test_utils::support::{
 };
 use crate::runtime::worker::{Worker, WorkerConfig};
 use crate::storage::{InMemoryStorageClient, InMemoryStorageServer};
-use crate::transport::transport_backend_actor::TransportBackendType;
 
 fn parse_task_index_from_key(key: &str) -> Option<i32> {
     // Keys come from datagen as "key-{task_index}-{key_id}" when using FieldGenerator::Key.
@@ -157,7 +156,6 @@ pub(crate) async fn run_watermark_window_pipeline(
             exec_graph,
             vertex_ids,
             2,
-            TransportBackendType::Grpc,
         )
         .with_state_spec(&state),
     )
