@@ -24,31 +24,21 @@ Kubernetes operator for Volga pipelines.
 
 ## Dev Flow
 
-From repo root:
+From repo root. The sample CR pins master to `volga.io/role=infra` and workers to
+tainted `volga.io/role=worker` nodes, so the cluster must match
+`kubevolga/hack/kind-multi.yaml` (default name `kubevolga`).
 
 ```bash
-# 1) Build/load operator image
-docker build -t kubevolga:dev ./kubevolga
-kind load docker-image kubevolga:dev --name kubevolga
+# Kind (infra + 2 worker nodes), images, CRD, operator
+scripts/kube-test-env setup
 
-# 2) Build/load Volga runtime image used by master/worker/test-storage
-docker build -t volga:latest .
-kind load docker-image volga:latest --name kubevolga
-
-# 3) Deploy operator stack and sample
 cd kubevolga
-make install   # CRD
-make deploy    # namespace + RBAC + operator
 make sample    # sample VolgaPipeline
 ```
 
-Cleanup:
-
-```bash
-make unsample
-make undeploy
-make uninstall
-```
+`scripts/kube-test-env setup` is `kind create --name kubevolga --config kubevolga/hack/kind-multi.yaml`
+plus image load and `make install deploy`. A single-node cluster with that name
+is recreated. Cleanup: `make unsample` / `scripts/kube-test-env destroy`.
 
 ## Image/Target Notes
 
@@ -83,7 +73,7 @@ Test file:
 
 Behavior summary:
 
-- Reads `kubevolga/config/samples/volga_v1alpha1_pipeline.yaml`.
+- Reads `kubevolga/config/samples/volga_v1alpha1_pipeline.yaml` (master on `volga.io/role=infra`, workers on tainted `volga.io/role=worker` nodes).
 - Patches at runtime:
   - pipeline `metadata.name` (unique UUID-based name)
   - CR sink `InMemoryStorageGrpc.create: true` plus `server_addr` `http://{name}-storage.default.svc.cluster.local:50071` when the job needs the store; Count left alone

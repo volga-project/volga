@@ -9,6 +9,8 @@ spec:
   image: volga:latest
   imagePullPolicy: IfNotPresent
   master:
+    nodeSelector:
+      volga.io/role: infra
     resources:
       requests:
         cpu: "500m"
@@ -17,6 +19,22 @@ spec:
         cpu: "2"
         memory: "2Gi"
   worker:
+    nodeSelector:
+      volga.io/role: worker
+    tolerations:
+      - key: volga.io/role
+        operator: Equal
+        value: worker
+        effect: NoSchedule
+    affinity:
+      podAntiAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchLabels:
+                  volga.io/component: worker
+              topologyKey: kubernetes.io/hostname
     resources:
       requests:
         cpu: "500m"
