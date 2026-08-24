@@ -372,10 +372,12 @@ async fn serve_ingress(
     let channel_id = match String::from_utf8(handshake) {
         Ok(id) => id,
         Err(_) => {
-            worker_health.report_fatal(
-                WorkerFatalReason::TransportDisconnect,
-                format!("[TCP] invalid handshake from {peer}"),
-            );
+            if running.load(Ordering::Relaxed) {
+                worker_health.report_fatal(
+                    WorkerFatalReason::TransportDisconnect,
+                    format!("[TCP] invalid handshake from {peer}"),
+                );
+            }
             return;
         }
     };
@@ -384,10 +386,12 @@ async fn serve_ingress(
         .unwrap_or_else(|e| e.into_inner())
         .remove(&channel_id)
     else {
-        worker_health.report_fatal(
-            WorkerFatalReason::TransportDisconnect,
-            format!("[TCP] unknown or duplicate channel {channel_id} from {peer}"),
-        );
+        if running.load(Ordering::Relaxed) {
+            worker_health.report_fatal(
+                WorkerFatalReason::TransportDisconnect,
+                format!("[TCP] unknown or duplicate channel {channel_id} from {peer}"),
+            );
+        }
         return;
     };
 

@@ -60,15 +60,10 @@ async fn main() -> Result<()> {
     let worker = worker_server.worker_ref();
     std::panic::set_hook(Box::new(move |panic_info| {
         let panic_msg = panic_info.to_string();
-        let reason = if panic_msg.contains("[GRPC_BACKEND]") {
-            WorkerFatalReason::TransportDisconnect
-        } else {
-            WorkerFatalReason::Panic
-        };
         // Sync enqueue; no-op if Inner is gone / mailbox full.
         let _ = worker
             .tell(ReportFatal {
-                reason,
+                reason: WorkerFatalReason::Panic,
                 message: panic_msg,
             })
             .try_send();
