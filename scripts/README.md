@@ -167,7 +167,7 @@ Stress options:
 ```
 
 Timeouts are suite-scoped nextest profiles only (`default` 30s, `inprocess` 90s,
-`docker` 120s, `kube` 90s, `stress` 180s) — no per-test overrides.
+`docker` 120s, `kube`/`stress` 360s) — no per-test overrides.
 
 ## Bench (`volga-bench`)
 
