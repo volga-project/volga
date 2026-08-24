@@ -17,8 +17,6 @@ pub mod smoke;
 #[cfg(test)]
 pub mod support;
 #[cfg(test)]
-pub mod transport;
-#[cfg(test)]
 pub mod window;
 #[cfg(test)]
 pub mod window_aggs;

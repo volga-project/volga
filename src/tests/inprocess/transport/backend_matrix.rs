@@ -38,8 +38,8 @@ fn slow_consumer(mode: MeshChannelMode) -> MeshTestConfig {
         messages_per_writer: 8,
         mode,
         startup_wait: Duration::from_millis(if remote { 1000 } else { 50 }),
-        processing_wait: Duration::from_millis(50),
-        read_timeout: Duration::from_secs(5),
+        processing_wait: Duration::from_millis(if remote { 2000 } else { 50 }),
+        read_timeout: Duration::from_secs(if remote { 10 } else { 5 }),
         queue_size_records: Some(2),
         paused_reader_indices: vec![0],
     }

@@ -5,19 +5,19 @@ use crate::runtime::execution_graph::{
 };
 use crate::runtime::functions::map::MapFunction;
 use crate::runtime::health::WorkerHealth;
-use crate::runtime::operators::operator::OperatorConfig;
+use crate::runtime::operators::operator::{MessageStream, OperatorConfig};
 use crate::runtime::partition::PartitionType;
 use crate::runtime::VertexId;
 use crate::test_utils::common::{create_test_string_batch, IdentityMapFunction};
-use crate::test_utils::transport::{TestDataReaderActor, TestDataReaderMessage};
 use crate::transport::channel::Channel;
 use crate::transport::transport_backend_actor::{
     TransportBackendActor, TransportBackendActorMessage,
 };
-use crate::transport::transport_client::DataWriter;
+use crate::transport::transport_client::{DataReader, DataWriter};
+use crate::transport::transport_spec::TransportSpec;
 use crate::transport::TransportBackendTrait;
 use arrow::array::StringArray;
-use kameo::actor::ActorRef;
+use futures::StreamExt;
 use kameo::spawn;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -44,7 +44,7 @@ pub struct MeshTestConfig {
     pub read_timeout: Duration,
     /// `None` → default 8192. Isolation cases use a small bound (e.g. 2).
     pub queue_size_records: Option<u32>,
-    /// Reader indices that never `ReadMessage`. Other readers must still finish.
+    /// Reader indices whose streams are never polled. Other readers must still finish.
     pub paused_reader_indices: Vec<usize>,
 }
 
@@ -55,44 +55,15 @@ struct MeshGraph {
     vertex_node_ids: HashMap<String, usize>,
 }
 
-fn apply_queue_size(channel: Channel, queue_size_records: Option<u32>) -> Channel {
-    let Some(queue) = queue_size_records else {
-        return channel;
-    };
-    match channel {
-        Channel::Local {
-            source_vertex_id,
-            target_vertex_id,
-            ..
-        } => Channel::new_local_with_queue(source_vertex_id, target_vertex_id, queue),
-        Channel::Remote {
-            source_vertex_id,
-            target_vertex_id,
-            source_node_ip,
-            source_node_id,
-            target_node_ip,
-            target_node_id,
-            target_transport_port,
-            ..
-        } => Channel::new_remote_with_queue(
-            source_vertex_id,
-            target_vertex_id,
-            source_node_ip,
-            source_node_id,
-            target_node_ip,
-            target_node_id,
-            target_transport_port,
-            queue,
-        ),
-    }
-}
-
 fn build_mesh_graph(config: &MeshTestConfig) -> MeshGraph {
     let mut graph = ExecutionGraph::new();
     let mut writer_vertex_ids = Vec::new();
     let mut reader_vertex_ids = Vec::new();
     let mut vertex_node_ids: HashMap<String, usize> = HashMap::new();
     let mut remote_port_by_target_node: HashMap<usize, i32> = HashMap::new();
+    let queue = config
+        .queue_size_records
+        .unwrap_or(TransportSpec::DEFAULT_QUEUE_RECORDS);
 
     for node_idx in 0..config.num_writer_nodes {
         for writer_idx in 0..config.num_writers_per_node {
@@ -139,14 +110,16 @@ fn build_mesh_graph(config: &MeshTestConfig) -> MeshGraph {
                 .expect("reader node id should exist");
 
             let channel = match config.mode {
-                MeshChannelMode::LocalOnly => {
-                    Channel::new_local(writer_vertex_id.clone(), reader_vertex_id.clone())
-                }
+                MeshChannelMode::LocalOnly => Channel::new_local_with_queue(
+                    writer_vertex_id.clone(),
+                    reader_vertex_id.clone(),
+                    queue,
+                ),
                 MeshChannelMode::RemoteOnly => {
                     let target_port = *remote_port_by_target_node
                         .entry(target_node_id)
                         .or_insert_with(|| gen_unique_grpc_port() as i32);
-                    Channel::new_remote(
+                    Channel::new_remote_with_queue(
                         writer_vertex_id.clone(),
                         reader_vertex_id.clone(),
                         "127.0.0.1".to_string(),
@@ -154,16 +127,21 @@ fn build_mesh_graph(config: &MeshTestConfig) -> MeshGraph {
                         "127.0.0.1".to_string(),
                         format!("node-{}", target_node_id),
                         target_port,
+                        queue,
                     )
                 }
                 MeshChannelMode::MixedLocalRemote => {
                     if source_node_id == target_node_id {
-                        Channel::new_local(writer_vertex_id.clone(), reader_vertex_id.clone())
+                        Channel::new_local_with_queue(
+                            writer_vertex_id.clone(),
+                            reader_vertex_id.clone(),
+                            queue,
+                        )
                     } else {
                         let target_port = *remote_port_by_target_node
                             .entry(target_node_id)
                             .or_insert_with(|| gen_unique_grpc_port() as i32);
-                        Channel::new_remote(
+                        Channel::new_remote_with_queue(
                             writer_vertex_id.clone(),
                             reader_vertex_id.clone(),
                             "127.0.0.1".to_string(),
@@ -171,11 +149,11 @@ fn build_mesh_graph(config: &MeshTestConfig) -> MeshGraph {
                             "127.0.0.1".to_string(),
                             format!("node-{}", target_node_id),
                             target_port,
+                            queue,
                         )
                     }
                 }
             };
-            let channel = apply_queue_size(channel, config.queue_size_records);
 
             let edge = ExecutionEdge::new(
                 writer_vertex_id.clone(),
@@ -243,7 +221,7 @@ fn assert_ordered_delivery(
 
 async fn drain_reader(
     reader_idx: usize,
-    reader_ref: ActorRef<TestDataReaderActor>,
+    mut stream: MessageStream,
     expected: usize,
     read_timeout: Duration,
     num_writers: usize,
@@ -252,42 +230,40 @@ async fn drain_reader(
     let mut received = Vec::with_capacity(expected);
     let mut received_map: HashMap<(usize, usize), String> = HashMap::new();
     for _ in 0..expected {
-        let result = tokio::time::timeout(
-            read_timeout,
-            reader_ref.ask(TestDataReaderMessage::ReadMessage),
-        )
-        .await
-        .unwrap_or_else(|_| {
-            let mut missing = Vec::new();
-            for writer_idx in 0..num_writers {
-                for message_idx in 0..messages_per_writer {
-                    if !received_map.contains_key(&(writer_idx, message_idx)) {
-                        missing.push(batch_payload(writer_idx, message_idx));
+        let message = match tokio::time::timeout(read_timeout, stream.next()).await {
+            Ok(Some(message)) => message,
+            Ok(None) => panic!(
+                "Reader {reader_idx} stream closed after {}/{expected} messages",
+                received.len()
+            ),
+            Err(_) => {
+                let mut missing = Vec::new();
+                for writer_idx in 0..num_writers {
+                    for message_idx in 0..messages_per_writer {
+                        if !received_map.contains_key(&(writer_idx, message_idx)) {
+                            missing.push(batch_payload(writer_idx, message_idx));
+                        }
                     }
                 }
+                let preview = missing.into_iter().take(12).collect::<Vec<_>>().join(", ");
+                panic!(
+                    "Timed out waiting for reader {} message: received {}/{}; missing sample: [{}]",
+                    reader_idx,
+                    received.len(),
+                    expected,
+                    preview
+                );
             }
-            let preview = missing.into_iter().take(12).collect::<Vec<_>>().join(", ");
-            panic!(
-                "Timed out waiting for reader {} message: received {}/{}; missing sample: [{}]",
-                reader_idx,
-                received.len(),
-                expected,
-                preview
-            );
-        })
-        .expect("reader receive should succeed");
-        if let Some(message) = result {
-            let value = payload_string(&message);
-            let parsed = parse_batch_payload(&value);
-            received_map.insert(parsed, value);
-            received.push(parsed);
-        }
+        };
+        let value = payload_string(&message);
+        let parsed = parse_batch_payload(&value);
+        received_map.insert(parsed, value);
+        received.push(parsed);
     }
     received
 }
 
-/// Independent per-edge send loops (cloned `DataWriter`, not `TestDataWriterActor`).
-/// The actor is single-threaded: one blocked `WriteMessage` stalls every dest.
+/// Independent per-edge send loops (cloned `DataWriter`).
 /// One paused dest must not prevent other dests from receiving the full stream.
 pub async fn run_many_to_many_case<F>(config: MeshTestConfig, backend_factory: F)
 where
@@ -310,7 +286,7 @@ where
 
     let mut backend_refs = Vec::new();
     let mut writers: HashMap<String, DataWriter> = HashMap::new();
-    let mut reader_refs = HashMap::new();
+    let mut reader_streams: HashMap<String, MessageStream> = HashMap::new();
 
     for node_id in node_ids {
         let mut backend = backend_factory();
@@ -325,17 +301,20 @@ where
         for (vertex_id, transport_cfg) in configs {
             let vertex_key = vertex_id.as_ref().to_string();
             if writer_vertex_set.contains(&vertex_key) {
-                let mut writer = DataWriter::new(
+                let writer = DataWriter::new(
                     vertex_id.clone(),
                     transport_cfg.writer_senders.expect("writer senders"),
                     transport_cfg.metrics_labels,
                     Arc::new(WorkerHealth::new()),
                 );
-                writer.start().await;
                 writers.insert(vertex_key, writer);
             } else {
-                let reader_actor = TestDataReaderActor::new(vertex_id.clone(), transport_cfg);
-                reader_refs.insert(vertex_key, spawn(reader_actor));
+                let reader = DataReader::new(
+                    vertex_id.clone(),
+                    transport_cfg.reader_receivers.expect("reader receivers"),
+                );
+                let (stream, _control) = reader.message_stream_with_control();
+                reader_streams.insert(vertex_key, stream);
             }
         }
     }
@@ -354,21 +333,23 @@ where
     let messages_per_writer = config.messages_per_writer;
 
     let mut drain_handles: Vec<(usize, JoinHandle<Vec<(usize, usize)>>)> = Vec::new();
+    // Keep paused streams alive: dropping them closes BatchReceiver and paused send returns false.
+    let mut _held_streams: Vec<MessageStream> = Vec::new();
     for (reader_idx, reader_vertex_id) in mesh.reader_vertex_ids.iter().enumerate() {
+        let stream = reader_streams
+            .remove(reader_vertex_id)
+            .expect("reader stream should exist");
         if paused.contains(&reader_idx) {
+            _held_streams.push(stream);
             continue;
         }
-        let reader_ref = reader_refs
-            .get(reader_vertex_id)
-            .expect("reader actor should exist")
-            .clone();
         let read_timeout = config.read_timeout;
         drain_handles.push((
             reader_idx,
             tokio::spawn(async move {
                 drain_reader(
                     reader_idx,
-                    reader_ref,
+                    stream,
                     expected_per_reader,
                     read_timeout,
                     num_writers,
@@ -445,6 +426,12 @@ where
 
     for handle in paused_sends {
         handle.abort();
+        match handle.await {
+            Err(e) if e.is_cancelled() => {}
+            Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+            Ok(()) => panic!("paused dest send completed; queue bound should have blocked"),
+            Err(e) => panic!("{e}"),
+        }
     }
 
     sleep(config.processing_wait).await;
