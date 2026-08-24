@@ -14,14 +14,14 @@ fail-fast = false
 slow-timeout = { period = "120s", terminate-after = 1 }
 fail-fast = false
 
-# Kind / kube (scripts/test kube).
+# Kind / kube (scripts/test kube) and scripts/stress-test. Must exceed the
+# harness kube kill-restore budget (recovery_started+replacement+
+# attempt1_running ≈ 300s) so nextest does not mask LifecycleOracle
+# diagnostics on slow replaces (4-node Kind, mid-flight kill after a safe CP).
 [profile.kube]
-slow-timeout = { period = "90s", terminate-after = 1 }
+slow-timeout = { period = "360s", terminate-after = 1 }
 fail-fast = false
 
-# scripts/stress-test (kube-heavy). Must exceed harness kube kill-restore
-# budget (recovery_started+replacement+attempt1_running ≈ 300s) so nextest
-# does not mask LifecycleOracle diagnostics on slow replaces.
 [profile.stress]
 slow-timeout = { period = "360s", terminate-after = 1 }
 fail-fast = false
