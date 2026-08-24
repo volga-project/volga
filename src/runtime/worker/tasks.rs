@@ -173,7 +173,12 @@ impl WorkerInner {
         let config = self.config.clone();
 
         let mut backend: Box<dyn TransportBackendTrait> = match config.transport_backend_type {
-            TransportBackendType::Grpc => Box::new(TransportBackend::new(self.health.clone())),
+            TransportBackendType::Grpc => Box::new(
+                TransportBackend::new(self.health.clone()).with_metrics_labels(MetricsLabels {
+                    pipeline_id: config.pipeline_id.0.clone(),
+                    worker_id: config.worker_id.clone(),
+                }),
+            ),
         };
         let mut transport_client_configs =
             backend.init_channels(&config.graph, config.vertex_ids.clone());

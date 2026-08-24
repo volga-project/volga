@@ -21,7 +21,11 @@ pub struct TestDataReaderActor {
 
 impl TestDataReaderActor {
     pub fn new(vertex_id: VertexId, transport_client_config: TransportClientConfig) -> Self {
-        let reader = DataReader::new(vertex_id, transport_client_config.reader_receivers.unwrap());
+        let reader = DataReader::new(
+            vertex_id,
+            transport_client_config.reader_receivers.unwrap(),
+            None,
+        );
         let (reader_message_stream, _control) = reader.message_stream_with_control();
         Self {
             reader_message_stream,

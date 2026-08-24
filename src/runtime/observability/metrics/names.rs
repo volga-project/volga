@@ -19,6 +19,8 @@ pub const METRIC_STREAM_TASK_TX_QUEUE_SIZE: &str = "volga_stream_task_tx_queue_s
 pub const METRIC_STREAM_TASK_TX_QUEUE_REM: &str = "volga_stream_task_tx_queue_rem";
 pub const METRIC_STREAM_TASK_BACKPRESSURE_RATIO: &str = "volga_stream_task_backpressure_ratio";
 pub const METRIC_STREAM_TASK_BACKPRESSURE_MAX: &str = "volga_stream_task_backpressure_max";
+/// Records waiting on one input channel (`source_task_id` → this task).
+pub const METRIC_STREAM_TASK_RX_QUEUED_RECORDS: &str = "volga_stream_task_rx_queued_records";
 /// Event-time lag: `wall_now_ms − current_watermark` (omit for 0 / MAX).
 /// Refreshed on watermark advance and on the task metrics tick so idle lag grows.
 pub const METRIC_STREAM_TASK_WATERMARK_LAG_MS: &str = "volga_stream_task_watermark_lag_ms";
@@ -75,6 +77,7 @@ pub const METRIC_OPERATOR_PATH_LATENCY_AVG: &str = "volga_operator_path_latency_
 // Label constants
 pub const LABEL_TASK_ID: &str = "task_id";
 pub const LABEL_TARGET_TASK_ID: &str = "target_task_id";
+pub const LABEL_SOURCE_TASK_ID: &str = "source_task_id";
 pub const LABEL_WORKER_ID: &str = "worker_id";
 pub const LABEL_OPERATOR_ID: &str = "operator_id";
 pub const LABEL_PIPELINE_ID: &str = "pipeline_id";

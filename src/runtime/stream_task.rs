@@ -788,10 +788,12 @@ impl StreamTask {
             
             let mut metrics_window_start = Instant::now();
 
+            let mut _rx_queue_publisher = None;
             if !is_source {
                 // Pre-process input stream for non-source operators
                 let reader = transport_client.reader.take()
                     .expect("Reader should be initialized for non-SOURCE operator");
+                _rx_queue_publisher = Some(reader.queue_snapshot().spawn_publisher());
                 let (input_stream, reader_control) = reader.message_stream_with_control();
                 data_reader_control = Some(reader_control.clone());
 

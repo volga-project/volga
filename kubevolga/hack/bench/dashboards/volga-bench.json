@@ -7,7 +7,7 @@
   ],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 2,
+  "version": 5,
   "refresh": "5s",
   "time": {
     "from": "now-15m",
@@ -375,7 +375,7 @@
           "sort": "desc"
         }
       },
-      "description": "wall_now_ms \u2212 watermark. Needs wall-clock event time (ProcessingTimestamp)."
+      "description": "wall_now_ms \u2212 watermark. Event time is IncrementalTimestamp starting at submit wall-clock (replayable)."
     },
     {
       "id": 30,
@@ -490,7 +490,7 @@
     {
       "id": 41,
       "type": "timeseries",
-      "title": "Window ingest / drops",
+      "title": "Window ingest / watermark process",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -508,8 +508,104 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(volga_wo_ingest_ms_bucket{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"}[1m])))",
+          "legendFormat": "ingest p50",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
           "expr": "histogram_quantile(0.99, sum by (le) (rate(volga_wo_ingest_ms_bucket{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"}[1m])))",
           "legendFormat": "ingest p99",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(volga_wo_wm_process_ms_bucket{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"}[1m])))",
+          "legendFormat": "wm process p50",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(volga_wo_wm_process_ms_bucket{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"}[1m])))",
+          "legendFormat": "wm process p99",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "insert_batch (ingest) vs process_due on watermark advance. First histogram bucket is 1ms."
+    },
+    {
+      "id": 43,
+      "type": "timeseries",
+      "title": "Window rows",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 30
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(rate(volga_wo_ingest_ms_count{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"}[1m]))",
+          "legendFormat": "ingest batches / s",
           "editorMode": "code",
           "instant": false,
           "range": true
@@ -568,17 +664,17 @@
           "sort": "desc"
         }
       },
-      "description": "Ingest latency vs drop rates. State size is the next panel (different scale)."
+      "description": "Ingest batch rate vs late drops vs maintain prune. Prune should track sink rate on a tumbling RANGE window."
     },
     {
       "id": 42,
       "type": "timeseries",
-      "title": "Window state size",
+      "title": "Window state bytes",
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 12,
-        "y": 30
+        "x": 0,
+        "y": 38
       },
       "datasource": {
         "type": "prometheus",
@@ -666,6 +762,246 @@
       }
     },
     {
+      "id": 44,
+      "type": "timeseries",
+      "title": "Window state counts",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 38
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(volga_wo_state_raw_count{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"})",
+          "legendFormat": "raw",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(volga_wo_state_tiles_count{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"})",
+          "legendFormat": "tiles",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(volga_wo_state_triggers_count{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"})",
+          "legendFormat": "triggers",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(volga_wo_state_key_states_count{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"})",
+          "legendFormat": "key states",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "In-mem backend entries (not bytes). key_states \u2248 distinct keys in the window store."
+    },
+    {
+      "id": 60,
+      "type": "row",
+      "title": "Process / container",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 46
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 61,
+      "type": "timeseries",
+      "title": "CPU (cAdvisor)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 47
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (pod) (rate(container_cpu_usage_seconds_total{container=~\"master|worker\"}[1m]))",
+          "legendFormat": "{{pod}}",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "unit": "cores"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Kubelet cAdvisor. 1.0 = one full core."
+    },
+    {
+      "id": 62,
+      "type": "timeseries",
+      "title": "Memory: Volga RSS vs cgroup working set",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 47
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (worker_id) (volga_worker_rss_bytes{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\"})",
+          "legendFormat": "rss {{worker_id}}",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (pod) (container_memory_working_set_bytes{container=~\"master|worker\"})",
+          "legendFormat": "cgroup {{pod}}",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "volga_worker_rss_bytes (process RSS, workers only) vs cAdvisor working set (master + workers). Shapes should match; RSS is often a bit below cgroup."
+    },
+    {
       "id": 50,
       "type": "row",
       "title": "Operator (poll gauges)",
@@ -673,7 +1009,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 38
+        "y": 55
       },
       "collapsed": false,
       "panels": []
@@ -686,7 +1022,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 39
+        "y": 56
       },
       "datasource": {
         "type": "prometheus",
@@ -748,6 +1084,137 @@
         }
       },
       "description": "Worker poll-time gauges, labeled by operator_id."
+    },
+    {
+      "id": 70,
+      "type": "row",
+      "title": "Transport",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 64
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 71,
+      "type": "timeseries",
+      "title": "Tx queue remaining",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 65
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max by (task_id, target_task_id) (volga_stream_task_tx_queue_rem{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"})",
+          "legendFormat": "{{task_id}} \u2192 {{target_task_id}}",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Records of free space on each output edge. 0 = this task is blocked sending to that target."
+    },
+    {
+      "id": 72,
+      "type": "timeseries",
+      "title": "Rx queued records",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 65
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max by (task_id, source_task_id) (volga_stream_task_rx_queued_records{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"})",
+          "legendFormat": "{{source_task_id}} \u2192 {{task_id}}",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Records waiting on each input channel. Full + dest idle = operator not polling. Empty + upstream tx rem 0 = not delivered yet."
     }
   ]
 }

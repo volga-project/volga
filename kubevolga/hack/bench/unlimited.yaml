@@ -1,22 +1,21 @@
-# Bench spec for `volga-bench --config`. CLI only overrides `--env` and `--duration-secs`.
-# Count sink + Datagen source are fixed in code (`run_for_s` unset). `launch` is the job overlay.
+# Unlimited datagen, no kill / interval checkpoint / restore.
+# IncrementalTimestamp step_ms=1 (event-time density, not wall).
+# Lag oracles disabled: watermark sits ahead of wall, lag gauge saturates at 0.
 
 env: kube
-duration: 1h
-scenario: kill
-kill_after_checkpoint: 1
-dump: /tmp/soak
+duration: 180s
+scenario: steady
+dump: /tmp/soak-unlimited-nocp
 prom_url: http://127.0.0.1:9090
 launch:
   parallelism: 4
   slots_per_node: 2
   checkpoint:
-    interval: 30s
+    interval: 0s
     timeout: 60s
     retention: 1
   datagen:
-    # omit rate → 200/s. `rate: null` → unlimited (no sleep between batches).
-    rate: 200
+    rate: null
     batch_size: 20
   window:
     tiling: [1s, 5s]
@@ -33,13 +32,9 @@ launch:
     WINDOW w AS (PARTITION BY key ORDER BY timestamp
     RANGE BETWEEN INTERVAL '10000' MILLISECOND PRECEDING AND CURRENT ROW)
 oracles:
-  watermark_stale_while_sending: 30s
-  lag_p99: 15s
-  lag_p99_sustain: 60s
+  watermark_stale_while_sending: 24h
+  lag_p99: 24h
+  lag_p99_sustain: 24h
   checkpoint_silence_intervals: 3
-  restore_catchup: 90s
   allow_checkpoint_fail_outside_kill: false
   allow_unexpected_fatal: false
-# extra_prom_queries:
-#   - name: checkpoint_duration_p99
-#     query: 'histogram_quantile(0.99, sum by (le) (rate(volga_checkpoint_duration_ms_bucket{pipeline_id=~".*"}[1m])))'

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
@@ -82,7 +82,9 @@ pub struct CheckpointFile {
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DatagenFile {
-    pub rate: Option<f32>,
+    /// Omitted → 200/s. YAML `null` → unlimited (`DatagenSpec.rate = None`).
+    #[serde(default, deserialize_with = "deserialize_optional_rate")]
+    pub rate: Option<Option<f32>>,
     pub batch_size: Option<usize>,
     pub num_unique: Option<usize>,
 }
@@ -252,14 +254,16 @@ fn compile_launch(launch: Option<&LaunchFile>) -> Result<PipelineLaunchSpec> {
 
 fn checkpoint_from_file(file: Option<&CheckpointFile>) -> Result<(u64, u64, u64)> {
     let file = file.cloned().unwrap_or_default();
-    let interval_ms = duration_ms(
-        file.interval.as_deref(),
-        DEFAULT_CHECKPOINT_INTERVAL,
-        "launch.checkpoint.interval",
-    )?;
-    if interval_ms == 0 {
-        bail!("launch.checkpoint.interval must be > 0");
-    }
+    // `0` / `0s` disables interval checkpoints (engine `CheckpointSpec::interval()`).
+    let interval_ms = match file.interval.as_deref().map(str::trim) {
+        None => DEFAULT_CHECKPOINT_INTERVAL.as_millis() as u64,
+        Some("0" | "0s" | "0ms") => 0,
+        Some(raw) => duration_ms(
+            Some(raw),
+            DEFAULT_CHECKPOINT_INTERVAL,
+            "launch.checkpoint.interval",
+        )?,
+    };
     let timeout_ms = duration_ms(
         file.timeout.as_deref(),
         DEFAULT_CHECKPOINT_TIMEOUT,
@@ -277,10 +281,12 @@ fn checkpoint_from_file(file: Option<&CheckpointFile>) -> Result<(u64, u64, u64)
 
 fn datagen_from_file(file: Option<&DatagenFile>, parallelism: usize) -> Result<DatagenSpec> {
     let file = file.cloned().unwrap_or_default();
-    let rate = file.rate.unwrap_or(DEFAULT_DATAGEN_RATE);
-    if rate <= 0.0 {
-        bail!("launch.datagen.rate must be > 0");
-    }
+    let rate = match file.rate {
+        None => Some(DEFAULT_DATAGEN_RATE),
+        Some(None) => None,
+        Some(Some(rate)) if rate > 0.0 => Some(rate),
+        Some(Some(_)) => bail!("launch.datagen.rate must be > 0, or null for unlimited"),
+    };
     let batch_size = nonzero_usize(
         file.batch_size,
         DEFAULT_DATAGEN_BATCH,
@@ -292,11 +298,23 @@ fn datagen_from_file(file: Option<&DatagenFile>, parallelism: usize) -> Result<D
         "launch.datagen.num_unique",
     )?;
     let mut fields = HashMap::new();
-    // Wall-clock event time so watermark lag is `now − watermark`, not ~55 years
-    // (IncrementalTimestamp starts at 1s and lag uses UNIX epoch ms).
+    // Incremental from wall-clock now so lag is `now − watermark`, not ~55 years.
+    // Finite `rate`: step ≈ per-key inter-arrival so event time tracks wall.
+    // Unlimited: step is a stub until we pick a replayable wall-aligned heuristic.
+    let start_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock before UNIX epoch")?
+        .as_millis() as i64;
+    let step_ms = match rate {
+        Some(r) => ((num_unique as f64) / f64::from(r) * 1000.0).round() as i64,
+        None => 1,
+    };
     fields.insert(
         "timestamp".to_string(),
-        FieldGenerator::ProcessingTimestamp,
+        FieldGenerator::IncrementalTimestamp {
+            start_ms,
+            step_ms: step_ms.max(1),
+        },
     );
     fields.insert(
         "key".to_string(),
@@ -312,7 +330,7 @@ fn datagen_from_file(file: Option<&DatagenFile>, parallelism: usize) -> Result<D
         },
     );
     Ok(DatagenSpec {
-        rate: Some(rate),
+        rate,
         limit: None,
         run_for_s: None,
         batch_size,
@@ -432,6 +450,15 @@ fn apply_oracles(oracles: &mut OracleConfig, file: &OracleFile) -> Result<()> {
         oracles.allow_unexpected_fatal = v;
     }
     Ok(())
+}
+
+/// Present YAML value: `null` → `Some(None)` (unlimited), number → `Some(Some(n))`.
+/// Missing field uses `Default` (`None`) → 200/s.
+fn deserialize_optional_rate<'de, D>(deserializer: D) -> Result<Option<Option<f32>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Some(Option::deserialize(deserializer)?))
 }
 
 fn parse_duration(raw: &str) -> Result<Duration> {

@@ -27,8 +27,10 @@ render:
 	$(KUSTOMIZE) config/default
 
 # Prom + Grafana on infra (kubevolga/hack/bench). Opt-in; not part of kube tests.
+# Restart Prometheus so scrape-config ConfigMap changes are picked up.
 bench:
 	$(KUSTOMIZE) hack/bench | $(KUBECTL) apply -f -
+	$(KUBECTL) -n volga-bench rollout restart deploy/prometheus
 
 unbench:
 	$(KUSTOMIZE) hack/bench | $(KUBECTL) delete --ignore-not-found=true -f -
