@@ -268,7 +268,9 @@ impl TransportBackendTrait for TransportBackend {
                     return;
                 }
             };
-            let senders = Arc::new(self.remote_reader_senders.take().unwrap());
+            let senders = Arc::new(std::sync::Mutex::new(
+                self.remote_reader_senders.take().unwrap(),
+            ));
             let shutdown_rx = self
                 .shutdown_rx
                 .take()

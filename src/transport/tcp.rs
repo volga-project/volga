@@ -3,19 +3,20 @@
 use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use metrics::{counter, gauge};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
 
-use crate::common::grpc::GRPC_MAX_MESSAGE_BYTES;
 use crate::common::message::Message;
 use crate::runtime::consts::{
-    runtime_consts, TRANSPORT_GRPC_CONNECT_MAX_RETRIES, TRANSPORT_GRPC_CONNECT_RETRY_DELAY,
+    runtime_consts, TRANSPORT_TCP_CONNECT_MAX_RETRIES, TRANSPORT_TCP_CONNECT_RETRY_DELAY,
 };
 use crate::runtime::health::{WorkerFatalReason, WorkerHealth};
 use crate::runtime::metrics::{
@@ -25,7 +26,24 @@ use crate::runtime::metrics::{
 };
 use crate::transport::batch_channel::{BatchReceiver, BatchSender};
 
-const MAX_FRAME_BYTES: u32 = GRPC_MAX_MESSAGE_BYTES as u32;
+/// Same 12MiB cap as control-plane gRPC messages; TCP frames are length-prefixed.
+const MAX_FRAME_BYTES: u32 = 12 * 1024 * 1024;
+
+struct AbortOnDropHandles(Vec<JoinHandle<()>>);
+
+impl Drop for AbortOnDropHandles {
+    fn drop(&mut self) {
+        for handle in self.0.drain(..) {
+            handle.abort();
+        }
+    }
+}
+
+impl AbortOnDropHandles {
+    fn push(&mut self, handle: JoinHandle<()>) {
+        self.0.push(handle);
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct EdgeIdentity {
@@ -109,9 +127,9 @@ fn record_disconnect(identity: &EdgeIdentity, labels: Option<&MetricsLabels>) {
 
 async fn connect_with_retry(addr: SocketAddr, running: &AtomicBool) -> io::Result<TcpStream> {
     let max_attempts = runtime_consts()
-        .u64(TRANSPORT_GRPC_CONNECT_MAX_RETRIES)
+        .u64(TRANSPORT_TCP_CONNECT_MAX_RETRIES)
         .max(1);
-    let delay = runtime_consts().duration(TRANSPORT_GRPC_CONNECT_RETRY_DELAY);
+    let delay = runtime_consts().duration(TRANSPORT_TCP_CONNECT_RETRY_DELAY);
     let mut last_err = None;
     for attempt in 0..max_attempts {
         if !running.load(Ordering::Relaxed) {
@@ -198,8 +216,16 @@ pub async fn pump_egress(
         };
 
         let bytes = message.to_bytes();
-        let write_start = Instant::now();
-        if let Err(e) = write_frame(&mut stream, &bytes).await {
+        if let Err(e) = write_frame_sampled(
+            &mut stream,
+            &bytes,
+            &identity,
+            labels.as_ref(),
+            &mut window_start,
+            &mut blocked_ns,
+        )
+        .await
+        {
             if running.load(Ordering::Relaxed) {
                 record_disconnect(&identity, labels.as_ref());
                 worker_health.report_fatal(
@@ -209,13 +235,38 @@ pub async fn pump_egress(
             }
             return;
         }
-        blocked_ns = blocked_ns.saturating_add(write_start.elapsed().as_nanos() as u64);
-        flush_write_block(
-            &identity,
-            labels.as_ref(),
-            &mut window_start,
-            &mut blocked_ns,
-        );
+    }
+}
+
+/// Sample write-block while `write_all` is in flight so a multi-second TCP window stall
+/// shows up on the gauge before the write returns.
+async fn write_frame_sampled(
+    stream: &mut TcpStream,
+    payload: &[u8],
+    identity: &EdgeIdentity,
+    labels: Option<&MetricsLabels>,
+    window_start: &mut Instant,
+    blocked_ns: &mut u64,
+) -> io::Result<()> {
+    let mut write_start = Instant::now();
+    let write = write_frame(stream, payload);
+    tokio::pin!(write);
+    let mut interval = tokio::time::interval(Duration::from_secs(1));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    interval.tick().await;
+    loop {
+        tokio::select! {
+            result = &mut write => {
+                *blocked_ns = blocked_ns.saturating_add(write_start.elapsed().as_nanos() as u64);
+                flush_write_block(identity, labels, window_start, blocked_ns);
+                return result;
+            }
+            _ = interval.tick() => {
+                *blocked_ns = blocked_ns.saturating_add(write_start.elapsed().as_nanos() as u64);
+                write_start = Instant::now();
+                flush_write_block(identity, labels, window_start, blocked_ns);
+            }
+        }
     }
 }
 
@@ -248,13 +299,14 @@ pub async fn bind_ingress(port: i32) -> std::io::Result<TcpListener> {
 /// Accept connections and spawn one ingress pump per logical edge.
 pub async fn listen_ingress(
     listener: TcpListener,
-    senders: Arc<HashMap<String, (EdgeIdentity, BatchSender)>>,
+    senders: Arc<Mutex<HashMap<String, (EdgeIdentity, BatchSender)>>>,
     worker_health: Arc<WorkerHealth>,
     running: Arc<AtomicBool>,
     labels: Option<MetricsLabels>,
     shutdown_rx: oneshot::Receiver<()>,
 ) {
     tokio::pin!(shutdown_rx);
+    let mut ingress_tasks = AbortOnDropHandles(Vec::new());
     loop {
         tokio::select! {
             _ = &mut shutdown_rx => {
@@ -269,7 +321,7 @@ pub async fn listen_ingress(
                         let worker_health = worker_health.clone();
                         let running = running.clone();
                         let labels = labels.clone();
-                        tokio::spawn(async move {
+                        ingress_tasks.push(tokio::spawn(async move {
                             serve_ingress(
                                 &mut stream,
                                 peer,
@@ -279,7 +331,7 @@ pub async fn listen_ingress(
                                 labels,
                             )
                             .await;
-                        });
+                        }));
                     }
                     Err(e) => {
                         if running.load(Ordering::Relaxed) {
@@ -299,7 +351,7 @@ pub async fn listen_ingress(
 async fn serve_ingress(
     stream: &mut TcpStream,
     peer: SocketAddr,
-    senders: Arc<HashMap<String, (EdgeIdentity, BatchSender)>>,
+    senders: Arc<Mutex<HashMap<String, (EdgeIdentity, BatchSender)>>>,
     worker_health: Arc<WorkerHealth>,
     running: Arc<AtomicBool>,
     labels: Option<MetricsLabels>,
@@ -327,10 +379,14 @@ async fn serve_ingress(
             return;
         }
     };
-    let Some((identity, sender)) = senders.get(&channel_id).cloned() else {
+    let Some((identity, sender)) = senders
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&channel_id)
+    else {
         worker_health.report_fatal(
             WorkerFatalReason::TransportDisconnect,
-            format!("[TCP] unknown channel {channel_id} from {peer}"),
+            format!("[TCP] unknown or duplicate channel {channel_id} from {peer}"),
         );
         return;
     };
@@ -362,7 +418,19 @@ async fn serve_ingress(
                 return;
             }
         };
-        let message = Message::from_bytes(&payload);
+        let message = match catch_unwind(AssertUnwindSafe(|| Message::from_bytes(&payload))) {
+            Ok(message) => message,
+            Err(_) => {
+                if running.load(Ordering::Relaxed) {
+                    record_disconnect(&identity, labels.as_ref());
+                    worker_health.report_fatal(
+                        WorkerFatalReason::TransportDisconnect,
+                        format!("[TCP] decode failed channel {}", identity.channel_id),
+                    );
+                }
+                return;
+            }
+        };
         if sender.send(message, None).await.is_err() {
             if running.load(Ordering::Relaxed) {
                 record_disconnect(&identity, labels.as_ref());
@@ -373,5 +441,29 @@ async fn serve_ingress(
             }
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn connected_pair() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let connect = tokio::spawn(async move { TcpStream::connect(addr).await.unwrap() });
+        let (server, _) = listener.accept().await.unwrap();
+        (connect.await.unwrap(), server)
+    }
+
+    #[tokio::test]
+    async fn read_frame_rejects_oversize_len() {
+        let (mut client, mut server) = connected_pair().await;
+        client
+            .write_all(&(MAX_FRAME_BYTES + 1).to_le_bytes())
+            .await
+            .unwrap();
+        let err = read_frame(&mut server).await.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 }

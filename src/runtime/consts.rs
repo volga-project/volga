@@ -37,8 +37,8 @@ pub const WORKER_REGISTER_MAX_RETRIES: &str = "worker.register_max_retries";
 pub const WORKER_REGISTER_RETRY_DELAY: &str = "worker.register_retry_delay";
 pub const WORKER_REGISTER_CONNECT_TIMEOUT: &str = "worker.register_connect_timeout";
 pub const WORKER_REGISTER_RPC_TIMEOUT: &str = "worker.register_rpc_timeout";
-pub const TRANSPORT_GRPC_CONNECT_MAX_RETRIES: &str = "transport.grpc_connect_max_retries";
-pub const TRANSPORT_GRPC_CONNECT_RETRY_DELAY: &str = "transport.grpc_connect_retry_delay";
+pub const TRANSPORT_TCP_CONNECT_MAX_RETRIES: &str = "transport.tcp_connect_max_retries";
+pub const TRANSPORT_TCP_CONNECT_RETRY_DELAY: &str = "transport.tcp_connect_retry_delay";
 
 /// Explicit profile: `local_test` | `kube_test` | `prod`.
 pub const VOLGA_RUNTIME_CONSTS_PROFILE_ENV: &str = "VOLGA_RUNTIME_CONSTS_PROFILE";
@@ -67,7 +67,7 @@ const DURATION_KEYS: &[&str] = &[
     WORKER_REGISTER_RETRY_DELAY,
     WORKER_REGISTER_CONNECT_TIMEOUT,
     WORKER_REGISTER_RPC_TIMEOUT,
-    TRANSPORT_GRPC_CONNECT_RETRY_DELAY,
+    TRANSPORT_TCP_CONNECT_RETRY_DELAY,
 ];
 
 const U64_KEYS: &[&str] = &[
@@ -76,7 +76,7 @@ const U64_KEYS: &[&str] = &[
     MASTER_HEARTBEAT_MAX_STREAM_ATTEMPTS,
     KUBE_WORKER_HEALTH_UNHEALTHY_GRACE_TICKS,
     WORKER_REGISTER_MAX_RETRIES,
-    TRANSPORT_GRPC_CONNECT_MAX_RETRIES,
+    TRANSPORT_TCP_CONNECT_MAX_RETRIES,
 ];
 
 const EMBEDDED_LOCAL_TEST: &str = include_str!("../../config/runtime_consts.local_test.json");
