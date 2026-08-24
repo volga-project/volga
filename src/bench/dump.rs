@@ -167,6 +167,14 @@ pub const EXTRA_PROM_QUERIES: &[PromQuery] = &[
         ),
     ),
     (
+        "wo_wm_process_p99",
+        concat!(
+            "histogram_quantile(0.99, sum by (le) (rate(volga_wo_wm_process_ms_bucket",
+            r#"{pipeline_id=~".*"}"#,
+            "[1m])))"
+        ),
+    ),
+    (
         "wo_late_dropped_rate",
         concat!(
             "sum(rate(volga_wo_late_dropped_rows",
@@ -192,6 +200,60 @@ pub const EXTRA_PROM_QUERIES: &[PromQuery] = &[
             ") + sum(volga_wo_state_triggers_bytes",
             r#"{pipeline_id=~".*"}"#,
             ") + sum(volga_wo_state_key_states_bytes",
+            r#"{pipeline_id=~".*"}"#,
+            ")"
+        ),
+    ),
+    (
+        "wo_state_counts",
+        concat!(
+            "sum(volga_wo_state_raw_count",
+            r#"{pipeline_id=~".*"}"#,
+            ") + sum(volga_wo_state_tiles_count",
+            r#"{pipeline_id=~".*"}"#,
+            ") + sum(volga_wo_state_triggers_count",
+            r#"{pipeline_id=~".*"}"#,
+            ") + sum(volga_wo_state_key_states_count",
+            r#"{pipeline_id=~".*"}"#,
+            ")"
+        ),
+    ),
+    (
+        "worker_rss_bytes",
+        concat!(
+            "sum by (worker_id) (volga_worker_rss_bytes",
+            r#"{pipeline_id=~".*"}"#,
+            ")"
+        ),
+    ),
+    (
+        "container_cpu_cores",
+        concat!(
+            "sum by (pod) (rate(container_cpu_usage_seconds_total",
+            r#"{container=~"master|worker"}"#,
+            "[1m]))"
+        ),
+    ),
+    (
+        "container_memory_working_set_bytes",
+        concat!(
+            "sum by (pod) (container_memory_working_set_bytes",
+            r#"{container=~"master|worker"}"#,
+            ")"
+        ),
+    ),
+    (
+        "tx_queue_rem",
+        concat!(
+            "max by (task_id, target_task_id) (volga_stream_task_tx_queue_rem",
+            r#"{pipeline_id=~".*"}"#,
+            ")"
+        ),
+    ),
+    (
+        "rx_queued_records",
+        concat!(
+            "max by (task_id, source_task_id) (volga_stream_task_rx_queued_records",
             r#"{pipeline_id=~".*"}"#,
             ")"
         ),

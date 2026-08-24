@@ -86,8 +86,10 @@ pub fn evaluate(
         if let Err(err) = lag_p99(oracles, prom) {
             failures.push(err.to_string());
         }
-        if let Err(err) = checkpoint_health(oracles, prom, kill, checkpoint) {
-            failures.push(err.to_string());
+        if !resolved_checkpoint_interval(checkpoint).is_zero() {
+            if let Err(err) = checkpoint_health(oracles, prom, kill, checkpoint) {
+                failures.push(err.to_string());
+            }
         }
         if let Some(kill) = kill {
             if let Err(err) = restore_catchup(oracles, prom, kill) {
@@ -311,6 +313,14 @@ mod tests {
         OracleConfig::default()
     }
 
+    fn ckpt_spec() -> CheckpointSpec {
+        CheckpointSpec {
+            interval_ms: Some(30_000),
+            timeout_ms: Some(60_000),
+            retention: Some(1),
+        }
+    }
+
     fn sample_range(start: f64, step: f64, values: &[f64]) -> Vec<Sample> {
         values
             .iter()
@@ -435,7 +445,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        assert!(checkpoint_health(&cfg(), &prom, None, &CheckpointSpec::default()).is_err());
+        assert!(checkpoint_health(&cfg(), &prom, None, &ckpt_spec()).is_err());
     }
 
     #[test]
@@ -448,7 +458,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        assert!(checkpoint_health(&cfg(), &prom, None, &CheckpointSpec::default()).is_err());
+        assert!(checkpoint_health(&cfg(), &prom, None, &ckpt_spec()).is_err());
     }
 
     #[test]

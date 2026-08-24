@@ -167,6 +167,10 @@ pub struct BatchReceiver {
 }
 
 impl BatchReceiver {
+    pub fn queued_records_handle(&self) -> Arc<AtomicU32> {
+        self.queued_messages.clone()
+    }
+
     pub async fn recv(&mut self) -> Option<Message> {
         let item = self.rx.recv().await;
         if let Some(item) = &item {

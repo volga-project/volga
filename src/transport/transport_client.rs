@@ -1,13 +1,13 @@
 use anyhow::Result;
 use metrics::gauge;
 use std::collections::HashMap;
-use crate::{common::message::Message, runtime::{health::{WorkerFatalReason, WorkerHealth}, metrics::{MetricsLabels, LABEL_PIPELINE_ID, LABEL_TARGET_TASK_ID, LABEL_TASK_ID, LABEL_WORKER_ID, METRIC_STREAM_TASK_BACKPRESSURE_RATIO, METRIC_STREAM_TASK_TX_QUEUE_REM, METRIC_STREAM_TASK_TX_QUEUE_SIZE}, operators::operator::MessageStream}, transport::{batch_channel::{BatchReceiver, BatchSender, BackpressureTracker}, channel::Channel}};
+use crate::{common::message::Message, runtime::{health::{WorkerFatalReason, WorkerHealth}, metrics::{MetricsLabels, LABEL_PIPELINE_ID, LABEL_SOURCE_TASK_ID, LABEL_TARGET_TASK_ID, LABEL_TASK_ID, LABEL_WORKER_ID, METRIC_STREAM_TASK_BACKPRESSURE_RATIO, METRIC_STREAM_TASK_RX_QUEUED_RECORDS, METRIC_STREAM_TASK_TX_QUEUE_REM, METRIC_STREAM_TASK_TX_QUEUE_SIZE}, operators::operator::MessageStream}, transport::{batch_channel::{BatchReceiver, BatchSender, BackpressureTracker}, channel::Channel}};
 use std::time::Duration;
-use tokio::{sync::mpsc::error::SendError, time};
+use tokio::{sync::mpsc::error::SendError, task::JoinHandle, time};
 use tokio::sync::Notify;
 use futures::stream;
 use crate::transport::batcher::BatcherConfig;
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use std::sync::{Arc, atomic::{AtomicBool, AtomicU32, Ordering}};
 use crate::runtime::VertexId;
 
 // pub type MessageStream = Pin<Box<dyn Stream<Item = Message> + Send>>;
@@ -49,9 +49,18 @@ impl TransportClientConfig {
     }
 }
 
+/// Aborts the dest-side queue ticker when the stream task ends (close / panic).
+pub(crate) struct RxQueueTicker(JoinHandle<()>);
+
+impl Drop for RxQueueTicker {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 #[derive(Debug)]
 pub struct DataReader {
-    _vertex_id: VertexId,
+    vertex_id: VertexId,
     receivers: HashMap<String, BatchReceiver>,
 }
 
@@ -113,9 +122,56 @@ impl DataReaderControl {
 impl DataReader {
     pub fn new(vertex_id: VertexId, receivers: HashMap<String, BatchReceiver>) -> Self {
         Self {
-            _vertex_id: vertex_id,
+            vertex_id,
             receivers,
         }
+    }
+
+    pub fn queued_by_source(&self) -> Vec<(String, Arc<AtomicU32>)> {
+        self.receivers
+            .iter()
+            .map(|(channel_id, receiver)| {
+                let source_task_id = channel_id
+                    .split("_to_")
+                    .next()
+                    .unwrap_or(channel_id)
+                    .to_string();
+                (source_task_id, receiver.queued_records_handle())
+            })
+            .collect()
+    }
+
+    /// 1s dest-side sample so depths stay live while the operator is in `process` / blocked on send.
+    pub(crate) fn spawn_rx_queue_ticker(&self, labels: Option<MetricsLabels>) -> RxQueueTicker {
+        let channels = self.queued_by_source();
+        let vertex_id = self.vertex_id.clone();
+        RxQueueTicker(tokio::spawn(async move {
+            let mut interval = time::interval(Duration::from_secs(1));
+            interval.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                for (source_task_id, queued) in &channels {
+                    let value = queued.load(Ordering::Relaxed) as f64;
+                    if let Some(labels) = &labels {
+                        gauge!(
+                            METRIC_STREAM_TASK_RX_QUEUED_RECORDS,
+                            LABEL_TASK_ID => vertex_id.clone(),
+                            LABEL_SOURCE_TASK_ID => source_task_id.clone(),
+                            LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
+                            LABEL_WORKER_ID => labels.worker_id.clone(),
+                        )
+                        .set(value);
+                    } else {
+                        gauge!(
+                            METRIC_STREAM_TASK_RX_QUEUED_RECORDS,
+                            LABEL_TASK_ID => vertex_id.clone(),
+                            LABEL_SOURCE_TASK_ID => source_task_id.clone(),
+                        )
+                        .set(value);
+                    }
+                }
+            }
+        }))
     }
 
     pub fn message_stream(self) -> MessageStream {

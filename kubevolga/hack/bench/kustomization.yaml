@@ -1,7 +1,8 @@
 # Lightweight Prom + Grafana for Volga bench (not kube-prometheus-stack).
 # Apply: kubectl apply -k kubevolga/hack/bench
 # UI:    kubectl -n volga-bench port-forward svc/grafana 3000:3000
-# Scrapes pods with prometheus.io/{scrape,port,path}. Requires infra nodes (kind-multi).
+# Scrapes: volga pods (prometheus.io/{scrape,port,path}) + kubelet cAdvisor
+# (container CPU / working set via nodes/proxy). Requires infra nodes (kind-multi).
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 namespace: volga-bench
