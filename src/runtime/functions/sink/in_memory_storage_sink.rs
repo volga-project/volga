@@ -2,7 +2,8 @@ use async_trait::async_trait;
 use anyhow::Result;
 use arrow::array::{Array, Int64Array, StringArray, TimestampMillisecondArray};
 use arrow::datatypes::DataType;
-use crate::common::message::Message;
+use crate::common::message::{Message, KEY_FIELDS_EXTRA};
+use crate::runtime::functions::key_by::pack::split_message_by_key_fields;
 use crate::runtime::functions::sink::SinkFunctionTrait;
 use crate::storage::in_memory_storage_grpc_client::InMemoryStorageClient;
 use crate::runtime::runtime_context::RuntimeContext;
@@ -145,17 +146,24 @@ impl SinkFunctionTrait for InMemoryStorageSinkFunction {
             return Ok(());
         }
 
-        match &message {
-            Message::Keyed(keyed_message) => {
-                let key = keyed_message.key().hash().to_string();
+        if let Some(extras) = message.get_extras() {
+            if extras.contains_key(KEY_FIELDS_EXTRA) {
                 let mut keyed_buffer = self.keyed_buffer.lock().await;
-                keyed_buffer.insert(key, message);
-            }
-            _ => {
-                let mut buffer = self.buffer.lock().await;
-                buffer.push(message);
+                for (key, payload) in split_message_by_key_fields(&message) {
+                    let row_message = Message::new(
+                        message.upstream_vertex_id(),
+                        payload,
+                        message.ingest_timestamp(),
+                        message.get_extras(),
+                    );
+                    keyed_buffer.insert(key.hash().to_string(), row_message);
+                }
+                return Ok(());
             }
         }
+
+        let mut buffer = self.buffer.lock().await;
+        buffer.push(message);
         Ok(())
     }
 
@@ -220,10 +228,11 @@ impl FunctionTrait for InMemoryStorageSinkFunction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     use arrow::array::{StringArray, TimestampMillisecondArray};
     use arrow::datatypes::{Field, Schema, TimeUnit};
     use arrow::record_batch::RecordBatch;
-    use crate::common::message::{BaseMessage, KeyedMessage};
+    use crate::common::message::KEY_FIELDS_EXTRA;
     use crate::common::ports::gen_unique_grpc_port;
     use crate::test_utils::common::create_test_string_batch;
     use crate::common::Key;
@@ -252,29 +261,15 @@ mod tests {
             ),
         ];
 
-        let key1_batch = create_test_string_batch(vec!["key1".to_string()]);
-        let key2_batch = create_test_string_batch(vec!["key2".to_string()]);
-        let key1 = Key::new(key1_batch)?;
-        let key2 = Key::new(key2_batch)?;
+        let value1_batch = create_test_string_batch(vec!["value1".to_string()]);
+        let value2_batch = create_test_string_batch(vec!["value2".to_string()]);
+        let key1 = Key::new(value1_batch.clone())?;
+        let key2 = Key::new(value2_batch.clone())?;
+        let mut keyed_extras = HashMap::new();
+        keyed_extras.insert(KEY_FIELDS_EXTRA.to_string(), "value".to_string());
         let keyed_messages = vec![
-            Message::Keyed(KeyedMessage::new(
-                BaseMessage::new(
-                    None,
-                    create_test_string_batch(vec!["value1".to_string()]),
-                    None,
-                    None,
-                ),
-                key1.clone(),
-            )),
-            Message::Keyed(KeyedMessage::new(
-                BaseMessage::new(
-                    None,
-                    create_test_string_batch(vec!["value2".to_string()]),
-                    None,
-                    None,
-                ),
-                key2.clone(),
-            )),
+            Message::new(None, value1_batch, None, Some(keyed_extras.clone())),
+            Message::new(None, value2_batch, None, Some(keyed_extras)),
         ];
 
         let mut storage_server = InMemoryStorageServer::new();

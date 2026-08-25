@@ -58,7 +58,7 @@ pub fn batch(ts: Vec<i64>, vals: Vec<f64>, keys: Vec<&str>) -> RecordBatch {
 
 pub fn key(partition: &str) -> Key {
     let schema = Arc::new(Schema::new(vec![Field::new(
-        "partition",
+        "partition_key",
         DataType::Utf8,
         false,
     )]));
@@ -67,8 +67,8 @@ pub fn key(partition: &str) -> Key {
     Key::new(key_batch).expect("key")
 }
 
-pub fn keyed_message(b: RecordBatch, partition: &str) -> Message {
-    Message::new_keyed(None, b, key(partition), None, None)
+pub fn keyed_message(b: RecordBatch, _partition: &str) -> Message {
+    Message::new(None, b, None, None)
 }
 
 pub fn watermark_message(wm: u64) -> Message {

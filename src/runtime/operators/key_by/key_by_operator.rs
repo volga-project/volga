@@ -7,12 +7,14 @@ use crate::{common::Message, runtime::{functions::key_by::{KeyByFunction, KeyByF
 
 pub struct KeyByOperator {
     base: OperatorBase,
+    num_partitions: usize,
 }
 
 impl fmt::Debug for KeyByOperator {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("KeyByOperator")
             .field("base", &self.base)
+            .field("num_partitions", &self.num_partitions)
             .finish()
     }
 }
@@ -23,8 +25,9 @@ impl KeyByOperator {
             OperatorConfig::KeyByConfig(key_by_function) => key_by_function,
             _ => panic!("Expected KeyByConfig, got {:?}", config),
         };
-        Self { 
+        Self {
             base: OperatorBase::new_with_function(key_by_function, config),
+            num_partitions: 1,
         }
     }
 }
@@ -32,6 +35,7 @@ impl KeyByOperator {
 #[async_trait]
 impl OperatorTrait for KeyByOperator {
     async fn open(&mut self, context: &RuntimeContext) -> Result<()> {
+        self.num_partitions = context.parallelism().max(1) as usize;
         self.base.open(context).await
     }
 
@@ -54,27 +58,18 @@ impl OperatorTrait for KeyByOperator {
             Some(message) => {
                 let function = self.base.get_function_mut::<KeyByFunction>().unwrap();
                 let function = function.clone();
-                
-                let keyed_messages = function.key_by(message);
-                // Convert to Messages
-                let mut messages: Vec<Message> = keyed_messages.into_iter()
-                    .map(Message::Keyed)
-                    .collect();
-                
+                let messages = function.key_by(message, self.num_partitions);
                 if messages.is_empty() {
                     panic!("KeyBy operator produced no messages");
                 }
                 if messages.len() == 1 {
-                    // Single message, return it directly
-                    return OperatorPollResult::Ready(messages.pop().unwrap());
-                } else {
-                    // Multiple messages, return first and buffer the rest
-                    let first_message = messages.remove(0);
-                    // Add remaining messages to buffer (in reverse order since we pop from end)
-                    messages.reverse();
-                    self.base.pending_messages.extend(messages);
-                    return OperatorPollResult::Ready(first_message);
+                    return OperatorPollResult::Ready(messages.into_iter().next().unwrap());
                 }
+                let mut messages = messages;
+                let first_message = messages.remove(0);
+                messages.reverse();
+                self.base.pending_messages.extend(messages);
+                OperatorPollResult::Ready(first_message)
             }
             None => OperatorPollResult::None,
         }

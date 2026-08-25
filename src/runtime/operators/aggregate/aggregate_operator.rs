@@ -11,6 +11,7 @@ use async_trait::async_trait;
 use anyhow::Result as AnyhowResult;
 use crate::runtime::operators::operator::{OperatorTrait, OperatorBase, OperatorType, OperatorConfig, OperatorPollResult, MessageStream};
 use crate::runtime::runtime_context::RuntimeContext;
+use crate::runtime::functions::key_by::pack::{split_by_key_exprs, without_pack_extras};
 use crate::common::{BaseMessage, Message, MAX_WATERMARK_VALUE};
 use std::sync::Arc;
 use std::fmt;
@@ -86,7 +87,7 @@ impl AggregateOperator {
         let (_, (first_message, _)) = &accumulators[0];
         let upstream_vertex_id = first_message.metadata.upstream_vertex_id.clone();
         let ingest_timestamp = first_message.metadata.ingest_timestamp;
-        let extras = first_message.metadata.extras.clone();
+        let extras = without_pack_extras(first_message.metadata.extras.clone());
 
         for (_key, (first_message, accumulators)) in accumulators {
             // Build columns in the exact order of the final output schema:
@@ -172,6 +173,44 @@ impl AggregateOperator {
         ))
     }
 
+    fn process_group(&mut self, hash: u64, first: BaseMessage, batch: &RecordBatch) {
+        let aggregate_exec = self.aggregate_exec.clone();
+        if !self.accumulators.contains_key(&hash) {
+            let accs = Self::create_accumulators(&aggregate_exec);
+            self.accumulators.insert(hash, (first, accs));
+        }
+        let (_first_message, accumulators) = self.accumulators
+            .get_mut(&hash)
+            .expect("Accumulators should exist after insert");
+
+        for (i, accumulator) in accumulators.iter_mut().enumerate() {
+            if let Some(aggr_expr) = aggregate_exec.aggr_expr().get(i) {
+                let values = aggr_expr
+                    .expressions()
+                    .iter()
+                    .map(|expr| expr.evaluate(batch).expect("should be able to evaluate expression"))
+                    .collect::<Vec<_>>();
+
+                let arrays: Vec<ArrayRef> = values
+                    .into_iter()
+                    .filter_map(|v| match v {
+                        ColumnarValue::Array(a) => Some(a),
+                        ColumnarValue::Scalar(s) => {
+                            let batch_size = batch.num_rows();
+                            s.to_array_of_size(batch_size).ok()
+                        }
+                    })
+                    .collect();
+
+                if arrays.is_empty() {
+                    panic!("No arrays to update accumulator");
+                }
+
+                let _ = accumulator.update_batch(&arrays);
+            }
+        }
+    }
+
 }
 
 #[async_trait]
@@ -204,50 +243,22 @@ impl OperatorTrait for AggregateOperator {
         match self.base.next_input().await {
             Some(message) => {
                 match message {
-                    Message::Keyed(keyed_message) => {
-                        // Inline process_message logic
-                        let key = keyed_message.key().clone();
-                        let aggregate_exec = self.aggregate_exec.clone(); // Clone before mutable borrow
-                        
-                        // Get or create accumulators for this key
-                        if !self.accumulators.contains_key(&key.hash()) {
-                            let accs = Self::create_accumulators(&aggregate_exec);
-                            self.accumulators.insert(key.hash(), (keyed_message.base.clone(), accs));
-                        }
-                        let (_first_message, accumulators) = self.accumulators
-                            .get_mut(&key.hash())
-                            .expect("Accumulators should exist after insert");
-                        
-                        // Update accumulators
-                        for (i, accumulator) in accumulators.iter_mut().enumerate() {
-                            if let Some(aggr_expr) = aggregate_exec.aggr_expr().get(i) {
-                                let values = aggr_expr
-                                    .expressions()
-                                    .iter()
-                                    .map(|expr| expr.evaluate(&keyed_message.base.record_batch).expect("should be able to evaluate expression"))
-                                    .collect::<Vec<_>>();
-                                
-                                // Convert ColumnarValue to ArrayRef
-                                let arrays: Vec<ArrayRef> = values
-                                    .into_iter()
-                                    .filter_map(|v| match v {
-                                        ColumnarValue::Array(a) => Some(a),
-                                        ColumnarValue::Scalar(s) => {
-                                            // Convert scalar to array with batch size
-                                            let batch_size = keyed_message.base.record_batch.num_rows();
-                                            s.to_array_of_size(batch_size).ok()
-                                        }
-                                    })
-                                    .collect();
-                                
-                                if arrays.is_empty() {
-                                    panic!("No arrays to update accumulator");
-                                }
-
-                                let _ = accumulator.update_batch(&arrays);
+                    Message::Regular(base) => {
+                        if self.group_input_exprs.is_empty() {
+                            self.process_group(0, base.clone(), &base.record_batch);
+                        } else {
+                            for (key, payload) in
+                                split_by_key_exprs(&base.record_batch, &self.group_input_exprs)
+                            {
+                                let first = BaseMessage::new(
+                                    base.metadata.upstream_vertex_id.clone(),
+                                    payload.clone(),
+                                    base.metadata.ingest_timestamp,
+                                    base.metadata.extras.clone(),
+                                );
+                                self.process_group(key.hash(), first, &payload);
                             }
                         }
-                        // No immediate emission - return Continue
                         OperatorPollResult::Continue
                     }
                     Message::Watermark(watermark) => {
@@ -269,9 +280,6 @@ impl OperatorTrait for AggregateOperator {
                     Message::CheckpointBarrier(barrier) => {
                         OperatorPollResult::Ready(Message::CheckpointBarrier(barrier))
                     }
-                    _ => {
-                        panic!("Aggregate operator expects keyed messages or watermarks");
-                    }
                 }
             }
             None => OperatorPollResult::None,
@@ -288,7 +296,7 @@ mod tests {
         use crate::api::planner::{Planner, PlanningContext};
         use datafusion::prelude::SessionContext;
         use crate::runtime::operators::source::source_operator::{SourceConfig, VectorSourceConfig};
-        use crate::common::{Key, KeyedMessage, BaseMessage, MAX_WATERMARK_VALUE};
+        use crate::common::MAX_WATERMARK_VALUE;
         use arrow::array::{StringArray, Int64Array, Float64Array};
         use arrow::record_batch::RecordBatch;
         
@@ -341,24 +349,7 @@ mod tests {
                     schema.clone(),
                     vec![Arc::new(name_array), Arc::new(value_array)]
                 ).unwrap();
-                
-                // Create a key based on the name (this is our GROUP BY key)
-                let key_batch = RecordBatch::try_new(
-                    Arc::new(arrow::datatypes::Schema::new(vec![
-                        arrow::datatypes::Field::new("name", arrow::datatypes::DataType::Utf8, false),
-                    ])),
-                    vec![Arc::new(StringArray::from(vec![name]))]
-                ).unwrap();
-                let key = Key::new(key_batch).unwrap();
-                
-                // Create keyed message
-                let keyed_message = KeyedMessage::new(
-                    BaseMessage::new(None, batch, Some(0), None), // upstream_vertex_id = None, timestamp = 0
-                    key
-                );
-                
-                // Collect messages for stream processing
-                messages_to_process.push(Message::Keyed(keyed_message));
+                messages_to_process.push(Message::new(None, batch, Some(0), None));
             }
         }
         

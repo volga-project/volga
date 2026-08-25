@@ -270,9 +270,6 @@ impl LogicalGraph {
     }
 
     pub fn from_linear_operators(operator_list: Vec<OperatorConfig>, parallelism: usize, chained: bool) -> Self {
-        // Validate configuration
-        validate_linear_operator_list(&operator_list);
-
         // Group operators based on chaining configuration
         let grouped_operators = if chained {
             group_operators_for_chaining(&operator_list)
@@ -505,30 +502,6 @@ fn distance(graph: &DiGraph<LogicalNode, LogicalEdge>, source: NodeIndex, target
     usize::MAX // No path found
 }
 
-fn validate_linear_operator_list(operators: &[OperatorConfig]) {
-    for (i, op_config) in operators.iter().enumerate() {
-        match op_config {
-            OperatorConfig::ReduceConfig(_, _) => {
-                // Check if there's a KeyBy operator right before this reduce
-                if i == 0 {
-                    panic!("Reduce operator '{}' requires a KeyBy operator before it", op_config);
-                }
-                
-                let prev_config = &operators[i - 1];
-                match prev_config {
-                    OperatorConfig::KeyByConfig(_) => {
-                        // This is valid - reduce has keyby right before it
-                    }
-                    _ => {
-                        panic!("Reduce operator '{}' requires a KeyBy operator immediately before it", op_config);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
 /// Determines the appropriate partition type between two operators
 pub fn determine_partition_type(source_config: &OperatorConfig, target_config: &OperatorConfig) -> PartitionType {
     match (source_config, target_config) {
@@ -758,7 +731,7 @@ mod tests {
         let operators = vec![
             OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(VectorSourceConfig::new(vec![]))),
             OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction)),
-            OperatorConfig::KeyByConfig(KeyByFunction::new_arrow_key_by(vec!["value".to_string()])),
+            OperatorConfig::KeyByConfig(KeyByFunction::new_columns(vec!["value".to_string()])),
             OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction)),
             OperatorConfig::SinkConfig(SinkConfig::in_memory_grpc("http://127.0.0.1:8080")),
         ];
@@ -818,7 +791,7 @@ mod tests {
         // Define operator chain: source -> keyby -> map -> sink
         let operators = vec![
             OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(VectorSourceConfig::new(vec![]))),
-            OperatorConfig::KeyByConfig(KeyByFunction::new_arrow_key_by(vec!["value".to_string()])),
+            OperatorConfig::KeyByConfig(KeyByFunction::new_columns(vec!["value".to_string()])),
             OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction)),
             OperatorConfig::SinkConfig(SinkConfig::in_memory_grpc("http://127.0.0.1:8080")),
         ];
