@@ -1,10 +1,9 @@
 use crate::{
-    common::{message::{KEY_FIELDS_EXTRA, TARGET_SUBTASK_EXTRA}, Message, WatermarkMessage, MAX_WATERMARK_VALUE},
+    common::{Message, WatermarkMessage, MAX_WATERMARK_VALUE},
     test_utils::common::{create_test_string_batch, gen_unique_grpc_port},
     runtime::{
-        functions::{
-            key_by::{pack::split_by_key_column_names, KeyByFunction}, map::{MapFunction, MapFunctionTrait}
-        }, operators::{
+        functions::map::{MapFunction, MapFunctionTrait},
+        operators::{
             chained::chained_operator::ChainedOperator, operator::{OperatorConfig, OperatorTrait, OperatorType}, sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, VectorSourceConfig}
         }, runtime_context::RuntimeContext},
     storage::{InMemoryStorageClient, InMemoryStorageServer}
@@ -12,7 +11,6 @@ use crate::{
 use anyhow::Result;
 use async_trait::async_trait;
 use arrow::array::StringArray;
-use arrow::datatypes::{Field, Schema};
 use std::sync::Arc;
 
 // Simple test map functions
@@ -130,115 +128,6 @@ async fn test_chained_operator_source_map() {
     
     assert_eq!(array1.value(0), "HELLO");
     assert_eq!(array2.value(0), "WORLD");
-    
-    // Test next watermark - should pass through unchanged
-    let watermark_result = chained_operator.poll_next().await.get_result_message();
-    assert!(matches!(watermark_result, Message::Watermark(_)));
-    
-    // Test close
-    chained_operator.close().await.unwrap();
-}
-
-// #[tokio::test]
-async fn test_chained_operator_source_keyby() {
-    // Create test data with multiple keys
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("value", arrow::datatypes::DataType::Utf8, false),
-        Field::new("key", arrow::datatypes::DataType::Utf8, false),
-    ]));
-    
-    let values = StringArray::from(vec!["hello", "world", "test", "data"]);
-    let keys = StringArray::from(vec!["key1", "key1", "key2", "key2"]); // 2 rows per key
-    
-    let batch = arrow::record_batch::RecordBatch::try_new(
-        schema,
-        vec![Arc::new(values), Arc::new(keys)]
-    ).unwrap();
-    
-    let test_messages = vec![
-        Message::new(None, batch, None, None),
-        Message::Watermark(WatermarkMessage::new("source".to_string(), MAX_WATERMARK_VALUE, None)),
-    ];
-    
-    let configs = vec![
-        OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(VectorSourceConfig::new(test_messages))),
-        OperatorConfig::KeyByConfig(KeyByFunction::new_columns(vec!["key".to_string()])),
-    ];
-    
-    let mut chained_operator = ChainedOperator::new(OperatorConfig::ChainedConfig(configs));
-    let context = RuntimeContext::new("test_vertex".to_string().into(), 0, 1, None, None, None);
-    
-    chained_operator.open(&context).await.unwrap();
-    
-    // p=1 packs all keys into one Regular message
-    let result = chained_operator.poll_next().await.get_result_message();
-    assert!(matches!(result, Message::Regular(_)));
-    assert_eq!(result.record_batch().num_rows(), 4);
-    let extras = result.get_extras().unwrap();
-    assert_eq!(extras.get(TARGET_SUBTASK_EXTRA).unwrap(), "0");
-    assert_eq!(extras.get(KEY_FIELDS_EXTRA).unwrap(), "key");
-    let groups = split_by_key_column_names(result.record_batch(), &["key".to_string()]);
-    assert_eq!(groups.len(), 2);
-    for (_, batch) in &groups {
-        assert_eq!(batch.num_rows(), 2);
-    }
-    
-    // Test next watermark - should pass through unchanged
-    let watermark_result = chained_operator.poll_next().await.get_result_message();
-    assert!(matches!(watermark_result, Message::Watermark(_)));
-    
-    // Test close
-    chained_operator.close().await.unwrap();
-}
-
-// #[tokio::test]
-async fn test_chained_operator_source_map_keyby() {
-    // Create test data with single column for map function
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("value", arrow::datatypes::DataType::Utf8, false),
-    ]));
-    
-    let values = StringArray::from(vec!["key1", "key1", "key2", "key2"]); // 2 rows per key
-    
-    let batch = arrow::record_batch::RecordBatch::try_new(
-        schema,
-        vec![Arc::new(values)]
-    ).unwrap();
-    
-    let test_messages = vec![
-        Message::new(None, batch, None, None),
-        Message::Watermark(WatermarkMessage::new("source".to_string(), MAX_WATERMARK_VALUE, None)),
-    ];
-    
-    let configs = vec![
-        OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(VectorSourceConfig::new(test_messages))),
-        OperatorConfig::MapConfig(MapFunction::new_custom(ToUpperCaseMapFunction)),
-        OperatorConfig::KeyByConfig(KeyByFunction::new_columns(vec!["value".to_string()])),
-    ];
-    
-    let mut chained_operator = ChainedOperator::new(OperatorConfig::ChainedConfig(configs));
-    let context = RuntimeContext::new("test_vertex".to_string().into(), 0, 1, None, None, None);
-    
-    chained_operator.open(&context).await.unwrap();
-    
-    let result = chained_operator.poll_next().await.get_result_message();
-    assert!(matches!(result, Message::Regular(_)));
-    assert_eq!(result.record_batch().num_rows(), 4);
-    let extras = result.get_extras().unwrap();
-    assert_eq!(extras.get(TARGET_SUBTASK_EXTRA).unwrap(), "0");
-    let groups = split_by_key_column_names(result.record_batch(), &["value".to_string()]);
-    assert_eq!(groups.len(), 2);
-    for (key, batch) in &groups {
-        let key_array = key.record_batch().column(0).as_any().downcast_ref::<StringArray>().unwrap();
-        let key_value = key_array.value(0);
-        assert!(key_value == "KEY1" || key_value == "KEY2");
-        assert_eq!(batch.num_rows(), 2);
-        let value_array = batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
-        for i in 0..batch.num_rows() {
-            let value = value_array.value(i);
-            assert_eq!(value, value.to_uppercase());
-        }
-    }
     
     // Test next watermark - should pass through unchanged
     let watermark_result = chained_operator.poll_next().await.get_result_message();

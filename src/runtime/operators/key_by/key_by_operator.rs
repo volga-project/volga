@@ -3,7 +3,7 @@ use std::{fmt};
 use async_trait::async_trait;
 use anyhow::Result;
 
-use crate::{common::Message, runtime::{functions::key_by::{KeyByFunction, KeyByFunctionTrait}, operators::operator::{MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType}, runtime_context::RuntimeContext}};
+use crate::{common::Message, runtime::{functions::key_by::KeyByFunction, operators::operator::{MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType}, runtime_context::RuntimeContext}};
 
 pub struct KeyByOperator {
     base: OperatorBase,

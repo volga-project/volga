@@ -12,7 +12,7 @@ use datafusion::physical_plan::PhysicalExpr;
 use crate::common::message::{Message, KEY_FIELDS_EXTRA, TARGET_SUBTASK_EXTRA};
 use crate::common::Key;
 
-pub fn take_rows(batch: &RecordBatch, indices: &[usize]) -> RecordBatch {
+fn take_rows(batch: &RecordBatch, indices: &[usize]) -> RecordBatch {
     let indices_array = UInt32Array::from(indices.iter().map(|&i| i as u32).collect::<Vec<_>>());
     let columns: Vec<ArrayRef> = batch
         .columns()
@@ -33,7 +33,7 @@ fn global_partition_key() -> Key {
     Key::new(batch).expect("global key")
 }
 
-pub fn pack_by_dest(
+pub(crate) fn pack_by_dest(
     message: &Message,
     hashes: &[u64],
     key_field_names: &[String],
@@ -70,7 +70,7 @@ pub fn pack_by_dest(
     out
 }
 
-pub fn split_by_key_arrays(
+fn split_by_key_arrays(
     batch: &RecordBatch,
     key_arrays: &[ArrayRef],
     key_fields: Vec<Field>,
@@ -101,26 +101,6 @@ pub fn split_by_key_arrays(
     out
 }
 
-pub fn split_by_key_column_names(
-    batch: &RecordBatch,
-    key_column_names: &[String],
-) -> Vec<(Key, RecordBatch)> {
-    if key_column_names.is_empty() {
-        panic!("split_by_key_column_names requires key field names");
-    }
-    let schema = batch.schema();
-    let mut arrays = Vec::with_capacity(key_column_names.len());
-    let mut fields = Vec::with_capacity(key_column_names.len());
-    for name in key_column_names {
-        let (idx, field) = schema
-            .column_with_name(name)
-            .unwrap_or_else(|| panic!("key column '{}' not in batch", name));
-        arrays.push(batch.column(idx).clone());
-        fields.push(field.clone());
-    }
-    split_by_key_arrays(batch, &arrays, fields)
-}
-
 pub fn split_by_key_exprs(
     batch: &RecordBatch,
     exprs: &[Arc<dyn PhysicalExpr>],
@@ -136,6 +116,7 @@ pub fn split_by_key_exprs(
     split_by_key_arrays(batch, &arrays, fields)
 }
 
+/// Split a KeyBy-packed message using `KEY_FIELDS_EXTRA` column names.
 pub fn split_message_by_key_fields(message: &Message) -> Vec<(Key, RecordBatch)> {
     let names = message
         .get_extras()
@@ -154,7 +135,18 @@ pub fn split_message_by_key_fields(message: &Message) -> Vec<(Key, RecordBatch)>
             KEY_FIELDS_EXTRA
         );
     }
-    split_by_key_column_names(message.record_batch(), &names)
+    let batch = message.record_batch();
+    let schema = batch.schema();
+    let mut arrays = Vec::with_capacity(names.len());
+    let mut fields = Vec::with_capacity(names.len());
+    for name in &names {
+        let (idx, field) = schema
+            .column_with_name(name)
+            .unwrap_or_else(|| panic!("key column '{}' not in batch", name));
+        arrays.push(batch.column(idx).clone());
+        fields.push(field.clone());
+    }
+    split_by_key_arrays(batch, &arrays, fields)
 }
 
 /// Drop KeyBy routing extras so downstream hops (Aggregate emit, etc.) do not
@@ -172,7 +164,7 @@ pub fn without_pack_extras(
     }
 }
 
-pub fn evaluate_key_arrays(
+pub(crate) fn evaluate_key_arrays(
     exprs: &[Arc<dyn PhysicalExpr>],
     batch: &RecordBatch,
 ) -> Vec<ArrayRef> {
@@ -189,7 +181,7 @@ pub fn evaluate_key_arrays(
         .collect()
 }
 
-pub fn key_fields_for_exprs(
+pub(crate) fn key_fields_for_exprs(
     exprs: &[Arc<dyn PhysicalExpr>],
     arrays: &[ArrayRef],
     batch_schema: &arrow::datatypes::Schema,
