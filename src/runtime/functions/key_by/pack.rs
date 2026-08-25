@@ -9,7 +9,7 @@ use arrow::datatypes::{Field, Schema};
 use arrow::record_batch::RecordBatch;
 use datafusion::physical_plan::PhysicalExpr;
 
-use crate::common::message::{Message, KEY_FIELDS_EXTRA, TARGET_SUBTASK_EXTRA};
+use crate::common::message::{Message, TARGET_SUBTASK_EXTRA};
 use crate::common::Key;
 
 fn take_rows(batch: &RecordBatch, indices: &[usize]) -> RecordBatch {
@@ -36,7 +36,6 @@ fn global_partition_key() -> Key {
 pub(crate) fn pack_by_dest(
     message: &Message,
     hashes: &[u64],
-    key_field_names: &[String],
     num_partitions: usize,
 ) -> Vec<Message> {
     let batch = message.record_batch();
@@ -50,7 +49,6 @@ pub(crate) fn pack_by_dest(
     for (i, &hash) in hashes.iter().enumerate() {
         buckets[(hash % n as u64) as usize].push(i);
     }
-    let key_fields_joined = key_field_names.join(",");
     let mut out = Vec::new();
     for (dest, idxs) in buckets.into_iter().enumerate() {
         if idxs.is_empty() {
@@ -59,7 +57,6 @@ pub(crate) fn pack_by_dest(
         let packed = take_rows(batch, &idxs);
         let mut extras = message.get_extras().unwrap_or_default();
         extras.insert(TARGET_SUBTASK_EXTRA.to_string(), dest.to_string());
-        extras.insert(KEY_FIELDS_EXTRA.to_string(), key_fields_joined.clone());
         out.push(Message::new(
             message.upstream_vertex_id(),
             packed,
@@ -139,55 +136,6 @@ pub fn split_by_key_exprs(
     split_by_key_arrays(batch, &arrays, fields)
 }
 
-/// Split a KeyBy-packed message using `KEY_FIELDS_EXTRA` column names.
-pub fn split_message_by_key_fields(message: &Message) -> Vec<(Key, RecordBatch)> {
-    let names = message
-        .get_extras()
-        .as_ref()
-        .and_then(|e| e.get(KEY_FIELDS_EXTRA))
-        .map(|s| {
-            s.split(',')
-                .filter(|p| !p.is_empty())
-                .map(|p| p.to_string())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    if names.is_empty() {
-        let batch = message.record_batch();
-        if batch.num_rows() == 0 {
-            return Vec::new();
-        }
-        return vec![(global_partition_key(), batch.clone())];
-    }
-    let batch = message.record_batch();
-    let schema = batch.schema();
-    let mut arrays = Vec::with_capacity(names.len());
-    let mut fields = Vec::with_capacity(names.len());
-    for name in &names {
-        let (idx, field) = schema
-            .column_with_name(name)
-            .unwrap_or_else(|| panic!("key column '{}' not in batch", name));
-        arrays.push(batch.column(idx).clone());
-        fields.push(field.clone());
-    }
-    split_by_key_arrays(batch, &arrays, fields)
-}
-
-/// Drop KeyBy routing extras so downstream hops (Aggregate emit, etc.) do not
-/// look like packed keyed traffic.
-pub fn without_pack_extras(
-    extras: Option<HashMap<String, String>>,
-) -> Option<HashMap<String, String>> {
-    let mut extras = extras?;
-    extras.remove(TARGET_SUBTASK_EXTRA);
-    extras.remove(KEY_FIELDS_EXTRA);
-    if extras.is_empty() {
-        None
-    } else {
-        Some(extras)
-    }
-}
-
 pub(crate) fn evaluate_key_arrays(
     exprs: &[Arc<dyn PhysicalExpr>],
     batch: &RecordBatch,
@@ -251,7 +199,7 @@ mod tests {
     fn pack_by_dest_p2_skips_empty_buckets_and_hash_partition_reads_extra() {
         let message = Message::new(None, int_batch(vec![10, 20, 30]), None, None);
         let hashes = [0u64, 1, 0];
-        let packed = pack_by_dest(&message, &hashes, &["id".to_string()], 3);
+        let packed = pack_by_dest(&message, &hashes, 3);
         assert_eq!(packed.len(), 2, "dest 2 is empty and skipped");
 
         let mut dests = HashSet::new();
@@ -274,23 +222,16 @@ mod tests {
     }
 
     #[test]
-    fn split_empty_key_fields_is_global_key() {
+    fn pack_empty_hashes_goes_to_dest_0() {
         let message = Message::new(None, int_batch(vec![1, 2, 3]), None, None);
         let hashes = vec![0u64; 3];
-        let packed = pack_by_dest(&message, &hashes, &[], 2);
+        let packed = pack_by_dest(&message, &hashes, 2);
         assert_eq!(packed.len(), 1);
+        assert_eq!(packed[0].record_batch().num_rows(), 3);
         assert_eq!(
             packed[0].get_extras().unwrap().get(TARGET_SUBTASK_EXTRA).unwrap(),
             "0"
         );
-        assert_eq!(
-            packed[0].get_extras().unwrap().get(KEY_FIELDS_EXTRA).unwrap(),
-            ""
-        );
-        let groups = split_message_by_key_fields(&packed[0]);
-        assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].1.num_rows(), 3);
-        assert_eq!(groups[0].0, global_partition_key());
     }
 
     #[test]

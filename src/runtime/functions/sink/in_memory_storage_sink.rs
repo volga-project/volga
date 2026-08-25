@@ -2,8 +2,7 @@ use async_trait::async_trait;
 use anyhow::Result;
 use arrow::array::{Array, Int64Array, StringArray, TimestampMillisecondArray};
 use arrow::datatypes::DataType;
-use crate::common::message::{Message, KEY_FIELDS_EXTRA};
-use crate::runtime::functions::key_by::pack::split_message_by_key_fields;
+use crate::common::message::Message;
 use crate::runtime::functions::sink::SinkFunctionTrait;
 use crate::storage::in_memory_storage_grpc_client::InMemoryStorageClient;
 use crate::runtime::runtime_context::RuntimeContext;
@@ -146,22 +145,6 @@ impl SinkFunctionTrait for InMemoryStorageSinkFunction {
             return Ok(());
         }
 
-        if let Some(extras) = message.get_extras() {
-            if extras.contains_key(KEY_FIELDS_EXTRA) {
-                let mut keyed_buffer = self.keyed_buffer.lock().await;
-                for (key, payload) in split_message_by_key_fields(&message) {
-                    let row_message = Message::new(
-                        message.upstream_vertex_id(),
-                        payload,
-                        message.ingest_timestamp(),
-                        message.get_extras(),
-                    );
-                    keyed_buffer.insert(key.hash().to_string(), row_message);
-                }
-                return Ok(());
-            }
-        }
-
         let mut buffer = self.buffer.lock().await;
         buffer.push(message);
         Ok(())
@@ -228,14 +211,11 @@ impl FunctionTrait for InMemoryStorageSinkFunction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
     use arrow::array::{StringArray, TimestampMillisecondArray};
     use arrow::datatypes::{Field, Schema, TimeUnit};
     use arrow::record_batch::RecordBatch;
-    use crate::common::message::KEY_FIELDS_EXTRA;
     use crate::common::ports::gen_unique_grpc_port;
     use crate::test_utils::common::create_test_string_batch;
-    use crate::common::Key;
     use crate::storage::in_memory_storage_grpc_server::InMemoryStorageServer;
 
     #[tokio::test]
@@ -261,17 +241,6 @@ mod tests {
             ),
         ];
 
-        let value1_batch = create_test_string_batch(vec!["value1".to_string()]);
-        let value2_batch = create_test_string_batch(vec!["value2".to_string()]);
-        let key1 = Key::new(value1_batch.clone())?;
-        let key2 = Key::new(value2_batch.clone())?;
-        let mut keyed_extras = HashMap::new();
-        keyed_extras.insert(KEY_FIELDS_EXTRA.to_string(), "value".to_string());
-        let keyed_messages = vec![
-            Message::new(None, value1_batch, None, Some(keyed_extras.clone())),
-            Message::new(None, value2_batch, None, Some(keyed_extras)),
-        ];
-
         let mut storage_server = InMemoryStorageServer::new();
         let server_addr = format!("127.0.0.1:{}", gen_unique_grpc_port());
         storage_server.start(&server_addr).await?;
@@ -285,16 +254,13 @@ mod tests {
         for message in regular_messages {
             sink_function.sink(message).await?;
         }
-        for message in keyed_messages {
-            sink_function.sink(message).await?;
-        }
 
         tokio::time::sleep(Duration::from_millis(200)).await;
         sink_function.close().await?;
 
         let mut client = InMemoryStorageClient::new(format!("http://{}", server_addr)).await?;
         let vector_messages = client.get_vector().await?;
-        let map_messages = client.get_map().await?;
+        assert!(client.get_map().await?.is_empty());
 
         assert_eq!(vector_messages.len(), 3);
         assert_eq!(
@@ -326,32 +292,6 @@ mod tests {
                 .unwrap()
                 .value(0),
             "regular3"
-        );
-
-        assert_eq!(map_messages.len(), 2);
-        assert_eq!(
-            map_messages
-                .get(&key1.hash().to_string())
-                .unwrap()
-                .record_batch()
-                .column(0)
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .unwrap()
-                .value(0),
-            "value1"
-        );
-        assert_eq!(
-            map_messages
-                .get(&key2.hash().to_string())
-                .unwrap()
-                .record_batch()
-                .column(0)
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .unwrap()
-                .value(0),
-            "value2"
         );
 
         storage_server.stop().await;

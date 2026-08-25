@@ -5,8 +5,6 @@ use std::collections::HashMap;
 
 /// Dest subtask index set by KeyBy pack-by-dest; HashPartition reads it.
 pub const TARGET_SUBTASK_EXTRA: &str = "volga.target_subtask";
-/// Comma-separated payload column names that form the key (sink split).
-pub const KEY_FIELDS_EXTRA: &str = "volga.key_fields";
 
 #[derive(Debug, Clone)]
 pub struct BaseMessage {

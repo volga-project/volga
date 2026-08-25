@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use anyhow::Result as AnyhowResult;
 use crate::runtime::operators::operator::{OperatorTrait, OperatorBase, OperatorType, OperatorConfig, OperatorPollResult, MessageStream};
 use crate::runtime::runtime_context::RuntimeContext;
-use crate::runtime::functions::key_by::pack::{split_by_key_exprs, without_pack_extras};
+use crate::runtime::functions::key_by::pack::split_by_key_exprs;
 use crate::common::{BaseMessage, Message, MAX_WATERMARK_VALUE};
 use std::sync::Arc;
 use std::fmt;
@@ -87,7 +87,7 @@ impl AggregateOperator {
         let (_, (first_message, _)) = &accumulators[0];
         let upstream_vertex_id = first_message.metadata.upstream_vertex_id.clone();
         let ingest_timestamp = first_message.metadata.ingest_timestamp;
-        let extras = without_pack_extras(first_message.metadata.extras.clone());
+        let extras = first_message.metadata.extras.clone();
 
         for (_key, (first_message, accumulators)) in accumulators {
             // Build columns in the exact order of the final output schema:

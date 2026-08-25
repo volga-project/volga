@@ -6,13 +6,9 @@ use crate::common::Key;
 use crate::runtime::operators::operator::OperatorConfig;
 use anyhow::Result;
 use std::fmt;
-use arrow::array::ArrayRef;
-use arrow::datatypes::Schema;
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::functions::function_trait::FunctionTrait;
-use crate::runtime::functions::key_by::pack::{
-    evaluate_key_arrays, key_fields_for_exprs, pack_by_dest,
-};
+use crate::runtime::functions::key_by::pack::{evaluate_key_arrays, pack_by_dest};
 use std::any::Any;
 use datafusion::physical_plan::aggregates::AggregateExec;
 use datafusion::physical_plan::windows::BoundedWindowAggExec;
@@ -52,14 +48,6 @@ impl KeyByFunction {
         }
     }
 
-    fn key_field_names(&self, arrays: &[ArrayRef], batch_schema: &Schema) -> Vec<String> {
-        let exprs = self.group_exprs();
-        key_fields_for_exprs(&exprs, arrays, batch_schema)
-            .into_iter()
-            .map(|f| f.name().clone())
-            .collect()
-    }
-
     pub fn key_by(&self, message: Message, num_partitions: usize) -> Vec<Message> {
         let record_batch = message.record_batch();
         if record_batch.num_rows() == 0 {
@@ -68,15 +56,14 @@ impl KeyByFunction {
         let group_exprs = self.group_exprs();
         if group_exprs.is_empty() {
             // No GROUP BY / PARTITION BY (DataFusion also drops `PARTITION BY 1`).
-            // One global key: whole batch to dest 0, empty `volga.key_fields`.
+            // One global key: whole batch to dest 0.
             let hashes = vec![0u64; record_batch.num_rows()];
-            return pack_by_dest(&message, &hashes, &[], num_partitions);
+            return pack_by_dest(&message, &hashes, num_partitions);
         }
         let group_arrays = evaluate_key_arrays(&group_exprs, record_batch);
         let hashes =
             Key::hash_arrays(&group_arrays, record_batch.num_rows()).expect("key hashes");
-        let names = self.key_field_names(&group_arrays, record_batch.schema().as_ref());
-        pack_by_dest(&message, &hashes, &names, num_partitions)
+        pack_by_dest(&message, &hashes, num_partitions)
     }
 }
 
@@ -110,13 +97,12 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use arrow::array::{Int32Array, StringArray};
-    use arrow::datatypes::{DataType, Field};
+    use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
     use datafusion::prelude::SessionContext;
 
     use crate::api::planner::{Planner, PlanningContext};
-    use crate::common::message::{KEY_FIELDS_EXTRA, TARGET_SUBTASK_EXTRA};
-    use crate::runtime::functions::key_by::pack::split_message_by_key_fields;
+    use crate::common::message::TARGET_SUBTASK_EXTRA;
     use crate::runtime::operators::source::source_operator::{SourceConfig, VectorSourceConfig};
 
     async fn create_test_setup() -> (Planner, Message) {
@@ -154,33 +140,30 @@ mod tests {
     fn verify_name_dept_groups(messages: &[Message]) {
         let mut key_to_salaries: HashMap<(String, String), Vec<i32>> = HashMap::new();
         for message in messages {
-            assert_eq!(
-                message.get_extras().unwrap().get(KEY_FIELDS_EXTRA).unwrap(),
-                "name,department"
-            );
-            for (key, batch) in split_message_by_key_fields(message) {
-                let kb = key.record_batch();
-                let name = kb
-                    .column(0)
-                    .as_any()
-                    .downcast_ref::<StringArray>()
-                    .unwrap()
-                    .value(0)
-                    .to_string();
-                let dept = kb
-                    .column(1)
-                    .as_any()
-                    .downcast_ref::<StringArray>()
-                    .unwrap()
-                    .value(0)
-                    .to_string();
-                let salary_col = batch
-                    .column(0)
-                    .as_any()
-                    .downcast_ref::<Int32Array>()
-                    .unwrap();
-                let salaries: Vec<i32> = (0..batch.num_rows()).map(|i| salary_col.value(i)).collect();
-                key_to_salaries.entry((name, dept)).or_default().extend(salaries);
+            let batch = message.record_batch();
+            let name_col = batch
+                .column_by_name("name")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            let dept_col = batch
+                .column_by_name("department")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            let salary_col = batch
+                .column_by_name("salary")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .unwrap();
+            for i in 0..batch.num_rows() {
+                key_to_salaries
+                    .entry((name_col.value(i).to_string(), dept_col.value(i).to_string()))
+                    .or_default()
+                    .push(salary_col.value(i));
             }
         }
         assert_eq!(key_to_salaries.len(), 5);
@@ -244,12 +227,9 @@ mod tests {
         let key_by = key_by_from_graph(&logical_graph);
         let packed = key_by.key_by(message, 4);
         assert_eq!(packed.len(), 1);
+        assert_eq!(packed[0].record_batch().num_rows(), 6);
         let extras = packed[0].get_extras().unwrap();
         assert_eq!(extras.get(TARGET_SUBTASK_EXTRA).unwrap(), "0");
-        assert_eq!(extras.get(KEY_FIELDS_EXTRA).unwrap(), "");
-        let groups = split_message_by_key_fields(&packed[0]);
-        assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].1.num_rows(), 6);
     }
 
     #[tokio::test]
@@ -273,7 +253,6 @@ mod tests {
         assert_eq!(packed.len(), 1);
         let extras = packed[0].get_extras().unwrap();
         assert_eq!(extras.get(TARGET_SUBTASK_EXTRA).unwrap(), "0");
-        assert_eq!(extras.get(KEY_FIELDS_EXTRA).unwrap(), "");
     }
 }
 
