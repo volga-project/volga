@@ -48,6 +48,12 @@ impl TileConfig {
             .first()
             .expect("TileConfig must have at least one granularity")
     }
+
+    /// Finest tile is not smaller than the RANGE frame, so tiles cannot sit inside it
+    /// (e.g. 1s tiles on a 10ms window). Ingest/eval should treat tiling as off.
+    pub fn usable_for_window_length_ms(&self, window_length_ms: i64) -> bool {
+        window_length_ms > 0 && self.min_granularity().to_millis() <= window_length_ms
+    }
 }
 
 /// Project one window's tiles from loaded shared tile states.

@@ -9,6 +9,7 @@ use datafusion::physical_plan::windows::BoundedWindowAggExec;
 use datafusion::physical_plan::WindowExpr;
 
 use crate::runtime::operators::window::aggs::get_accumulator_type;
+use crate::runtime::operators::window::frame_utils::get_window_length_ms;
 use crate::runtime::operators::window::model::WindowId;
 use crate::runtime::operators::window::spec::WindowSpec;
 use crate::runtime::operators::window::{AccumulatorType, TileConfig};
@@ -64,11 +65,16 @@ impl BuiltWindows {
 
         let mut windows = BTreeMap::new();
         for (window_id, window_expr) in window_exec.window_expr().iter().enumerate() {
+            let window_length_ms = get_window_length_ms(window_expr.get_window_frame());
+            let tiling = tiling_configs
+                .get(window_id)
+                .and_then(|c| c.clone())
+                .filter(|cfg| cfg.usable_for_window_length_ms(window_length_ms));
             windows.insert(
                 window_id,
                 WindowConfig {
                     window_expr: window_expr.clone(),
-                    tiling: tiling_configs.get(window_id).and_then(|c| c.clone()),
+                    tiling,
                     accumulator_type: get_accumulator_type(window_expr),
                     exclude_current_row,
                 },
