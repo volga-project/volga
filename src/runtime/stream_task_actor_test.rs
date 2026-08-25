@@ -9,12 +9,13 @@ use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::stream_task::StreamTask;
 use crate::runtime::stream_task_actor::{StreamTaskActor, StreamTaskMessage};
 use crate::transport::channel::Channel;
-use crate::test_utils::transport::{TestDataReaderActor, TestDataWriterActor};
 use crate::transport::transport_backend_actor::{
     TransportBackendActor, TransportBackendActorMessage,
 };
+use crate::transport::transport_client::{DataReader, DataWriter};
 use crate::transport::{TransportBackend, TransportBackendTrait};
 use anyhow::Result;
+use futures::StreamExt;
 use kameo::spawn;
 use tokio::runtime::Runtime;
 
@@ -97,19 +98,20 @@ fn test_stream_task_actor() -> Result<()> {
         let backend_actor = TransportBackendActor::new(backend);
         let backend_ref = spawn(backend_actor);
 
-        // Create external writer and reader actors
-        let input_actor = TestDataWriterActor::new(
+        let input_cfg = configs.remove(input_vertex_id.as_ref()).unwrap();
+        let mut input_writer = DataWriter::new(
             input_vertex_id.clone(),
-            configs.remove(input_vertex_id.as_ref()).unwrap(),
+            input_cfg.writer_senders.unwrap(),
+            input_cfg.metrics_labels,
+            std::sync::Arc::new(WorkerHealth::new()),
         );
-        let output_actor = TestDataReaderActor::new(
+        let output_cfg = configs.remove(output_vertex_id.as_ref()).unwrap();
+        let output_reader = DataReader::new(
             output_vertex_id.clone(),
-            configs.remove(output_vertex_id.as_ref()).unwrap(),
+            output_cfg.reader_receivers.unwrap(),
         );
+        let (mut output_stream, _control) = output_reader.message_stream_with_control();
         let task_actor = StreamTaskActor::new(task);
-
-        let input_ref = spawn(input_actor);
-        let output_ref = spawn(output_actor);
         let task_ref = spawn(task_actor);
 
         // Start the backend
@@ -129,23 +131,15 @@ fn test_stream_task_actor() -> Result<()> {
                 input_vertex_id.as_ref().to_string(),
                 task_vertex_id.as_ref().to_string(),
             );
-            input_ref
-                .ask(
-                    crate::test_utils::transport::TestDataWriterMessage::WriteMessage {
-                        channel,
-                        message: message.clone(),
-                    },
-                )
-                .await?;
+            if !input_writer.write_message(&channel, message).await {
+                anyhow::bail!("Failed to write message");
+            }
         }
 
         // Read and verify output using external reader
         let mut received_messages: Vec<Message> = Vec::new();
         for _ in 0..test_messages.len() {
-            let result = output_ref
-                .ask(crate::test_utils::transport::TestDataReaderMessage::ReadMessage)
-                .await?;
-            if let Some(message) = result {
+            if let Some(message) = output_stream.next().await {
                 received_messages.push(message);
             }
         }
