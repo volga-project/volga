@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use metrics::{counter, gauge};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, Notify};
 use tokio::task::JoinHandle;
 
 use crate::common::message::Message;
@@ -99,27 +99,7 @@ async fn read_frame(stream: &mut TcpStream) -> io::Result<Option<Vec<u8>>> {
     Ok(Some(buf))
 }
 
-fn publish_write_block(identity: &EdgeIdentity, labels: Option<&MetricsLabels>, ms_per_s: f64) {
-    if let Some(labels) = labels {
-        gauge!(
-            METRIC_STREAM_TASK_TRANSPORT_WRITE_BLOCK_MS_PER_SECOND,
-            LABEL_TASK_ID => identity.task_id.clone(),
-            LABEL_TARGET_TASK_ID => identity.target_task_id.clone(),
-            LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
-            LABEL_WORKER_ID => labels.worker_id.clone()
-        )
-        .set(ms_per_s);
-    } else {
-        gauge!(
-            METRIC_STREAM_TASK_TRANSPORT_WRITE_BLOCK_MS_PER_SECOND,
-            LABEL_TASK_ID => identity.task_id.clone(),
-            LABEL_TARGET_TASK_ID => identity.target_task_id.clone()
-        )
-        .set(ms_per_s);
-    }
-}
-
-fn record_disconnect(identity: &EdgeIdentity, labels: Option<&MetricsLabels>) {
+fn increment_disconnects(identity: &EdgeIdentity, labels: Option<&MetricsLabels>) {
     if let Some(labels) = labels {
         counter!(
             METRIC_STREAM_TASK_TRANSPORT_DISCONNECTS,
@@ -181,7 +161,7 @@ pub async fn pump_egress(
         Ok(stream) => stream,
         Err(e) => {
             if running.load(Ordering::Relaxed) {
-                record_disconnect(&identity, labels.as_ref());
+                increment_disconnects(&identity, labels.as_ref());
                 worker_health.report_fatal(
                     WorkerFatalReason::TransportDisconnect,
                     format!(
@@ -196,7 +176,7 @@ pub async fn pump_egress(
 
     if let Err(e) = write_frame(&mut stream, identity.channel_id.as_bytes()).await {
         if running.load(Ordering::Relaxed) {
-            record_disconnect(&identity, labels.as_ref());
+            increment_disconnects(&identity, labels.as_ref());
             worker_health.report_fatal(
                 WorkerFatalReason::TransportDisconnect,
                 format!(
@@ -219,7 +199,7 @@ pub async fn pump_egress(
             Ok(Some(message)) => message,
             Ok(None) => return,
             Err(_) => {
-                flush_write_block(
+                report_write_block_gauge(
                     &identity,
                     labels.as_ref(),
                     &mut window_start,
@@ -241,7 +221,7 @@ pub async fn pump_egress(
         .await
         {
             if running.load(Ordering::Relaxed) {
-                record_disconnect(&identity, labels.as_ref());
+                increment_disconnects(&identity, labels.as_ref());
                 worker_health.report_fatal(
                     WorkerFatalReason::TransportDisconnect,
                     format!("[TCP] write failed channel {}: {}", identity.channel_id, e),
@@ -272,19 +252,19 @@ async fn write_frame_sampled(
         tokio::select! {
             result = &mut write => {
                 *blocked_ns = blocked_ns.saturating_add(write_start.elapsed().as_nanos() as u64);
-                flush_write_block(identity, labels, window_start, blocked_ns);
+                report_write_block_gauge(identity, labels, window_start, blocked_ns);
                 return result;
             }
             _ = interval.tick() => {
                 *blocked_ns = blocked_ns.saturating_add(write_start.elapsed().as_nanos() as u64);
                 write_start = Instant::now();
-                flush_write_block(identity, labels, window_start, blocked_ns);
+                report_write_block_gauge(identity, labels, window_start, blocked_ns);
             }
         }
     }
 }
 
-fn flush_write_block(
+fn report_write_block_gauge(
     identity: &EdgeIdentity,
     labels: Option<&MetricsLabels>,
     window_start: &mut Instant,
@@ -294,8 +274,24 @@ fn flush_write_block(
     if elapsed < Duration::from_secs(1) {
         return;
     }
-    let ms_per_s = (*blocked_ns as f64 / 1_000_000.0) / elapsed.as_secs_f64();
-    publish_write_block(identity, labels, ms_per_s.min(1000.0));
+    let ms_per_s = ((*blocked_ns as f64 / 1_000_000.0) / elapsed.as_secs_f64()).min(1000.0);
+    if let Some(labels) = labels {
+        gauge!(
+            METRIC_STREAM_TASK_TRANSPORT_WRITE_BLOCK_MS_PER_SECOND,
+            LABEL_TASK_ID => identity.task_id.clone(),
+            LABEL_TARGET_TASK_ID => identity.target_task_id.clone(),
+            LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
+            LABEL_WORKER_ID => labels.worker_id.clone()
+        )
+        .set(ms_per_s);
+    } else {
+        gauge!(
+            METRIC_STREAM_TASK_TRANSPORT_WRITE_BLOCK_MS_PER_SECOND,
+            LABEL_TASK_ID => identity.task_id.clone(),
+            LABEL_TARGET_TASK_ID => identity.target_task_id.clone()
+        )
+        .set(ms_per_s);
+    }
     *blocked_ns = 0;
     *window_start = Instant::now();
 }
@@ -310,7 +306,9 @@ pub async fn bind_ingress(port: i32) -> std::io::Result<TcpListener> {
     Ok(listener)
 }
 
-/// Accept connections and spawn one ingress pump per logical edge.
+/// Accept until every expected ingress `channel_id` is claimed, then drop the
+/// listener (pumps keep running until shutdown). Returning here would abort
+/// those pumps via `AbortOnDropHandles`.
 pub async fn listen_ingress(
     listener: TcpListener,
     senders: Arc<Mutex<HashMap<String, (EdgeIdentity, BatchSender)>>>,
@@ -321,13 +319,25 @@ pub async fn listen_ingress(
 ) {
     tokio::pin!(shutdown_rx);
     let mut ingress_tasks = AbortOnDropHandles(Vec::new());
+    let expected_done = Arc::new(Notify::new());
+    let mut listener = Some(listener);
     loop {
         tokio::select! {
             _ = &mut shutdown_rx => {
                 println!("[TCP] listen shutdown");
                 return;
             }
-            accept = listener.accept() => {
+            _ = expected_done.notified(), if listener.is_some() => {
+                println!("[TCP] expected ingress edges connected");
+                listener = None;
+            }
+            accept = async {
+                listener
+                    .as_mut()
+                    .expect("accept armed only while listening")
+                    .accept()
+                    .await
+            }, if listener.is_some() => {
                 match accept {
                     Ok((mut stream, peer)) => {
                         let _ = stream.set_nodelay(true);
@@ -335,6 +345,7 @@ pub async fn listen_ingress(
                         let worker_health = worker_health.clone();
                         let running = running.clone();
                         let labels = labels.clone();
+                        let expected_done = expected_done.clone();
                         ingress_tasks.push(tokio::spawn(async move {
                             serve_ingress(
                                 &mut stream,
@@ -343,6 +354,7 @@ pub async fn listen_ingress(
                                 worker_health,
                                 running,
                                 labels,
+                                expected_done,
                             )
                             .await;
                         }));
@@ -369,6 +381,7 @@ async fn serve_ingress(
     worker_health: Arc<WorkerHealth>,
     running: Arc<AtomicBool>,
     labels: Option<MetricsLabels>,
+    expected_done: Arc<Notify>,
 ) {
     let handshake = match read_frame(stream).await {
         Ok(Some(bytes)) => bytes,
@@ -395,19 +408,24 @@ async fn serve_ingress(
             return;
         }
     };
-    let Some((identity, sender)) = senders
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .remove(&channel_id)
-    else {
-        if running.load(Ordering::Relaxed) {
-            worker_health.report_fatal(
-                WorkerFatalReason::TransportDisconnect,
-                format!("[TCP] unknown or duplicate channel {channel_id} from {peer}"),
-            );
-        }
-        return;
+    let (identity, sender, all_claimed) = {
+        let mut guard = senders.lock().unwrap_or_else(|e| e.into_inner());
+        let Some((identity, sender)) = guard.remove(&channel_id) else {
+            drop(guard);
+            if running.load(Ordering::Relaxed) {
+                worker_health.report_fatal(
+                    WorkerFatalReason::TransportDisconnect,
+                    format!("[TCP] unknown or duplicate channel {channel_id} from {peer}"),
+                );
+            }
+            return;
+        };
+        let all_claimed = guard.is_empty();
+        (identity, sender, all_claimed)
     };
+    if all_claimed {
+        expected_done.notify_one();
+    }
 
     loop {
         if !running.load(Ordering::Relaxed) {
@@ -417,7 +435,7 @@ async fn serve_ingress(
             Ok(Some(bytes)) => bytes,
             Ok(None) => {
                 if running.load(Ordering::Relaxed) {
-                    record_disconnect(&identity, labels.as_ref());
+                    increment_disconnects(&identity, labels.as_ref());
                     worker_health.report_fatal(
                         WorkerFatalReason::TransportDisconnect,
                         format!("[TCP] peer closed channel {}", identity.channel_id),
@@ -427,7 +445,7 @@ async fn serve_ingress(
             }
             Err(e) => {
                 if running.load(Ordering::Relaxed) {
-                    record_disconnect(&identity, labels.as_ref());
+                    increment_disconnects(&identity, labels.as_ref());
                     worker_health.report_fatal(
                         WorkerFatalReason::TransportDisconnect,
                         format!("[TCP] read failed channel {}: {}", identity.channel_id, e),
@@ -440,7 +458,7 @@ async fn serve_ingress(
             Ok(message) => message,
             Err(_) => {
                 if running.load(Ordering::Relaxed) {
-                    record_disconnect(&identity, labels.as_ref());
+                    increment_disconnects(&identity, labels.as_ref());
                     worker_health.report_fatal(
                         WorkerFatalReason::TransportDisconnect,
                         format!("[TCP] decode failed channel {}", identity.channel_id),
@@ -451,7 +469,7 @@ async fn serve_ingress(
         };
         if sender.send(message, None).await.is_err() {
             if running.load(Ordering::Relaxed) {
-                record_disconnect(&identity, labels.as_ref());
+                increment_disconnects(&identity, labels.as_ref());
                 worker_health.report_fatal(
                     WorkerFatalReason::TransportDisconnect,
                     format!("[TCP] local queue closed channel {}", identity.channel_id),
@@ -465,6 +483,7 @@ async fn serve_ingress(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transport::batch_channel::batch_bounded_channel;
 
     async fn connected_pair() -> (TcpStream, TcpStream) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -498,5 +517,44 @@ mod tests {
             tokio::spawn(async move { connect_with_retry(&endpoint, &running).await.unwrap() });
         let (_server, _) = listener.accept().await.unwrap();
         connect.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn listen_stops_accepting_after_expected_edges_claimed() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, _rx) = batch_bounded_channel(8);
+        let senders = Arc::new(Mutex::new(HashMap::from([(
+            "a_to_b".to_string(),
+            (
+                EdgeIdentity {
+                    channel_id: "a_to_b".into(),
+                    task_id: "a".into(),
+                    target_task_id: "b".into(),
+                },
+                tx,
+            ),
+        )])));
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let running = Arc::new(AtomicBool::new(true));
+        let health = Arc::new(WorkerHealth::new());
+        let listen = tokio::spawn(async move {
+            listen_ingress(listener, senders, health, running, None, shutdown_rx).await;
+        });
+
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        write_frame(&mut client, b"a_to_b").await.unwrap();
+
+        let start = Instant::now();
+        let refused = loop {
+            match TcpStream::connect(addr).await {
+                Err(e) if e.kind() == io::ErrorKind::ConnectionRefused => break true,
+                Ok(_) | Err(_) if start.elapsed() > Duration::from_secs(2) => break false,
+                Ok(_) | Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+            }
+        };
+        assert!(refused, "listener should drop after the expected channel is claimed");
+        let _ = shutdown_tx.send(());
+        listen.await.unwrap();
     }
 }
