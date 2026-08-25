@@ -136,9 +136,12 @@ impl BatchSender {
                 }
             } else {
                 // not enough room in the queue, wait to be notified that the receiver has
-                // consumed
+                // consumed — or that the receiver was dropped (closed is fatal).
                 let _wait = bp.map(|b| b.begin_wait());
-                self.notify.notified().await;
+                tokio::select! {
+                    _ = self.notify.notified() => {}
+                    _ = self.tx.closed() => {}
+                }
             }
         }
     }

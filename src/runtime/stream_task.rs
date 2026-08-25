@@ -538,10 +538,8 @@ impl StreamTask {
 
     // Helper function to send message to collectors (similar to original stream_task.rs).
     async fn send_to_collectors_if_needed(
-        mut collectors_per_target_operator: &mut HashMap<String, Collector>,
+        collectors_per_target_operator: &mut HashMap<String, Collector>,
         message: Message,
-        vertex_id: VertexId,
-        status: Arc<AtomicU8>
     ) {
         if collectors_per_target_operator.is_empty() {
             // Edge operator - no downstream collectors
@@ -555,43 +553,13 @@ impl StreamTask {
             channels_to_send_per_operator.insert(target_operator_id.clone(), partitioned_channels);
         }
 
-        // TODO should retires be inside transport?
-        let mut retries_before_close = 3; // per - messages
-
-        // send message to all destinations until no backpressure
-        while status.load(Ordering::SeqCst) == StreamTaskStatus::Running as u8 ||
-            status.load(Ordering::SeqCst) == StreamTaskStatus::Finished as u8 {
-            
-            if status.load(Ordering::SeqCst) == StreamTaskStatus::Finished as u8 {
-                if retries_before_close == 0 {
-                    panic!("StreamTask {:?} gave up on writing message {:?}", vertex_id, message);
-                }
-                retries_before_close -= 1;
-            }
-
-            let write_results = Collector::write_message_to_operators(
-                &mut collectors_per_target_operator, 
-                &message, 
-                channels_to_send_per_operator.clone()
-            ).await;
-            
-            channels_to_send_per_operator.clear();
-            for (target_operator_id, write_res) in write_results {
-                let mut resend_channels = vec![];
-                for channel in write_res.keys() {
-                    let success = write_res.get(channel).unwrap();
-                    if !success {
-                        resend_channels.push(channel.clone());
-                    }
-                }
-                if !resend_channels.is_empty() {
-                    channels_to_send_per_operator.insert(target_operator_id.clone(), resend_channels);
-                }
-            }
-            if channels_to_send_per_operator.len() == 0 {
-                break;
-            }
-        }
+        // Wait-until-queued: false means the edge already reported fatal. Do not resend.
+        let _ = Collector::write_message_to_operators(
+            collectors_per_target_operator,
+            &message,
+            channels_to_send_per_operator,
+        )
+        .await;
     }
 
     fn report_task_time_metrics(
@@ -999,8 +967,6 @@ impl StreamTask {
                         Self::send_to_collectors_if_needed(
                             &mut collectors_per_target_operator,
                             message,
-                            vertex_id.clone(),
-                            status.clone()
                         ).await;
 
                         if let Some(wm) = injected_wm {
@@ -1023,8 +989,6 @@ impl StreamTask {
                             Self::send_to_collectors_if_needed(
                                 &mut collectors_per_target_operator,
                                 injected,
-                                vertex_id.clone(),
-                                status.clone(),
                             )
                             .await;
                         }
@@ -1040,8 +1004,6 @@ impl StreamTask {
                             Self::send_to_collectors_if_needed(
                                 &mut collectors_per_target_operator,
                                 wm,
-                                vertex_id.clone(),
-                                status.clone(),
                             )
                             .await;
                         } else {

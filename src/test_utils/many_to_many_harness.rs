@@ -400,7 +400,7 @@ where
 
     // Paused-edge sends are allowed to block; they must not return false (assert
     // in the task) and must not stall other edges. Abort them after live traffic
-    // finishes — `write_message` still has a 5s×10 timeout until the write-path PR.
+    // so the test can close without waiting on the paused dest.
     let send_timeout = config.read_timeout;
     tokio::time::timeout(send_timeout, async {
         for handle in live_sends {

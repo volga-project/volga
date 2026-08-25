@@ -6,7 +6,6 @@ use std::time::Duration;
 use tokio::{sync::mpsc::error::SendError, task::JoinHandle, time};
 use tokio::sync::Notify;
 use futures::stream;
-use crate::transport::batcher::BatcherConfig;
 use std::sync::{Arc, atomic::{AtomicBool, AtomicU32, Ordering}};
 use crate::runtime::VertexId;
 
@@ -239,10 +238,6 @@ pub struct DataWriter {
     worker_health: Arc<WorkerHealth>,
     /// Task-scoped queue-wait clock (ratio gauges + task time BP share this write path).
     backpressure_tracker: Option<Arc<BackpressureTracker>>,
-    // batcher: Batcher,
-    default_timeout: Duration,
-    default_retries: usize,
-    _batching_config: BatcherConfig,
 }
 
 impl DataWriter {
@@ -252,19 +247,12 @@ impl DataWriter {
         metrics_labels: Option<MetricsLabels>,
         worker_health: Arc<WorkerHealth>,
     ) -> Self {
-        let batching_config = BatcherConfig::default();
-        // let batcher = Batcher::new(batching_config.clone(), senders.clone());
-
         Self {
             vertex_id,
             senders,
             metrics_labels,
             worker_health,
             backpressure_tracker: None,
-            // batcher,
-            default_timeout: Duration::from_millis(5000),
-            default_retries: 10,
-            _batching_config: batching_config,
         }
     }
 
@@ -272,12 +260,9 @@ impl DataWriter {
         self.backpressure_tracker = Some(bp);
     }
 
-    pub async fn start(&mut self) {
-        // self.batcher.start().await
-    }
+    pub async fn start(&mut self) {}
 
     pub async fn flush_and_close(&mut self) -> Result<(), SendError<Message>> {
-        // self.batcher.flush_and_close().await
         Ok(())
     }
 
@@ -333,55 +318,32 @@ impl DataWriter {
         }
     }
 
+    /// Queue the message, waiting on the bound. `true` = queued; `false` = closed + fatal.
     pub async fn write_message(&mut self, channel: &Channel, message: &Message) -> bool {
-        self.write_message_with_params(channel, message, self.default_timeout, self.default_retries)
-            .await
-    }
-
-    async fn write_message_with_params(
-        &mut self,
-        channel: &Channel,
-        message: &Message,
-        timeout_duration: Duration,
-        retries: usize,
-    ) -> bool {
-        let mut attempts = 0;
+        if self.senders.is_empty() {
+            panic!("DataWriter {:?} no channels registered", self.vertex_id);
+        }
+        let channel_id = channel.get_channel_id();
+        let Some(sender) = self.senders.get(&channel_id) else {
+            panic!("DataWriter {:?} channel {} not found", self.vertex_id, channel_id);
+        };
+        let target_vertex_id = channel.get_target_vertex_id();
         let bp = self.backpressure_tracker.as_deref();
-
-        while attempts <= retries {
-            if self.senders.is_empty() {
-                panic!("DataWriter {:?} no channels registered", self.vertex_id);
-            }
-            let channel_id = channel.get_channel_id();
-            if let Some(sender) = self.senders.get(&channel_id) {
-                let target_vertex_id = channel.get_target_vertex_id();
-                // Same path as task time BP: sample queue, then send (waits record on `bp`).
-                self.publish_queue_metrics(sender, &target_vertex_id);
-                match time::timeout(timeout_duration, sender.send(message.clone(), bp)).await {
-                    Ok(Ok(())) => return true,
-                    Ok(Err(_)) => {
-                        self.worker_health.report_fatal(
-                            WorkerFatalReason::TransportDisconnect,
-                            format!(
-                                "DataWriter {:?} channel {} closed",
-                                self.vertex_id, channel_id
-                            ),
-                        );
-                        return false;
-                    }
-                    Err(_) => {
-                        // Timed out mid-wait: WaitGuard drop still accounts blocked time on `bp`.
-                        println!("DataWriter {:?} timeout", self.vertex_id);
-                        attempts += 1;
-                        continue;
-                    }
-                }
-            } else {
-                panic!("DataWriter {:?} channel {} not found", self.vertex_id, channel_id);
+        // Same path as task time BP: sample queue, then send (waits record on `bp`).
+        self.publish_queue_metrics(sender, &target_vertex_id);
+        match sender.send(message.clone(), bp).await {
+            Ok(()) => true,
+            Err(_) => {
+                self.worker_health.report_fatal(
+                    WorkerFatalReason::TransportDisconnect,
+                    format!(
+                        "DataWriter {:?} channel {} closed",
+                        self.vertex_id, channel_id
+                    ),
+                );
+                false
             }
         }
-
-        false
     }
 
     pub fn get_queue_size_and_capacity(&self, channel_id: &str) -> Option<(u32, u32)> {
@@ -428,5 +390,91 @@ impl TransportClient {
 
     pub fn vertex_id(&self) -> &str {
         self.vertex_id.as_ref()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::message::WatermarkMessage;
+    use crate::transport::batch_channel::batch_bounded_channel;
+    use std::time::Duration;
+    use tokio::time::sleep;
+
+    fn wm(i: u64) -> Message {
+        Message::Watermark(WatermarkMessage::new("t".to_string(), i, Some(0)))
+    }
+
+    fn writer_with_queue(queue: u32) -> (Channel, DataWriter, BatchReceiver, Arc<WorkerHealth>) {
+        let channel = Channel::new_local_with_queue("w".to_string(), "r".to_string(), queue);
+        let (tx, rx) = batch_bounded_channel(queue);
+        let health = Arc::new(WorkerHealth::new());
+        let writer = DataWriter::new(
+            Arc::from("w"),
+            HashMap::from([(channel.get_channel_id(), tx)]),
+            None,
+            health.clone(),
+        );
+        (channel, writer, rx, health)
+    }
+
+    #[tokio::test]
+    async fn write_message_waits_until_queued() {
+        let (channel, mut writer, mut rx, health) = writer_with_queue(1);
+        assert!(writer.write_message(&channel, &wm(1)).await);
+
+        let mut blocked_writer = writer.clone();
+        let blocked_channel = channel.clone();
+        let blocked = tokio::spawn(async move {
+            blocked_writer.write_message(&blocked_channel, &wm(2)).await
+        });
+
+        sleep(Duration::from_millis(30)).await;
+        assert!(
+            !blocked.is_finished(),
+            "send should wait while the queue is full"
+        );
+
+        assert!(rx.recv().await.is_some());
+        assert!(
+            blocked.await.expect("blocked send task panicked"),
+            "send should complete after one recv"
+        );
+        assert!(health.last_fatal().is_none());
+    }
+
+    #[tokio::test]
+    async fn write_message_false_and_fatal_on_closed() {
+        let (channel, mut writer, rx, health) = writer_with_queue(2);
+        drop(rx);
+        assert!(!writer.write_message(&channel, &wm(1)).await);
+        assert!(matches!(
+            health.last_fatal().expect("expected fatal").reason,
+            WorkerFatalReason::TransportDisconnect
+        ));
+    }
+
+    #[tokio::test]
+    async fn write_message_false_and_fatal_when_closed_while_waiting() {
+        let (channel, mut writer, rx, health) = writer_with_queue(1);
+        assert!(writer.write_message(&channel, &wm(1)).await);
+
+        let mut blocked_writer = writer.clone();
+        let blocked_channel = channel.clone();
+        let blocked = tokio::spawn(async move {
+            blocked_writer.write_message(&blocked_channel, &wm(2)).await
+        });
+
+        sleep(Duration::from_millis(30)).await;
+        assert!(!blocked.is_finished());
+        drop(rx);
+        assert!(
+            !blocked.await.expect("blocked send task panicked"),
+            "closed channel must return false"
+        );
+        assert!(matches!(
+            health.last_fatal().expect("expected fatal").reason,
+            WorkerFatalReason::TransportDisconnect
+        ));
     }
 }
