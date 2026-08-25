@@ -1,7 +1,6 @@
 use crate::api::{compile_logical_graph, PipelineSpec};
 use crate::orchestrator::task_assignment::TaskWorkerMapping;
 use crate::runtime::execution_graph::ExecutionGraph;
-use crate::transport::transport_backend_actor::TransportBackendType;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,15 +23,12 @@ pub fn build_execution_graph(
 
 pub fn resolve_num_threads_per_task(spec: &PipelineSpec) -> usize {
     match spec.execution_profile.clone() {
-        Some(crate::api::ExecutionProfile::MasterWorker { num_threads_per_task }) => num_threads_per_task,
-        Some(crate::api::ExecutionProfile::SingleWorker { num_threads_per_task }) => num_threads_per_task,
+        Some(crate::api::ExecutionProfile::MasterWorker {
+            num_threads_per_task,
+        }) => num_threads_per_task,
+        Some(crate::api::ExecutionProfile::SingleWorker {
+            num_threads_per_task,
+        }) => num_threads_per_task,
         None => 4,
     }
-}
-
-pub fn resolve_transport_backend_type(
-    _execution_graph: &ExecutionGraph,
-    _vertex_ids: &[String],
-) -> TransportBackendType {
-    TransportBackendType::Grpc
 }

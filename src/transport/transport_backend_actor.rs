@@ -25,11 +25,6 @@ pub enum TransportBackendActorMessage {
     Close
 }
 
-#[derive(Debug, Clone)]
-pub enum TransportBackendType {
-    Grpc,
-}
-
 #[derive(Actor)]
 pub struct TransportBackendActor {
     backend: Box<dyn TransportBackendTrait + Send + 'static>,

@@ -5,7 +5,6 @@ use crate::common::types::PipelineId;
 use crate::runtime::checkpoint::{SerializedRestore, TaskKey};
 use crate::runtime::execution_graph::ExecutionGraph;
 use crate::runtime::VertexId;
-use crate::transport::transport_backend_actor::TransportBackendType;
 
 #[derive(Debug, Clone)]
 pub struct WorkerConfig {
@@ -15,7 +14,6 @@ pub struct WorkerConfig {
     pub graph: ExecutionGraph,
     pub vertex_ids: Vec<VertexId>,
     pub num_threads_per_task: usize,
-    pub transport_backend_type: TransportBackendType,
     pub master_addr: Option<String>,
     pub task_restore_data: HashMap<TaskKey, SerializedRestore>,
     pub operator_state_backend: OperatorStateBackendConfig,
@@ -33,7 +31,6 @@ impl WorkerConfig {
         graph: ExecutionGraph,
         vertex_ids: Vec<VertexId>,
         num_threads_per_task: usize,
-        transport_backend_type: TransportBackendType,
     ) -> Self {
         Self {
             worker_id,
@@ -42,7 +39,6 @@ impl WorkerConfig {
             graph,
             vertex_ids,
             num_threads_per_task,
-            transport_backend_type,
             master_addr: None,
             task_restore_data: HashMap::new(),
             operator_state_backend: OperatorStateBackendConfig::default(),

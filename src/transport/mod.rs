@@ -1,10 +1,10 @@
 pub mod channel;
 pub mod transport_client;
 pub mod transport_backend_actor;
-pub mod grpc;
 pub mod transport_backend;
 pub mod batch_channel;
 pub mod transport_spec;
+pub mod tcp;
 
 pub use transport_client::{TransportClient, DataReader, DataWriter};
 pub use transport_backend::TransportBackend;

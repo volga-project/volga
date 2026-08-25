@@ -1,71 +1,44 @@
 use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
-use std::time::Duration;
-use tokio::sync::mpsc;
-use tokio::time;
-use crate::common::message::Message;
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
+
 use crate::runtime::execution_graph::ExecutionGraph;
-use crate::runtime::health::{WorkerFatalReason, WorkerHealth};
+use crate::runtime::health::WorkerHealth;
+use crate::runtime::metrics::MetricsLabels;
 use crate::runtime::VertexId;
 use crate::transport::batch_channel::{batch_bounded_channel, BatchReceiver, BatchSender};
 use crate::transport::channel::Channel;
-use crate::transport::grpc::grpc_streaming_service::{
-    MessageStreamClient, MessageStreamServiceImpl,
-};
+use crate::transport::tcp::{self, EdgeIdentity, RemoteEndpoint};
 use crate::transport::TransportBackendTrait;
-use async_trait::async_trait;
-use std::sync::Arc;
-use tokio::sync::oneshot;
 
 use super::transport_client::TransportClientConfig;
 
 type ChannelId = String;
-type NodeId = String;
-type NodeIp = String;
-type TransportPort = i32;
-type RemoteNodeAddr = (NodeId, NodeIp, TransportPort);
 
 type ReaderReceivers = HashMap<ChannelId, BatchReceiver>;
 type WriterSenders = HashMap<ChannelId, BatchSender>;
 
-type RemoteReaderSenders = HashMap<ChannelId, BatchSender>;
-type RemoteWriterReceivers = HashMap<ChannelId, BatchReceiver>;
+type RemoteReaderSenders = HashMap<ChannelId, (EdgeIdentity, BatchSender)>;
+type RemoteWriterReceivers = HashMap<ChannelId, (EdgeIdentity, RemoteEndpoint, BatchReceiver)>;
 
 type LocalChannels = HashMap<ChannelId, (BatchSender, Option<BatchReceiver>)>;
 
 /// Unified transport backend:
-/// - local channels are in-proc queue wiring
-/// - remote channels are bridged over gRPC
+/// - local channels are in-proc `BatchChannel` wiring
+/// - remote channels: one TCP connection per logical edge, drained by a per-edge pump
 ///
-/// Topology model:
-/// - Local channels are wired directly in `init_channels` (same as in-memory semantics):
-///   source task gets a writer sender, target task gets a reader receiver.
-/// - Remote channels are split into:
-///   - `remote_reader_senders`: ingress queues for remote input channels
-///   - `remote_writer_receivers`: egress queues for remote output channels
-/// - Remote output channels are also indexed by destination node via `channel_to_node`,
-///   and clients are created per destination node in `nodes`.
-/// - This means remote traffic is multiplexed by `channel_id` over shared per-node client
-///   streams/queues (not dedicated task-to-task sockets). Under skew or slow consumers,
-///   this can create cross-channel backpressure / head-of-line effects on shared paths.
-///
-/// Runtime flow:
-/// 1) `start_reading_side` optionally starts a gRPC server (if remote inputs exist) and
-///    routes received `(message, channel_id)` items into `remote_reader_senders`.
-/// 2) `start_writing_side` optionally starts per-node gRPC clients (if remote outputs exist)
-///    and drains `remote_writer_receivers`, routing each channel to its destination node.
-/// 3) `close` stops server/clients/tasks and joins all handles.
+/// Flow control is the 8192-record queue plus the TCP window. No credit protocol.
 pub struct TransportBackend {
-    server_handle: Option<tokio::task::JoinHandle<()>>,
-    client_handles: Vec<tokio::task::JoinHandle<()>>,
-    reader_task: Option<tokio::task::JoinHandle<()>>,
-    writer_task: Option<tokio::task::JoinHandle<()>>,
+    server_handle: Option<JoinHandle<()>>,
+    pump_handles: Vec<JoinHandle<()>>,
 
-    remote_reader_senders: Option<HashMap<ChannelId, BatchSender>>,
-    remote_writer_receivers: Option<HashMap<ChannelId, BatchReceiver>>,
+    remote_reader_senders: Option<RemoteReaderSenders>,
+    remote_writer_receivers: Option<RemoteWriterReceivers>,
 
-    nodes: Option<Vec<RemoteNodeAddr>>,
-    channel_to_node: Option<HashMap<ChannelId, NodeId>>,
     port: Option<i32>,
     has_remote_channels: bool,
 
@@ -73,33 +46,35 @@ pub struct TransportBackend {
     shutdown_rx: Option<oneshot::Receiver<()>>,
     running: Arc<AtomicBool>,
     worker_health: Arc<WorkerHealth>,
+    metrics_labels: Option<MetricsLabels>,
 }
 
 impl TransportBackend {
-    const GRPC_SERVER_QUEUE_SIZE: usize = 10; // single mpsc channel reading from grpc server and forwarding to local clients (readers)
-    const GRPC_CLIENT_QUEUE_SIZE: usize = 10; // mpsc channel per peer node, reading local client (writers) and forwarding to remote grpc clients
-
     pub fn new(worker_health: Arc<WorkerHealth>) -> Self {
+        Self::new_with_labels(worker_health, None)
+    }
+
+    pub fn new_with_labels(
+        worker_health: Arc<WorkerHealth>,
+        metrics_labels: Option<MetricsLabels>,
+    ) -> Self {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         Self {
             server_handle: None,
-            client_handles: Vec::new(),
-            reader_task: None,
-            writer_task: None,
+            pump_handles: Vec::new(),
             remote_reader_senders: None,
             remote_writer_receivers: None,
-            nodes: None,
-            channel_to_node: None,
             port: None,
             has_remote_channels: false,
             shutdown_tx: Some(shutdown_tx),
             shutdown_rx: Some(shutdown_rx),
             running: Arc::new(AtomicBool::new(false)),
             worker_health,
+            metrics_labels,
         }
     }
 
-    fn get_host_port_from_in_channels(&self, in_channels: &[Channel]) -> i32 {
+    fn listen_port_from_in_channels(in_channels: &[Channel]) -> i32 {
         let mut ports = in_channels
             .iter()
             .map(|channel| match channel {
@@ -121,285 +96,41 @@ impl TransportBackend {
         }
     }
 
-    fn get_remote_nodes_from_out_channels(
-        &self,
-        out_channels: &[Channel],
-    ) -> (Vec<RemoteNodeAddr>, HashMap<ChannelId, NodeId>) {
-        let mut nodes_by_id: HashMap<NodeId, (NodeIp, TransportPort)> = HashMap::new();
-        let mut channel_to_node: HashMap<ChannelId, NodeId> = HashMap::new();
+    fn edge_identity(channel: &Channel) -> EdgeIdentity {
+        EdgeIdentity {
+            channel_id: channel.get_channel_id(),
+            task_id: channel.get_source_vertex_id(),
+            target_task_id: channel.get_target_vertex_id(),
+        }
+    }
 
-        for channel in out_channels {
-            let (
-                channel_id,
-                target_node_id,
+    fn remote_endpoint(channel: &Channel) -> RemoteEndpoint {
+        match channel {
+            Channel::Remote {
                 target_node_ip,
-                target_port,
-            ) = match channel {
-                Channel::Remote {
-                    channel_id,
-                    target_node_id,
-                    target_node_ip,
-                    target_transport_port,
-                    ..
-                } => (
-                    channel_id.clone(),
-                    target_node_id.clone(),
-                    target_node_ip.clone(),
-                    *target_transport_port,
-                ),
-                Channel::Local { .. } => panic!("Expected only remote channels"),
-            };
-
-            channel_to_node.insert(channel_id, target_node_id.clone());
-
-            match nodes_by_id.entry(target_node_id.clone()) {
-                std::collections::hash_map::Entry::Vacant(v) => {
-                    v.insert((target_node_ip, target_port));
-                }
-                std::collections::hash_map::Entry::Occupied(o) => {
-                    let (existing_ip, _existing_port) = o.get();
-                    if existing_ip != &target_node_ip {
-                        panic!("Node id<->ip mismatch");
-                    }
-                }
-            }
+                target_transport_port,
+                ..
+            } => RemoteEndpoint {
+                host: target_node_ip.clone(),
+                port: u16::try_from(*target_transport_port).unwrap_or_else(|_| {
+                    panic!("invalid transport port {target_transport_port}")
+                }),
+            },
+            Channel::Local { .. } => panic!("Expected remote channel"),
         }
-
-        let node_list: Vec<RemoteNodeAddr> = nodes_by_id
-            .into_iter()
-            .map(|(node_id, (ip, port))| (node_id, ip, port))
-            .collect();
-        (node_list, channel_to_node)
     }
 
-    async fn start_reading_side(
-        &mut self,
-        remote_reader_senders: HashMap<ChannelId, BatchSender>,
-    ) {
-        // Start reading side only when this worker has remote input channels.
-        let Some(port) = self.port else {
-            return;
-        };
-
-        let (server_tx, mut server_rx) = mpsc::channel(Self::GRPC_SERVER_QUEUE_SIZE);
-        let shutdown_rx = self
-            .shutdown_rx
-            .take()
-            .expect("[GRPC_BACKEND] missing shutdown receiver");
-        let server_handle = tokio::spawn(async move {
-            let addr = format!("0.0.0.0:{}", port)
-                .parse()
-                .expect("[GRPC_BACKEND] invalid listen address");
-            let service = MessageStreamServiceImpl::new(server_tx);
-            let svc = crate::common::grpc::transport::message_stream_server(service);
-
-            println!("[GRPC_BACKEND] Starting gRPC server on {}", addr);
-
-            let router = crate::common::grpc::server_builder().add_service(svc);
-            crate::common::grpc::serve_with_shutdown(addr, router, async {
-                let _ = shutdown_rx.await;
-                println!("[SERVER] Received shutdown signal");
-            })
-            .await
-            .expect("[GRPC_BACKEND] gRPC server failed");
-        });
-        self.server_handle = Some(server_handle);
-
-        // Route messages from gRPC server ingress to remote input channel queues.
-        let running = self.running.clone();
-        let worker_health = self.worker_health.clone();
-        let reader_task = tokio::spawn(async move {
-            while running.load(std::sync::atomic::Ordering::Relaxed) {
-                match time::timeout(Duration::from_millis(100), server_rx.recv()).await {
-                    Ok(Some((message, channel_id))) => {
-                        // THIS WILL CAUSE BACKPRESSURE FOR ALL CHANNELS IF ONE CHANNEL IS BLOCKED
-                        let sender = remote_reader_senders.get(&channel_id).unwrap();
-                        while running.load(std::sync::atomic::Ordering::Relaxed) {
-                            match time::timeout(
-                                Duration::from_millis(100),
-                                sender.send(message.clone(), None),
-                            )
-                            .await
-                            {
-                                Ok(Ok(())) => break,
-                                Ok(Err(e)) => {
-                                    worker_health.report_fatal(
-                                        WorkerFatalReason::TransportDisconnect,
-                                        format!(
-                                            "[GRPC_BACKEND] Failed to forward message to channel {}: {}",
-                                            channel_id, e
-                                        ),
-                                    );
-                                    return;
-                                }
-                                Err(_) => continue,
-                            }
-                        }
-                    }
-                    Ok(None) => {
-                        if running.load(std::sync::atomic::Ordering::Relaxed) {
-                            worker_health.report_fatal(
-                                WorkerFatalReason::TransportDisconnect,
-                                "[GRPC_BACKEND] Server channel closed".to_string(),
-                            );
-                            return;
-                        }
-                    }
-                    Err(_) => continue,
-                }
-            }
-        });
-        self.reader_task = Some(reader_task);
-    }
-
-    async fn start_writing_side(
-        &mut self,
-        remote_writer_receivers: HashMap<ChannelId, BatchReceiver>,
-    ) {
-        if remote_writer_receivers.is_empty() {
-            return;
-        }
-
-        let channel_to_node: HashMap<ChannelId, NodeId> =
-            self.channel_to_node.take().expect("Remote channel mapping should be found");
-        let nodes = self.nodes.take().expect("Remote nodes should be found");
-        let worker_health = self.worker_health.clone();
-        let mut client_txs: HashMap<NodeId, mpsc::Sender<(Message, ChannelId)>> = HashMap::new();
-
-        for (peer_node_id, peer_node_ip, target_port) in nodes {
-            let server_addr = format!("http://{}:{}", peer_node_ip, target_port);
-            let (client_tx, client_rx) = mpsc::channel(Self::GRPC_CLIENT_QUEUE_SIZE);
-            client_txs.insert(peer_node_id.clone(), client_tx);
-            let worker_health = worker_health.clone();
-            let client_stream_task = tokio::spawn(async move {
-                let mut client = match MessageStreamClient::connect(server_addr.clone()).await {
-                    Ok(client) => client,
-                    Err(e) => {
-                        worker_health.report_fatal(
-                            WorkerFatalReason::TransportDisconnect,
-                            format!(
-                                "[GRPC_BACKEND] failed to connect remote node {}: {}",
-                                server_addr, e
-                            ),
-                        );
-                        return;
-                    }
-                };
-                if let Err(e) = client.stream_messages(client_rx).await {
-                    worker_health.report_fatal(
-                        WorkerFatalReason::TransportDisconnect,
-                        format!("[GRPC_BACKEND] remote stream_messages failed: {}", e),
-                    );
-                }
-            });
-            self.client_handles.push(client_stream_task);
-        }
-
-        // Route remote output channel queues to per-node gRPC clients.
-        let running = self.running.clone();
-        let worker_health = self.worker_health.clone();
-        let writer_task = tokio::spawn(async move {
-            let mut receiver_futures = Vec::new();
-
-            for (channel_id, mut receiver) in remote_writer_receivers {
-                let channel_id_clone = channel_id.clone();
-                let client_txs_clone = client_txs.clone();
-                let channel_to_node_clone = channel_to_node.clone();
-                let worker_health = worker_health.clone();
-
-                let r = running.clone();
-                let future = async move {
-                    while r.load(std::sync::atomic::Ordering::Relaxed) {
-                        match time::timeout(Duration::from_millis(100), receiver.recv()).await {
-                            Ok(Some(message)) => {
-                                let node_id = channel_to_node_clone
-                                    .get(&channel_id_clone)
-                                    .unwrap_or_else(|| {
-                                        panic!(
-                                            "[GRPC_BACKEND] Missing remote target mapping for channel {}",
-                                            channel_id_clone
-                                        )
-                                    });
-                                let client_tx = client_txs_clone.get(node_id).unwrap_or_else(|| {
-                                    panic!(
-                                        "[GRPC_BACKEND] Missing remote client for node {} (channel {})",
-                                        node_id, channel_id_clone
-                                    )
-                                });
-                                while r.load(std::sync::atomic::Ordering::Relaxed) {
-                                    match time::timeout(
-                                        Duration::from_millis(100),
-                                        client_tx.send((message.clone(), channel_id_clone.clone())),
-                                    )
-                                    .await
-                                    {
-                                        Ok(Ok(())) => break,
-                                        Ok(Err(e)) => {
-                                            worker_health.report_fatal(
-                                                WorkerFatalReason::TransportDisconnect,
-                                                format!(
-                                                    "[GRPC_BACKEND] Failed to send message to client {}: {}",
-                                                    node_id, e
-                                                ),
-                                            );
-                                            return;
-                                        }
-                                        Err(_) => continue,
-                                    }
-                                }
-                            }
-                            Ok(None) => break,
-                            Err(_) => continue,
-                        }
-                    }
-                };
-
-                receiver_futures.push(Box::pin(future));
-            }
-
-            let _ = futures::future::join_all(receiver_futures).await;
-        });
-        self.writer_task = Some(writer_task);
-    }
-
-    fn derive_remote_connection_args(
-        &self,
-        input_channels: &[Channel],
-        output_channels: &[Channel],
-    ) -> (
-        Option<TransportPort>,
-        Option<HashMap<ChannelId, NodeId>>,
-        Option<Vec<RemoteNodeAddr>>,
-    ) {
+    fn derive_listen_port(input_channels: &[Channel]) -> Option<i32> {
         let remote_input_channels: Vec<Channel> = input_channels
             .iter()
-            .filter_map(|channel| match channel {
-                Channel::Remote { .. } => Some(channel.clone()),
-                Channel::Local { .. } => None,
-            })
+            .filter(|channel| matches!(channel, Channel::Remote { .. }))
+            .cloned()
             .collect();
-        let port = if remote_input_channels.is_empty() {
+        if remote_input_channels.is_empty() {
             None
         } else {
-            Some(self.get_host_port_from_in_channels(&remote_input_channels))
-        };
-
-        let remote_output_channels: Vec<Channel> = output_channels
-            .iter()
-            .filter_map(|channel| match channel {
-                Channel::Remote { .. } => Some(channel.clone()),
-                Channel::Local { .. } => None,
-            })
-            .collect();
-        let (channel_to_node, remote_nodes) = if remote_output_channels.is_empty() {
-            (None, None)
-        } else {
-            let (remote_nodes, channel_to_node) =
-                self.get_remote_nodes_from_out_channels(&remote_output_channels);
-            (Some(channel_to_node), Some(remote_nodes))
-        };
-
-        (port, channel_to_node, remote_nodes)
+            Some(Self::listen_port_from_in_channels(&remote_input_channels))
+        }
     }
 
     fn build_channel_maps(
@@ -420,20 +151,25 @@ impl TransportBackend {
         for channel in output_channels.iter().cloned() {
             let channel_id = channel.get_channel_id();
             let queue_size = channel.get_queue_size_records();
-            match channel {
+            match &channel {
                 Channel::Local { .. } => {
-                    let (tx, _rx) = local_channels
-                        .entry(channel_id.clone())
-                        .or_insert_with(|| {
-                            let (tx, rx) = batch_bounded_channel(queue_size);
-                            (tx, Some(rx))
-                        });
+                    let (tx, _rx) = local_channels.entry(channel_id.clone()).or_insert_with(|| {
+                        let (tx, rx) = batch_bounded_channel(queue_size);
+                        (tx, Some(rx))
+                    });
                     writer_senders.insert(channel_id, tx.clone());
                 }
                 Channel::Remote { .. } => {
                     let (tx, rx) = batch_bounded_channel(queue_size);
                     writer_senders.insert(channel_id.clone(), tx);
-                    remote_writer_receivers.insert(channel_id, rx);
+                    remote_writer_receivers.insert(
+                        channel_id,
+                        (
+                            Self::edge_identity(&channel),
+                            Self::remote_endpoint(&channel),
+                            rx,
+                        ),
+                    );
                 }
             }
         }
@@ -441,11 +177,10 @@ impl TransportBackend {
         for channel in input_channels.iter().cloned() {
             let channel_id = channel.get_channel_id();
             let queue_size = channel.get_queue_size_records();
-            match channel {
+            match &channel {
                 Channel::Local { .. } => {
-                    let (_tx, rx_opt) = local_channels
-                        .entry(channel_id.clone())
-                        .or_insert_with(|| {
+                    let (_tx, rx_opt) =
+                        local_channels.entry(channel_id.clone()).or_insert_with(|| {
                             let (tx, rx) = batch_bounded_channel(queue_size);
                             (tx, Some(rx))
                         });
@@ -454,7 +189,8 @@ impl TransportBackend {
                 }
                 Channel::Remote { .. } => {
                     let (tx, rx) = batch_bounded_channel(queue_size);
-                    remote_reader_senders.insert(channel_id.clone(), tx);
+                    remote_reader_senders
+                        .insert(channel_id.clone(), (Self::edge_identity(&channel), tx));
                     reader_receivers.insert(channel_id, rx);
                 }
             }
@@ -514,46 +250,78 @@ impl TransportBackend {
 #[async_trait]
 impl TransportBackendTrait for TransportBackend {
     async fn start(&mut self) {
-        self.running.store(true, std::sync::atomic::Ordering::Release);
+        self.running
+            .store(true, std::sync::atomic::Ordering::Release);
 
-        // Local-only topology: channel wiring is already done in init_channels.
-        // No gRPC server/client tasks are needed.
         if !self.has_remote_channels {
             return;
         }
 
-        let remote_reader_senders = self.remote_reader_senders.take().unwrap();
-        self.start_reading_side(remote_reader_senders).await;
+        if let Some(port) = self.port {
+            let listener = match tcp::bind_ingress(port).await {
+                Ok(listener) => listener,
+                Err(e) => {
+                    self.worker_health.report_fatal(
+                        crate::runtime::health::WorkerFatalReason::TransportDisconnect,
+                        format!("[TCP] bind port {port} failed: {e}"),
+                    );
+                    return;
+                }
+            };
+            let senders = Arc::new(std::sync::Mutex::new(
+                self.remote_reader_senders.take().unwrap(),
+            ));
+            let shutdown_rx = self
+                .shutdown_rx
+                .take()
+                .expect("[TCP] missing shutdown receiver");
+            let worker_health = self.worker_health.clone();
+            let running = self.running.clone();
+            let labels = self.metrics_labels.clone();
+            self.server_handle = Some(tokio::spawn(async move {
+                tcp::listen_ingress(
+                    listener,
+                    senders,
+                    worker_health,
+                    running,
+                    labels,
+                    shutdown_rx,
+                )
+                .await;
+            }));
+        }
 
-        let remote_writer_receivers = self.remote_writer_receivers.take().unwrap();
-        self.start_writing_side(remote_writer_receivers).await;
+        if let Some(remote_writer_receivers) = self.remote_writer_receivers.take() {
+            for (_channel_id, (identity, endpoint, rx)) in remote_writer_receivers {
+                let worker_health = self.worker_health.clone();
+                let running = self.running.clone();
+                let labels = self.metrics_labels.clone();
+                self.pump_handles.push(tokio::spawn(async move {
+                    tcp::pump_egress(rx, endpoint, identity, worker_health, running, labels).await;
+                }));
+            }
+        }
     }
 
     async fn close(&mut self) {
-        self.running.store(false, std::sync::atomic::Ordering::Release);
+        self.running
+            .store(false, std::sync::atomic::Ordering::Release);
 
-        // Send shutdown signal to server
         if let Some(shutdown_tx) = self.shutdown_tx.take() {
             let _ = shutdown_tx.send(());
         }
 
         if let Some(server_handle) = self.server_handle.take() {
+            server_handle.abort();
             let _ = server_handle.await;
         }
 
-        for handle in self.client_handles.drain(..) {
+        for handle in self.pump_handles.drain(..) {
+            handle.abort();
             let _ = handle.await;
         }
 
-        if let Some(reader_task) = self.reader_task.take() {
-            let _ = reader_task.await;
-        }
-
-        if let Some(writer_task) = self.writer_task.take() {
-            let _ = writer_task.await;
-        }
-
-        println!("[GRPC_BACKEND] All tasks completed");
+        println!("[TCP] All tasks completed");
     }
 
     fn init_channels(
@@ -572,18 +340,15 @@ impl TransportBackendTrait for TransportBackend {
             output_channels.extend(output_edges.iter().map(|edge| edge.get_channel()));
         }
 
-        let (port, channel_to_node, nodes) =
-            self.derive_remote_connection_args(&input_channels, &output_channels);
-        self.has_remote_channels = port.is_some() || nodes.is_some();
+        let port = Self::derive_listen_port(&input_channels);
+        let has_remote_out = output_channels
+            .iter()
+            .any(|channel| matches!(channel, Channel::Remote { .. }));
+        self.has_remote_channels = port.is_some() || has_remote_out;
         self.port = port;
-        self.channel_to_node = channel_to_node;
-        self.nodes = nodes;
-        let (
-            reader_receivers,
-            writer_senders,
-            remote_reader_senders,
-            remote_writer_receivers,
-        ) = Self::build_channel_maps(&input_channels, &output_channels);
+
+        let (reader_receivers, writer_senders, remote_reader_senders, remote_writer_receivers) =
+            Self::build_channel_maps(&input_channels, &output_channels);
         let transport_client_configs = Self::build_transport_client_configs(
             execution_graph,
             &vertex_ids,
@@ -591,10 +356,37 @@ impl TransportBackendTrait for TransportBackend {
             &writer_senders,
         );
 
-        // Store the senders and receivers for the tasks
         self.remote_reader_senders = Some(remote_reader_senders);
         self.remote_writer_receivers = Some(remote_writer_receivers);
 
         transport_client_configs
     }
-} 
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transport::channel::Channel;
+
+    #[test]
+    fn remote_endpoint_keeps_compose_hostname() {
+        let channel = Channel::new_remote(
+            "src".into(),
+            "dst".into(),
+            "worker-0".into(),
+            "worker-0".into(),
+            "worker-1".into(),
+            "worker-1".into(),
+            60052,
+        );
+        let endpoint = TransportBackend::remote_endpoint(&channel);
+        assert_eq!(endpoint.host, "worker-1");
+        assert_eq!(endpoint.port, 60052);
+        assert!(
+            format!("{endpoint}")
+                .parse::<std::net::SocketAddr>()
+                .is_err(),
+            "compose DNS names are not SocketAddr"
+        );
+    }
+}

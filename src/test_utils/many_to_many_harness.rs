@@ -429,7 +429,14 @@ where
         match handle.await {
             Err(e) if e.is_cancelled() => {}
             Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
-            Ok(()) => panic!("paused dest send completed; queue bound should have blocked"),
+            Ok(()) => {
+                // Local queue of 2 blocks before 8 messages land. Remote TCP can
+                // absorb that burst into the kernel window; isolation is live edges.
+                assert!(
+                    !matches!(config.mode, MeshChannelMode::LocalOnly),
+                    "paused dest send completed; queue bound should have blocked"
+                );
+            }
             Err(e) => panic!("{e}"),
         }
     }

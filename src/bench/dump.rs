@@ -78,7 +78,7 @@ pub const REQUIRED_PROM_QUERIES: &[PromQuery] = &[
     (
         "checkpoint_completed",
         concat!(
-            "increase(volga_checkpoint_completed",
+            "increase(volga_checkpoint_completed_total",
             r#"{pipeline_id=~".*"}"#,
             "[5m])"
         ),
@@ -86,7 +86,7 @@ pub const REQUIRED_PROM_QUERIES: &[PromQuery] = &[
     (
         "checkpoint_failed",
         concat!(
-            "increase(volga_checkpoint_failed",
+            "increase(volga_checkpoint_failed_total",
             r#"{pipeline_id=~".*"}"#,
             "[5m])"
         ),
@@ -94,7 +94,7 @@ pub const REQUIRED_PROM_QUERIES: &[PromQuery] = &[
     (
         "records_sent_rate",
         concat!(
-            "sum(rate(volga_stream_task_records_sent",
+            "sum(rate(volga_stream_task_records_sent_total",
             r#"{pipeline_id=~".*"}"#,
             "[1m]))"
         ),
@@ -153,7 +153,7 @@ pub const EXTRA_PROM_QUERIES: &[PromQuery] = &[
     (
         "sink_records_rate",
         concat!(
-            "sum(rate(volga_sink_records_written",
+            "sum(rate(volga_sink_records_written_total",
             r#"{pipeline_id=~".*"}"#,
             "[1m]))"
         ),
@@ -177,7 +177,7 @@ pub const EXTRA_PROM_QUERIES: &[PromQuery] = &[
     (
         "wo_late_dropped_rate",
         concat!(
-            "sum(rate(volga_wo_late_dropped_rows",
+            "sum(rate(volga_wo_late_dropped_rows_total",
             r#"{pipeline_id=~".*"}"#,
             "[1m]))"
         ),
@@ -185,7 +185,7 @@ pub const EXTRA_PROM_QUERIES: &[PromQuery] = &[
     (
         "wo_maintain_pruned_rate",
         concat!(
-            "sum(rate(volga_wo_maintain_pruned_rows",
+            "sum(rate(volga_wo_maintain_pruned_rows_total",
             r#"{pipeline_id=~".*"}"#,
             "[1m]))"
         ),
@@ -256,6 +256,22 @@ pub const EXTRA_PROM_QUERIES: &[PromQuery] = &[
             "max by (task_id, source_task_id) (volga_stream_task_rx_queued_records",
             r#"{pipeline_id=~".*"}"#,
             ")"
+        ),
+    ),
+    (
+        "transport_write_block_ms_per_s",
+        concat!(
+            "avg by (task_id, target_task_id) (volga_stream_task_transport_write_block_ms_per_second",
+            r#"{pipeline_id=~".*"}"#,
+            ")"
+        ),
+    ),
+    (
+        "transport_disconnects",
+        concat!(
+            "increase(volga_stream_task_transport_disconnects_total",
+            r#"{pipeline_id=~".*"}"#,
+            "[5m])"
         ),
     ),
 ];

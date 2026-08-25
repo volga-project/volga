@@ -26,7 +26,7 @@ use crate::runtime::stream_task::StreamTask;
 use crate::runtime::stream_task_actor::{StreamTaskActor, StreamTaskMessage};
 use crate::runtime::VertexId;
 use crate::transport::transport_backend_actor::{
-    TransportBackendActor, TransportBackendActorMessage, TransportBackendType,
+    TransportBackendActor, TransportBackendActorMessage,
 };
 use crate::transport::{TransportBackend, TransportBackendTrait};
 
@@ -172,9 +172,14 @@ impl WorkerInner {
         println!("[WORKER] Spawning actors");
         let config = self.config.clone();
 
-        let mut backend: Box<dyn TransportBackendTrait> = match config.transport_backend_type {
-            TransportBackendType::Grpc => Box::new(TransportBackend::new(self.health.clone())),
-        };
+        let mut backend: Box<dyn TransportBackendTrait> =
+            Box::new(TransportBackend::new_with_labels(
+                self.health.clone(),
+                Some(MetricsLabels {
+                    pipeline_id: config.pipeline_id.0.clone(),
+                    worker_id: config.worker_id.clone(),
+                }),
+            ));
         let mut transport_client_configs =
             backend.init_channels(&config.graph, config.vertex_ids.clone());
 
@@ -204,7 +209,10 @@ impl WorkerInner {
                 {
                     let mut cfg = HashMap::<String, Value>::new();
                     if let Some(master_addr) = &config.master_addr {
-                        cfg.insert("master_addr".to_string(), Value::String(master_addr.clone()));
+                        cfg.insert(
+                            "master_addr".to_string(),
+                            Value::String(master_addr.clone()),
+                        );
                     }
                     cfg.insert(
                         "execution_attempt_id".to_string(),
