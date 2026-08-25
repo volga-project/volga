@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, UInt32Array};
+use arrow::array::{ArrayRef, UInt32Array, UInt8Array};
 use arrow::compute;
 use arrow::datatypes::{Field, Schema};
 use arrow::record_batch::RecordBatch;
@@ -20,6 +20,17 @@ pub fn take_rows(batch: &RecordBatch, indices: &[usize]) -> RecordBatch {
         .map(|col| compute::take(col.as_ref(), &indices_array, None).expect("take rows"))
         .collect();
     RecordBatch::try_new(batch.schema(), columns).expect("taken batch")
+}
+
+fn global_partition_key() -> Key {
+    let schema = Arc::new(Schema::new(vec![Field::new(
+        "_volga_global",
+        arrow::datatypes::DataType::UInt8,
+        false,
+    )]));
+    let batch = RecordBatch::try_new(schema, vec![Arc::new(UInt8Array::from(vec![0]))])
+        .expect("global key batch");
+    Key::new(batch).expect("global key")
 }
 
 pub fn pack_by_dest(
@@ -115,7 +126,10 @@ pub fn split_by_key_exprs(
     exprs: &[Arc<dyn PhysicalExpr>],
 ) -> Vec<(Key, RecordBatch)> {
     if exprs.is_empty() {
-        panic!("split_by_key_exprs requires key expressions");
+        if batch.num_rows() == 0 {
+            return Vec::new();
+        }
+        return vec![(global_partition_key(), batch.clone())];
     }
     let arrays = evaluate_key_arrays(exprs, batch);
     let fields = key_fields_for_exprs(exprs, &arrays, batch.schema().as_ref());

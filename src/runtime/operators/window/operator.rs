@@ -312,9 +312,6 @@ impl OperatorTrait for WindowOperator {
                     let ingest_started = Instant::now();
                     let emit = self.output_mode == WindowOutputMode::Emit;
                     let mut dropped = 0usize;
-                    if self.partition_by.is_empty() {
-                        panic!("WindowOperator requires PARTITION BY");
-                    }
                     for (key, payload) in split_by_key_exprs(batch, &self.partition_by) {
                         dropped += state.insert_batch(&key, payload, emit).await;
                     }

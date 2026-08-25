@@ -225,9 +225,6 @@ impl OperatorTrait for WindowRequestOperator {
         match self.base.next_input().await {
             Some(message) => match message {
                 Message::Regular(base) => {
-                    if self.partition_by.is_empty() {
-                        panic!("WindowRequestOperator requires PARTITION BY");
-                    }
                     let groups = split_by_key_exprs(&base.record_batch, &self.partition_by);
                     if groups.is_empty() {
                         return OperatorPollResult::Ready(Message::new(
