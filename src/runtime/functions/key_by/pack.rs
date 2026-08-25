@@ -70,6 +70,44 @@ pub(crate) fn pack_by_dest(
     out
 }
 
+fn take_key_row(key_arrays: &[ArrayRef], key_schema: &Arc<Schema>, row: usize) -> RecordBatch {
+    let idx = UInt32Array::from(vec![row as u32]);
+    let key_cols: Vec<ArrayRef> = key_arrays
+        .iter()
+        .map(|array| compute::take(array.as_ref(), &idx, None).expect("key row"))
+        .collect();
+    RecordBatch::try_new(key_schema.clone(), key_cols).expect("key batch")
+}
+
+/// Group rows by hash, then split colliding hashes with the same `Key::eq`
+/// record-batch compare so distinct keys are not merged.
+fn group_row_indices(
+    hashes: &[u64],
+    key_arrays: &[ArrayRef],
+    key_schema: Arc<Schema>,
+) -> Vec<(Key, Vec<usize>)> {
+    let mut by_hash: HashMap<u64, Vec<usize>> = HashMap::new();
+    for (i, &hash) in hashes.iter().enumerate() {
+        by_hash.entry(hash).or_default().push(i);
+    }
+    let mut out = Vec::with_capacity(by_hash.len());
+    for (hash, idxs) in by_hash {
+        let mut subgroups: Vec<(RecordBatch, Vec<usize>)> = Vec::new();
+        for i in idxs {
+            let row = take_key_row(key_arrays, &key_schema, i);
+            if let Some((_, members)) = subgroups.iter_mut().find(|(k, _)| k == &row) {
+                members.push(i);
+            } else {
+                subgroups.push((row, vec![i]));
+            }
+        }
+        for (key_batch, members) in subgroups {
+            out.push((Key::with_hash(key_batch, hash).expect("key"), members));
+        }
+    }
+    out
+}
+
 fn split_by_key_arrays(
     batch: &RecordBatch,
     key_arrays: &[ArrayRef],
@@ -79,26 +117,11 @@ fn split_by_key_arrays(
         return Vec::new();
     }
     let hashes = Key::hash_arrays(key_arrays, batch.num_rows()).expect("key hashes");
-    let mut groups: HashMap<u64, Vec<usize>> = HashMap::new();
-    for (i, &hash) in hashes.iter().enumerate() {
-        groups.entry(hash).or_default().push(i);
-    }
-    let key_schema = Arc::new(Schema::new(key_fields));
-    let mut out = Vec::with_capacity(groups.len());
-    for (hash, idxs) in groups {
-        let payload = take_rows(batch, &idxs);
-        let first = idxs[0] as u32;
-        let first_idx = UInt32Array::from(vec![first]);
-        let key_cols: Vec<ArrayRef> = key_arrays
-            .iter()
-            .map(|array| compute::take(array.as_ref(), &first_idx, None).expect("key row"))
-            .collect();
-        let key_batch =
-            RecordBatch::try_new(key_schema.clone(), key_cols).expect("key batch");
-        let key = Key::with_hash(key_batch, hash).expect("key");
-        out.push((key, payload));
-    }
-    out
+    let groups = group_row_indices(&hashes, key_arrays, Arc::new(Schema::new(key_fields)));
+    groups
+        .into_iter()
+        .map(|(key, idxs)| (key, take_rows(batch, &idxs)))
+        .collect()
 }
 
 pub fn split_by_key_exprs(
@@ -130,10 +153,11 @@ pub fn split_message_by_key_fields(message: &Message) -> Vec<(Key, RecordBatch)>
         })
         .unwrap_or_default();
     if names.is_empty() {
-        panic!(
-            "packed keyed hop missing {}; KeyBy must set it",
-            KEY_FIELDS_EXTRA
-        );
+        let batch = message.record_batch();
+        if batch.num_rows() == 0 {
+            return Vec::new();
+        }
+        return vec![(global_partition_key(), batch.clone())];
     }
     let batch = message.record_batch();
     let schema = batch.schema();
@@ -207,4 +231,77 @@ pub(crate) fn key_fields_for_exprs(
             )
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow::array::{Int32Array, StringArray};
+    use arrow::datatypes::DataType;
+    use std::collections::HashSet;
+
+    use crate::runtime::partition::{HashPartition, PartitionTrait};
+
+    fn int_batch(values: Vec<i32>) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
+        RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(values))]).unwrap()
+    }
+
+    #[test]
+    fn pack_by_dest_p2_skips_empty_buckets_and_hash_partition_reads_extra() {
+        let message = Message::new(None, int_batch(vec![10, 20, 30]), None, None);
+        let hashes = [0u64, 1, 0];
+        let packed = pack_by_dest(&message, &hashes, &["id".to_string()], 3);
+        assert_eq!(packed.len(), 2, "dest 2 is empty and skipped");
+
+        let mut dests = HashSet::new();
+        let mut hp = HashPartition::new();
+        let mut rows = 0usize;
+        for m in &packed {
+            let dest: usize = m
+                .get_extras()
+                .unwrap()
+                .get(TARGET_SUBTASK_EXTRA)
+                .unwrap()
+                .parse()
+                .unwrap();
+            dests.insert(dest);
+            assert_eq!(hp.partition(m, 3), vec![dest]);
+            rows += m.record_batch().num_rows();
+        }
+        assert_eq!(rows, 3);
+        assert_eq!(dests, HashSet::from([0, 1]));
+    }
+
+    #[test]
+    fn split_empty_key_fields_is_global_key() {
+        let message = Message::new(None, int_batch(vec![1, 2, 3]), None, None);
+        let hashes = vec![0u64; 3];
+        let packed = pack_by_dest(&message, &hashes, &[], 2);
+        assert_eq!(packed.len(), 1);
+        assert_eq!(
+            packed[0].get_extras().unwrap().get(TARGET_SUBTASK_EXTRA).unwrap(),
+            "0"
+        );
+        assert_eq!(
+            packed[0].get_extras().unwrap().get(KEY_FIELDS_EXTRA).unwrap(),
+            ""
+        );
+        let groups = split_message_by_key_fields(&packed[0]);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].1.num_rows(), 3);
+        assert_eq!(groups[0].0, global_partition_key());
+    }
+
+    #[test]
+    fn split_does_not_merge_distinct_keys_with_same_hash() {
+        let key_schema = Arc::new(Schema::new(vec![Field::new("k", DataType::Utf8, false)]));
+        let keys: ArrayRef = Arc::new(StringArray::from(vec!["a", "b", "a"]));
+        let hashes = [7u64, 7, 7];
+        let groups = group_row_indices(&hashes, &[keys], key_schema);
+        assert_eq!(groups.len(), 2);
+        let mut sizes: Vec<usize> = groups.iter().map(|(_, idxs)| idxs.len()).collect();
+        sizes.sort();
+        assert_eq!(sizes, vec![1, 2]);
+    }
 }

@@ -35,6 +35,9 @@ impl KeyByOperator {
 #[async_trait]
 impl OperatorTrait for KeyByOperator {
     async fn open(&mut self, context: &RuntimeContext) -> Result<()> {
+        // dest = hash % p. Planner assigns the same p to KeyBy and its Hash
+        // downstream, so dest < collector.output_channels.len() ([#263](https://github.com/volga-project/volga/issues/263)).
+        // Uneven rescale is [#159](https://github.com/volga-project/volga/issues/159).
         self.num_partitions = context.parallelism().max(1) as usize;
         self.base.open(context).await
     }
