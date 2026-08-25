@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use datafusion::physical_plan::windows::BoundedWindowAggExec;
 use datafusion::physical_plan::PhysicalExpr;
 use datafusion::scalar::ScalarValue;
+use futures::{stream, StreamExt};
 
 use crate::common::message::Message;
 use crate::common::Key;
@@ -26,6 +27,7 @@ use crate::runtime::operators::window::store::{
     open_window_request_store, PartitionKey, StateNamespace, WindowRequestStore,
 };
 use crate::runtime::operators::window::TileConfig;
+use crate::runtime::operators::window::PARTITION_IO_CONCURRENCY;
 use crate::runtime::runtime_context::RuntimeContext;
 
 #[derive(Debug, Clone)]
@@ -158,6 +160,24 @@ impl WindowRequestOperator {
             &self.input_schema,
         )
     }
+
+    async fn process_groups(&self, groups: Vec<(Key, RecordBatch)>) -> RecordBatch {
+        let mut batches: Vec<(usize, RecordBatch)> = stream::iter(groups.into_iter().enumerate())
+            .map(|(i, (key, payload))| async move {
+                (i, self.process_key(&key, &payload).await)
+            })
+            .buffer_unordered(PARTITION_IO_CONCURRENCY)
+            .collect()
+            .await;
+        batches.sort_by_key(|(i, _)| *i);
+        let batches: Vec<RecordBatch> = batches.into_iter().map(|(_, batch)| batch).collect();
+        if batches.len() == 1 {
+            batches.into_iter().next().unwrap()
+        } else {
+            arrow::compute::concat_batches(&self.output_schema, &batches)
+                .expect("concat WRO batches")
+        }
+    }
 }
 
 fn get_input_values(batch: &RecordBatch, input_schema: &SchemaRef) -> Vec<Vec<ScalarValue>> {
@@ -234,16 +254,7 @@ impl OperatorTrait for WindowRequestOperator {
                             None,
                         ));
                     }
-                    let mut batches = Vec::with_capacity(groups.len());
-                    for (key, payload) in groups {
-                        batches.push(self.process_key(&key, &payload).await);
-                    }
-                    let out = if batches.len() == 1 {
-                        batches.pop().unwrap()
-                    } else {
-                        arrow::compute::concat_batches(&self.output_schema, &batches)
-                            .expect("concat WRO batches")
-                    };
+                    let out = self.process_groups(groups).await;
                     OperatorPollResult::Ready(Message::new(None, out, None, None))
                 }
                 Message::Watermark(w) => OperatorPollResult::Ready(Message::Watermark(w)),

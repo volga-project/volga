@@ -8,7 +8,7 @@ use anyhow::Result;
 use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
-use futures::{future, TryStreamExt};
+use futures::{future, stream, StreamExt, TryStreamExt};
 
 use crate::common::message::Message;
 use crate::common::MAX_WATERMARK_VALUE;
@@ -27,6 +27,7 @@ use crate::runtime::operators::window::spec::WindowSpec;
 use crate::runtime::operators::window::state::{WindowOperatorState, WindowStateSnapshot};
 use crate::runtime::operators::window::store::{open_window_operator_store, StateNamespace};
 use crate::runtime::operators::window::TileConfig;
+use crate::runtime::operators::window::PARTITION_IO_CONCURRENCY;
 use crate::runtime::observability::TaskMetadata;
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::state::{OperatorTaskState, StateRegistry};
@@ -308,13 +309,18 @@ impl OperatorTrait for WindowOperator {
                 Message::Regular(base) => {
                     let batch = &base.record_batch;
                     let input_rows = batch.num_rows();
-                    let state = self.state_ref();
+                    let state = self.state_ref().clone();
                     let ingest_started = Instant::now();
                     let emit = self.output_mode == WindowOutputMode::Emit;
-                    let mut dropped = 0usize;
-                    for (key, payload) in split_by_key_exprs(batch, &self.partition_by) {
-                        dropped += state.insert_batch(&key, payload, emit).await;
-                    }
+                    let groups = split_by_key_exprs(batch, &self.partition_by);
+                    let dropped: usize = stream::iter(groups)
+                        .map(|(key, payload)| {
+                            let state = state.clone();
+                            async move { state.insert_batch(&key, payload, emit).await }
+                        })
+                        .buffer_unordered(PARTITION_IO_CONCURRENCY)
+                        .fold(0usize, |acc, n| async move { acc + n })
+                        .await;
                     debug_assert!(dropped <= input_rows);
                     self.task_metadata.increment_u64(
                         TASK_METADATA_ROWS_ACCEPTED,
