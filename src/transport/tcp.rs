@@ -229,7 +229,7 @@ pub async fn pump_egress(
                     return;
                 };
                 let bytes = message.to_bytes();
-                if let Err(e) = sampled_io(
+                if let Err(e) = sample_write_block_metric(
                     write_frame(&mut writer, &bytes),
                     &identity,
                     labels.as_ref(),
@@ -250,7 +250,7 @@ pub async fn pump_egress(
             }
 
             _ = tokio::time::sleep(FLUSH_COALESCE), if pending => {
-                if let Err(e) = sampled_io(
+                if let Err(e) = sample_write_block_metric(
                     writer.flush(),
                     &identity,
                     labels.as_ref(),
@@ -282,9 +282,9 @@ pub async fn pump_egress(
     }
 }
 
-/// Sample write-block while `write_all` / `flush` is in flight so a multi-second
-/// TCP window stall shows up on the gauge before the IO returns.
-async fn sampled_io<F>(
+/// Metrics: sample write-block while `write_all` / `flush` is in flight so a
+/// multi-second TCP window stall shows up on the gauge before the IO returns.
+async fn sample_write_block_metric<F>(
     fut: F,
     identity: &EdgeIdentity,
     labels: Option<&MetricsLabels>,
