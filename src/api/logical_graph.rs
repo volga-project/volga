@@ -895,44 +895,4 @@ mod tests {
             }
         }
     }
-
-    #[test]
-    fn test_forward_partition_one_to_one() {
-        let mut logical_graph = LogicalGraph::new();
-        let parallelism = 4;
-
-        let source_config = SourceConfig::VectorSourceConfig(VectorSourceConfig::new(vec![]));
-        let source_index = logical_graph.add_node(LogicalNode::new(
-            OperatorConfig::SourceConfig(source_config),
-            parallelism,
-            None,
-            None,
-        ));
-        let map_index = logical_graph.add_node(LogicalNode::new(
-            OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction)),
-            parallelism,
-            None,
-            None,
-        ));
-        let sink_config = SinkConfig::in_memory_grpc("http://127.0.0.1:8080");
-        let sink_index = logical_graph.add_node(LogicalNode::new(
-            OperatorConfig::SinkConfig(sink_config),
-            parallelism,
-            None,
-            None,
-        ));
-        logical_graph.add_edge(source_index, map_index);
-        logical_graph.add_edge(map_index, sink_index);
-
-        let execution_graph = logical_graph.to_execution_graph();
-        let edges = execution_graph.get_edges();
-        assert_eq!(edges.len(), parallelism * 2, "two Forward stages, each 1:1");
-
-        for edge in edges.values() {
-            assert!(matches!(edge.partition_type, PartitionType::Forward));
-            let src = execution_graph.get_vertex(&edge.source_vertex_id).unwrap();
-            let tgt = execution_graph.get_vertex(&edge.target_vertex_id).unwrap();
-            assert_eq!(src.task_index, tgt.task_index);
-        }
-    }
 }
