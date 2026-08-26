@@ -692,7 +692,7 @@ mod tests {
         let mut forward = 0;
         for edge in edges.values() {
             assert!(edge.channel.is_none(), "Edge {} -> {} should not have channel set initially", edge.source_vertex_id, edge.target_vertex_id);
-            match edge.partition_type {
+            match &edge.partition_type {
                 PartitionType::RoundRobin => round_robin += 1,
                 PartitionType::Forward => {
                     forward += 1;
