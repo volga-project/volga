@@ -39,6 +39,8 @@ pub const WORKER_REGISTER_CONNECT_TIMEOUT: &str = "worker.register_connect_timeo
 pub const WORKER_REGISTER_RPC_TIMEOUT: &str = "worker.register_rpc_timeout";
 pub const TRANSPORT_TCP_CONNECT_MAX_RETRIES: &str = "transport.tcp_connect_max_retries";
 pub const TRANSPORT_TCP_CONNECT_RETRY_DELAY: &str = "transport.tcp_connect_retry_delay";
+/// Max delay after the first unflushed TCP frame before the egress pump flushes.
+pub const TRANSPORT_TCP_FLUSH_COALESCE: &str = "transport.tcp_flush_coalesce";
 
 /// Explicit profile: `local_test` | `kube_test` | `prod`.
 pub const VOLGA_RUNTIME_CONSTS_PROFILE_ENV: &str = "VOLGA_RUNTIME_CONSTS_PROFILE";
@@ -68,6 +70,7 @@ const DURATION_KEYS: &[&str] = &[
     WORKER_REGISTER_CONNECT_TIMEOUT,
     WORKER_REGISTER_RPC_TIMEOUT,
     TRANSPORT_TCP_CONNECT_RETRY_DELAY,
+    TRANSPORT_TCP_FLUSH_COALESCE,
 ];
 
 const U64_KEYS: &[&str] = &[
@@ -370,6 +373,14 @@ mod tests {
             Duration::from_millis(200)
         );
         assert_eq!(local.u64(MASTER_RECOVERY_BUDGET), 5);
+        assert_eq!(
+            local.duration(TRANSPORT_TCP_FLUSH_COALESCE),
+            Duration::from_millis(1)
+        );
+        assert_eq!(
+            prod.duration(TRANSPORT_TCP_FLUSH_COALESCE),
+            Duration::from_millis(2)
+        );
     }
 
     #[test]

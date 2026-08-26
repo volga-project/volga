@@ -5,7 +5,10 @@ use std::sync::{
 use std::time::Instant;
 
 use tokio::sync::{
-    mpsc::{error::SendError, unbounded_channel, UnboundedReceiver, UnboundedSender},
+    mpsc::{
+        error::{SendError, TryRecvError},
+        unbounded_channel, UnboundedReceiver, UnboundedSender,
+    },
     Notify,
 };
 
@@ -177,13 +180,23 @@ impl BatchReceiver {
     pub async fn recv(&mut self) -> Option<Message> {
         let item = self.rx.recv().await;
         if let Some(item) = &item {
-            let count = message_count(item, self.size);
-            self.queued_messages.fetch_sub(count, Ordering::SeqCst);
-            self.queued_bytes
-                .fetch_sub(message_bytes(item), Ordering::AcqRel);
-            self.notify.notify_waiters();
+            self.account_recv(item);
         }
         item
+    }
+
+    pub fn try_recv(&mut self) -> Result<Message, TryRecvError> {
+        let item = self.rx.try_recv()?;
+        self.account_recv(&item);
+        Ok(item)
+    }
+
+    fn account_recv(&self, item: &Message) {
+        let count = message_count(item, self.size);
+        self.queued_messages.fetch_sub(count, Ordering::SeqCst);
+        self.queued_bytes
+            .fetch_sub(message_bytes(item), Ordering::AcqRel);
+        self.notify.notify_waiters();
     }
 }
 
@@ -248,6 +261,18 @@ mod tests {
         assert_eq!(tx.capacity(), 0);
         // 1 - 1/(2+1) = 2/3
         assert!((tx.backpressure_ratio() - (2.0 / 3.0)).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn try_recv_drains_without_waiting() {
+        let (tx, mut rx) = batch_bounded_channel(4);
+        tx.send(wm(1), None).await.unwrap();
+        tx.send(wm(2), None).await.unwrap();
+        assert!(matches!(rx.try_recv(), Ok(_)));
+        assert!(matches!(rx.try_recv(), Ok(_)));
+        assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+        drop(tx);
+        assert!(matches!(rx.try_recv(), Err(TryRecvError::Disconnected)));
     }
 
     #[tokio::test]

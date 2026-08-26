@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -10,14 +11,16 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use metrics::{counter, gauge};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::{oneshot, Notify};
 use tokio::task::JoinHandle;
 
 use crate::common::message::Message;
 use crate::runtime::consts::{
     runtime_consts, TRANSPORT_TCP_CONNECT_MAX_RETRIES, TRANSPORT_TCP_CONNECT_RETRY_DELAY,
+    TRANSPORT_TCP_FLUSH_COALESCE,
 };
 use crate::runtime::health::{WorkerFatalReason, WorkerHealth};
 use crate::runtime::metrics::{
@@ -29,6 +32,10 @@ use crate::transport::batch_channel::{BatchReceiver, BatchSender};
 
 /// Same 12MiB cap as control-plane gRPC messages; TCP frames are length-prefixed.
 const MAX_FRAME_BYTES: u32 = 12 * 1024 * 1024;
+/// Userspace coalescing buffer. Auto-flushes when full; pump also flushes on
+/// empty edge queue (after the coalesce window) so small frames are not one syscall each.
+const WRITE_BUF_BYTES: usize = 64 * 1024;
+const METRICS_TICK: Duration = Duration::from_millis(100);
 
 struct AbortOnDropHandles(Vec<JoinHandle<()>>);
 
@@ -66,7 +73,11 @@ impl fmt::Display for RemoteEndpoint {
     }
 }
 
-async fn write_frame(stream: &mut TcpStream, payload: &[u8]) -> io::Result<()> {
+/// Length-prefixed frame. Does not flush; callers coalesce via `BufWriter`.
+async fn write_frame<W>(stream: &mut W, payload: &[u8]) -> io::Result<()>
+where
+    W: AsyncWriteExt + Unpin,
+{
     let len = u32::try_from(payload.len())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "transport frame exceeds u32"))?;
     if len > MAX_FRAME_BYTES {
@@ -77,7 +88,7 @@ async fn write_frame(stream: &mut TcpStream, payload: &[u8]) -> io::Result<()> {
     }
     stream.write_all(&len.to_le_bytes()).await?;
     stream.write_all(payload).await?;
-    stream.flush().await
+    Ok(())
 }
 
 async fn read_frame(stream: &mut TcpStream) -> io::Result<Option<Vec<u8>>> {
@@ -119,7 +130,10 @@ fn increment_disconnects(identity: &EdgeIdentity, labels: Option<&MetricsLabels>
     }
 }
 
-async fn connect_with_retry(endpoint: &RemoteEndpoint, running: &AtomicBool) -> io::Result<TcpStream> {
+async fn connect_with_retry(
+    endpoint: &RemoteEndpoint,
+    running: &AtomicBool,
+) -> io::Result<TcpStream> {
     let max_attempts = runtime_consts()
         .u64(TRANSPORT_TCP_CONNECT_MAX_RETRIES)
         .max(1);
@@ -148,7 +162,28 @@ async fn connect_with_retry(endpoint: &RemoteEndpoint, running: &AtomicBool) -> 
     Err(last_err.unwrap_or_else(|| io::Error::other("tcp connect failed")))
 }
 
+fn report_write_fatal(
+    running: &AtomicBool,
+    identity: &EdgeIdentity,
+    labels: Option<&MetricsLabels>,
+    worker_health: &WorkerHealth,
+    what: &str,
+    err: io::Error,
+) {
+    if running.load(Ordering::Relaxed) {
+        increment_disconnects(identity, labels);
+        worker_health.report_fatal(
+            WorkerFatalReason::TransportDisconnect,
+            format!("[TCP] {what} channel {}: {err}", identity.channel_id),
+        );
+    }
+}
+
 /// Drain one egress queue onto a dedicated TCP connection.
+///
+/// Frames stay length-prefixed. Flush only when the write buffer fills, the
+/// edge queue is empty and the coalesce window has elapsed, or the window
+/// fires while data is still buffered — not after every `Message`.
 pub async fn pump_egress(
     mut rx: BatchReceiver,
     endpoint: RemoteEndpoint,
@@ -157,7 +192,7 @@ pub async fn pump_egress(
     running: Arc<AtomicBool>,
     labels: Option<MetricsLabels>,
 ) {
-    let mut stream = match connect_with_retry(&endpoint, &running).await {
+    let stream = match connect_with_retry(&endpoint, &running).await {
         Ok(stream) => stream,
         Err(e) => {
             if running.load(Ordering::Relaxed) {
@@ -173,91 +208,245 @@ pub async fn pump_egress(
             return;
         }
     };
-
-    if let Err(e) = write_frame(&mut stream, identity.channel_id.as_bytes()).await {
-        if running.load(Ordering::Relaxed) {
-            increment_disconnects(&identity, labels.as_ref());
-            worker_health.report_fatal(
-                WorkerFatalReason::TransportDisconnect,
-                format!(
-                    "[TCP] handshake write failed channel {}: {}",
-                    identity.channel_id, e
-                ),
-            );
-        }
-        return;
-    }
+    let mut writer = BufWriter::with_capacity(WRITE_BUF_BYTES, stream);
+    let coalesce = runtime_consts().duration(TRANSPORT_TCP_FLUSH_COALESCE);
 
     let mut window_start = Instant::now();
     let mut blocked_ns: u64 = 0;
 
+    if let Err(e) = write_frame(&mut writer, identity.channel_id.as_bytes()).await {
+        report_write_fatal(
+            &running,
+            &identity,
+            labels.as_ref(),
+            &worker_health,
+            "handshake write failed",
+            e,
+        );
+        return;
+    }
+    // Peer must see the channel id before data frames.
+    if let Err(e) = sampled_io(
+        writer.flush(),
+        &identity,
+        labels.as_ref(),
+        &mut window_start,
+        &mut blocked_ns,
+    )
+    .await
+    {
+        report_write_fatal(
+            &running,
+            &identity,
+            labels.as_ref(),
+            &worker_health,
+            "handshake flush failed",
+            e,
+        );
+        return;
+    }
+
+    let mut unflushed_since: Option<Instant> = None;
+
     loop {
         if !running.load(Ordering::Relaxed) {
+            let _ = writer.flush().await;
             return;
         }
-        let message = match tokio::time::timeout(Duration::from_millis(100), rx.recv()).await {
-            Ok(Some(message)) => message,
-            Ok(None) => return,
-            Err(_) => {
+
+        let pending = unflushed_since.is_some();
+        let coalesce_wait = unflushed_since.map(|t| coalesce.saturating_sub(t.elapsed()));
+
+        tokio::select! {
+            biased;
+
+            message = rx.recv() => {
+                let Some(message) = message else {
+                    if let Err(e) = sampled_io(
+                        writer.flush(),
+                        &identity,
+                        labels.as_ref(),
+                        &mut window_start,
+                        &mut blocked_ns,
+                    )
+                    .await
+                    {
+                        report_write_fatal(
+                            &running,
+                            &identity,
+                            labels.as_ref(),
+                            &worker_health,
+                            "write failed",
+                            e,
+                        );
+                    }
+                    return;
+                };
+                if let Err(e) = write_queued_frames(
+                    &mut writer,
+                    message,
+                    &mut rx,
+                    &identity,
+                    labels.as_ref(),
+                    &mut window_start,
+                    &mut blocked_ns,
+                )
+                .await
+                {
+                    report_write_fatal(
+                        &running,
+                        &identity,
+                        labels.as_ref(),
+                        &worker_health,
+                        "write failed",
+                        e,
+                    );
+                    return;
+                }
+                if let Err(e) = flush_if_ready(
+                    &mut writer,
+                    &mut unflushed_since,
+                    coalesce,
+                    &identity,
+                    labels.as_ref(),
+                    &mut window_start,
+                    &mut blocked_ns,
+                )
+                .await
+                {
+                    report_write_fatal(
+                        &running,
+                        &identity,
+                        labels.as_ref(),
+                        &worker_health,
+                        "write failed",
+                        e,
+                    );
+                    return;
+                }
+            }
+
+            _ = async {
+                tokio::time::sleep(coalesce_wait.unwrap_or(Duration::ZERO)).await;
+            }, if pending => {
+                if let Err(e) = sampled_io(
+                    writer.flush(),
+                    &identity,
+                    labels.as_ref(),
+                    &mut window_start,
+                    &mut blocked_ns,
+                )
+                .await
+                {
+                    report_write_fatal(
+                        &running,
+                        &identity,
+                        labels.as_ref(),
+                        &worker_health,
+                        "write failed",
+                        e,
+                    );
+                    return;
+                }
+                unflushed_since = None;
+            }
+
+            _ = tokio::time::sleep(METRICS_TICK), if !pending => {
                 report_write_block_gauge(
                     &identity,
                     labels.as_ref(),
                     &mut window_start,
                     &mut blocked_ns,
                 );
-                continue;
             }
-        };
-
-        let bytes = message.to_bytes();
-        if let Err(e) = write_frame_sampled(
-            &mut stream,
-            &bytes,
-            &identity,
-            labels.as_ref(),
-            &mut window_start,
-            &mut blocked_ns,
-        )
-        .await
-        {
-            if running.load(Ordering::Relaxed) {
-                increment_disconnects(&identity, labels.as_ref());
-                worker_health.report_fatal(
-                    WorkerFatalReason::TransportDisconnect,
-                    format!("[TCP] write failed channel {}: {}", identity.channel_id, e),
-                );
-            }
-            return;
         }
     }
 }
 
-/// Sample write-block while `write_all` is in flight so a multi-second TCP window stall
-/// shows up on the gauge before the write returns.
-async fn write_frame_sampled(
-    stream: &mut TcpStream,
-    payload: &[u8],
+async fn write_queued_frames<W>(
+    writer: &mut W,
+    first: Message,
+    rx: &mut BatchReceiver,
     identity: &EdgeIdentity,
     labels: Option<&MetricsLabels>,
     window_start: &mut Instant,
     blocked_ns: &mut u64,
-) -> io::Result<()> {
-    let mut write_start = Instant::now();
-    let write = write_frame(stream, payload);
-    tokio::pin!(write);
+) -> io::Result<()>
+where
+    W: AsyncWriteExt + Unpin,
+{
+    let mut next = Some(first);
+    while let Some(message) = next {
+        let bytes = message.to_bytes();
+        sampled_io(
+            write_frame(writer, &bytes),
+            identity,
+            labels,
+            window_start,
+            blocked_ns,
+        )
+        .await?;
+        next = match rx.try_recv() {
+            Ok(message) => Some(message),
+            Err(TryRecvError::Empty | TryRecvError::Disconnected) => None,
+        };
+    }
+    Ok(())
+}
+
+/// Flush when the buffer is already empty (auto-flushed because full), or when
+/// the edge queue is drained and the coalesce window has elapsed.
+async fn flush_if_ready<W>(
+    writer: &mut BufWriter<W>,
+    unflushed_since: &mut Option<Instant>,
+    coalesce: Duration,
+    identity: &EdgeIdentity,
+    labels: Option<&MetricsLabels>,
+    window_start: &mut Instant,
+    blocked_ns: &mut u64,
+) -> io::Result<()>
+where
+    W: AsyncWriteExt + Unpin,
+{
+    if writer.buffer().is_empty() {
+        *unflushed_since = None;
+        return Ok(());
+    }
+    let started = *unflushed_since.get_or_insert_with(Instant::now);
+    if started.elapsed() >= coalesce {
+        sampled_io(writer.flush(), identity, labels, window_start, blocked_ns).await?;
+        *unflushed_since = None;
+    }
+    Ok(())
+}
+
+/// Sample write-block while a write or flush is in flight so a multi-second TCP
+/// window stall shows up on the gauge before the IO returns.
+async fn sampled_io<F>(
+    fut: F,
+    identity: &EdgeIdentity,
+    labels: Option<&MetricsLabels>,
+    window_start: &mut Instant,
+    blocked_ns: &mut u64,
+) -> io::Result<()>
+where
+    F: Future<Output = io::Result<()>>,
+{
+    let mut io_start = Instant::now();
+    tokio::pin!(fut);
     let mut interval = tokio::time::interval(Duration::from_secs(1));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     interval.tick().await;
     loop {
         tokio::select! {
-            result = &mut write => {
-                *blocked_ns = blocked_ns.saturating_add(write_start.elapsed().as_nanos() as u64);
+            result = &mut fut => {
+                *blocked_ns = blocked_ns.saturating_add(io_start.elapsed().as_nanos() as u64);
                 report_write_block_gauge(identity, labels, window_start, blocked_ns);
                 return result;
             }
             _ = interval.tick() => {
-                *blocked_ns = blocked_ns.saturating_add(write_start.elapsed().as_nanos() as u64);
-                write_start = Instant::now();
+                *blocked_ns = blocked_ns.saturating_add(io_start.elapsed().as_nanos() as u64);
+                io_start = Instant::now();
                 report_write_block_gauge(identity, labels, window_start, blocked_ns);
             }
         }
@@ -483,7 +672,52 @@ async fn serve_ingress(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::message::WatermarkMessage;
     use crate::transport::batch_channel::batch_bounded_channel;
+    use std::pin::Pin;
+    use std::sync::atomic::AtomicUsize;
+    use std::task::{Context, Poll};
+    use tokio::io::AsyncWrite;
+
+    struct CountIo<W> {
+        inner: W,
+        writes: Arc<AtomicUsize>,
+        flushes: Arc<AtomicUsize>,
+    }
+
+    impl<W: AsyncWrite + Unpin> AsyncWrite for CountIo<W> {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            match Pin::new(&mut self.inner).poll_write(cx, buf) {
+                Poll::Ready(Ok(n)) => {
+                    self.writes.fetch_add(1, Ordering::Relaxed);
+                    Poll::Ready(Ok(n))
+                }
+                other => other,
+            }
+        }
+
+        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            match Pin::new(&mut self.inner).poll_flush(cx) {
+                Poll::Ready(Ok(())) => {
+                    self.flushes.fetch_add(1, Ordering::Relaxed);
+                    Poll::Ready(Ok(()))
+                }
+                other => other,
+            }
+        }
+
+        fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.inner).poll_shutdown(cx)
+        }
+    }
+
+    fn wm(i: u64) -> Message {
+        Message::Watermark(WatermarkMessage::new("t".to_string(), i, Some(0)))
+    }
 
     async fn connected_pair() -> (TcpStream, TcpStream) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -544,6 +778,7 @@ mod tests {
 
         let mut client = TcpStream::connect(addr).await.unwrap();
         write_frame(&mut client, b"a_to_b").await.unwrap();
+        client.flush().await.unwrap();
 
         let start = Instant::now();
         let refused = loop {
@@ -553,8 +788,132 @@ mod tests {
                 Ok(_) | Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
             }
         };
-        assert!(refused, "listener should drop after the expected channel is claimed");
+        assert!(
+            refused,
+            "listener should drop after the expected channel is claimed"
+        );
         let _ = shutdown_tx.send(());
         listen.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn write_frames_coalesce_until_flush() {
+        let (client, mut server) = connected_pair().await;
+        let writes = Arc::new(AtomicUsize::new(0));
+        let flushes = Arc::new(AtomicUsize::new(0));
+        let mut writer = BufWriter::with_capacity(
+            WRITE_BUF_BYTES,
+            CountIo {
+                inner: client,
+                writes: writes.clone(),
+                flushes: flushes.clone(),
+            },
+        );
+        const N: u32 = 32;
+        for i in 0..N {
+            write_frame(&mut writer, &i.to_le_bytes()).await.unwrap();
+        }
+        assert_eq!(
+            writes.load(Ordering::Relaxed),
+            0,
+            "small frames must stay in the write buf until flush"
+        );
+        assert_eq!(flushes.load(Ordering::Relaxed), 0);
+        writer.flush().await.unwrap();
+        assert!(writes.load(Ordering::Relaxed) >= 1);
+        assert_eq!(flushes.load(Ordering::Relaxed), 1);
+        for i in 0..N {
+            let payload = read_frame(&mut server).await.unwrap().unwrap();
+            assert_eq!(payload, i.to_le_bytes());
+        }
+    }
+
+    #[tokio::test]
+    async fn write_buf_full_flushes_without_explicit_flush() {
+        let (client, mut server) = connected_pair().await;
+        let writes = Arc::new(AtomicUsize::new(0));
+        let flushes = Arc::new(AtomicUsize::new(0));
+        let mut writer = BufWriter::with_capacity(
+            32,
+            CountIo {
+                inner: client,
+                writes: writes.clone(),
+                flushes: flushes.clone(),
+            },
+        );
+        const N: u64 = 8;
+        for i in 0..N {
+            write_frame(&mut writer, &i.to_le_bytes()).await.unwrap();
+        }
+        assert!(
+            writes.load(Ordering::Relaxed) >= 1,
+            "filling the write buf should write through to the socket"
+        );
+        let payload = tokio::time::timeout(Duration::from_secs(1), read_frame(&mut server))
+            .await
+            .expect("buf-full should push a frame to the peer without explicit flush")
+            .unwrap()
+            .unwrap();
+        assert_eq!(payload, 0u64.to_le_bytes());
+        writer.flush().await.unwrap();
+        for i in 1..N {
+            let payload = read_frame(&mut server).await.unwrap().unwrap();
+            assert_eq!(payload, i.to_le_bytes());
+        }
+    }
+
+    /// Many 1-record messages on one remote edge: frames stay length-prefixed
+    /// and all arrive. Coalesced flush is the soak signal (not per-Message).
+    #[tokio::test]
+    async fn pump_egress_coalesces_many_small_frames() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tx, rx) = batch_bounded_channel(8192);
+        let identity = EdgeIdentity {
+            channel_id: "soak".into(),
+            task_id: "a".into(),
+            target_task_id: "b".into(),
+        };
+        let running = Arc::new(AtomicBool::new(true));
+        let health = Arc::new(WorkerHealth::new());
+        let endpoint = RemoteEndpoint {
+            host: "127.0.0.1".into(),
+            port,
+        };
+        let pump = tokio::spawn(pump_egress(
+            rx,
+            endpoint,
+            identity,
+            health,
+            running.clone(),
+            None,
+        ));
+
+        let (mut server, _) = listener.accept().await.unwrap();
+        let handshake = read_frame(&mut server).await.unwrap().unwrap();
+        assert_eq!(handshake, b"soak");
+
+        const N: u64 = 512;
+        for i in 0..N {
+            tx.send(wm(i), None).await.unwrap();
+        }
+        drop(tx);
+
+        let mut got = Vec::with_capacity(N as usize);
+        while got.len() < N as usize {
+            let payload = tokio::time::timeout(Duration::from_secs(5), read_frame(&mut server))
+                .await
+                .expect("timed out waiting for coalesced frames")
+                .unwrap()
+                .expect("peer closed before all frames arrived");
+            let Message::Watermark(wm) = Message::from_bytes(&payload) else {
+                panic!("expected watermark");
+            };
+            got.push(wm.watermark_value);
+        }
+        assert_eq!(got, (0..N).collect::<Vec<_>>());
+
+        pump.await.unwrap();
+        running.store(false, Ordering::Relaxed);
     }
 }
