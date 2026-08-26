@@ -13,14 +13,12 @@ use std::time::{Duration, Instant};
 use metrics::{counter, gauge};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::{oneshot, Notify};
 use tokio::task::JoinHandle;
 
 use crate::common::message::Message;
 use crate::runtime::consts::{
     runtime_consts, TRANSPORT_TCP_CONNECT_MAX_RETRIES, TRANSPORT_TCP_CONNECT_RETRY_DELAY,
-    TRANSPORT_TCP_FLUSH_COALESCE,
 };
 use crate::runtime::health::{WorkerFatalReason, WorkerHealth};
 use crate::runtime::metrics::{
@@ -32,9 +30,10 @@ use crate::transport::batch_channel::{BatchReceiver, BatchSender};
 
 /// Same 12MiB cap as control-plane gRPC messages; TCP frames are length-prefixed.
 const MAX_FRAME_BYTES: u32 = 12 * 1024 * 1024;
-/// Userspace coalescing buffer. Auto-flushes when full; pump also flushes on
-/// empty edge queue (after the coalesce window) so small frames are not one syscall each.
-const WRITE_BUF_BYTES: usize = 64 * 1024;
+/// Userspace write buffer (tokio default). Auto-flushes when full.
+const WRITE_BUF_BYTES: usize = 8 * 1024;
+/// Flush leftover bytes this long after the last write if the edge queue is empty.
+const FLUSH_COALESCE: Duration = Duration::from_millis(2);
 const METRICS_TICK: Duration = Duration::from_millis(100);
 
 struct AbortOnDropHandles(Vec<JoinHandle<()>>);
@@ -162,28 +161,10 @@ async fn connect_with_retry(
     Err(last_err.unwrap_or_else(|| io::Error::other("tcp connect failed")))
 }
 
-fn report_write_fatal(
-    running: &AtomicBool,
-    identity: &EdgeIdentity,
-    labels: Option<&MetricsLabels>,
-    worker_health: &WorkerHealth,
-    what: &str,
-    err: io::Error,
-) {
-    if running.load(Ordering::Relaxed) {
-        increment_disconnects(identity, labels);
-        worker_health.report_fatal(
-            WorkerFatalReason::TransportDisconnect,
-            format!("[TCP] {what} channel {}: {err}", identity.channel_id),
-        );
-    }
-}
-
 /// Drain one egress queue onto a dedicated TCP connection.
 ///
-/// Frames stay length-prefixed. Flush only when the write buffer fills, the
-/// edge queue is empty and the coalesce window has elapsed, or the window
-/// fires while data is still buffered — not after every `Message`.
+/// Frames stay length-prefixed. `BufWriter` flushes when full; we also flush
+/// when the edge queue stays empty for `FLUSH_COALESCE` — not after every `Message`.
 pub async fn pump_egress(
     mut rx: BatchReceiver,
     endpoint: RemoteEndpoint,
@@ -209,44 +190,28 @@ pub async fn pump_egress(
         }
     };
     let mut writer = BufWriter::with_capacity(WRITE_BUF_BYTES, stream);
-    let coalesce = runtime_consts().duration(TRANSPORT_TCP_FLUSH_COALESCE);
+
+    if let Err(e) = async {
+        write_frame(&mut writer, identity.channel_id.as_bytes()).await?;
+        writer.flush().await
+    }
+    .await
+    {
+        if running.load(Ordering::Relaxed) {
+            increment_disconnects(&identity, labels.as_ref());
+            worker_health.report_fatal(
+                WorkerFatalReason::TransportDisconnect,
+                format!(
+                    "[TCP] handshake write failed channel {}: {}",
+                    identity.channel_id, e
+                ),
+            );
+        }
+        return;
+    }
 
     let mut window_start = Instant::now();
     let mut blocked_ns: u64 = 0;
-
-    if let Err(e) = write_frame(&mut writer, identity.channel_id.as_bytes()).await {
-        report_write_fatal(
-            &running,
-            &identity,
-            labels.as_ref(),
-            &worker_health,
-            "handshake write failed",
-            e,
-        );
-        return;
-    }
-    // Peer must see the channel id before data frames.
-    if let Err(e) = sampled_io(
-        writer.flush(),
-        &identity,
-        labels.as_ref(),
-        &mut window_start,
-        &mut blocked_ns,
-    )
-    .await
-    {
-        report_write_fatal(
-            &running,
-            &identity,
-            labels.as_ref(),
-            &worker_health,
-            "handshake flush failed",
-            e,
-        );
-        return;
-    }
-
-    let mut unflushed_since: Option<Instant> = None;
 
     loop {
         if !running.load(Ordering::Relaxed) {
@@ -254,38 +219,18 @@ pub async fn pump_egress(
             return;
         }
 
-        let pending = unflushed_since.is_some();
-        let coalesce_wait = unflushed_since.map(|t| coalesce.saturating_sub(t.elapsed()));
-
+        let pending = !writer.buffer().is_empty();
         tokio::select! {
             biased;
 
             message = rx.recv() => {
                 let Some(message) = message else {
-                    if let Err(e) = sampled_io(
-                        writer.flush(),
-                        &identity,
-                        labels.as_ref(),
-                        &mut window_start,
-                        &mut blocked_ns,
-                    )
-                    .await
-                    {
-                        report_write_fatal(
-                            &running,
-                            &identity,
-                            labels.as_ref(),
-                            &worker_health,
-                            "write failed",
-                            e,
-                        );
-                    }
+                    let _ = writer.flush().await;
                     return;
                 };
-                if let Err(e) = write_queued_frames(
-                    &mut writer,
-                    message,
-                    &mut rx,
+                let bytes = message.to_bytes();
+                if let Err(e) = sampled_io(
+                    write_frame(&mut writer, &bytes),
                     &identity,
                     labels.as_ref(),
                     &mut window_start,
@@ -293,42 +238,18 @@ pub async fn pump_egress(
                 )
                 .await
                 {
-                    report_write_fatal(
-                        &running,
-                        &identity,
-                        labels.as_ref(),
-                        &worker_health,
-                        "write failed",
-                        e,
-                    );
-                    return;
-                }
-                if let Err(e) = flush_if_ready(
-                    &mut writer,
-                    &mut unflushed_since,
-                    coalesce,
-                    &identity,
-                    labels.as_ref(),
-                    &mut window_start,
-                    &mut blocked_ns,
-                )
-                .await
-                {
-                    report_write_fatal(
-                        &running,
-                        &identity,
-                        labels.as_ref(),
-                        &worker_health,
-                        "write failed",
-                        e,
-                    );
+                    if running.load(Ordering::Relaxed) {
+                        increment_disconnects(&identity, labels.as_ref());
+                        worker_health.report_fatal(
+                            WorkerFatalReason::TransportDisconnect,
+                            format!("[TCP] write failed channel {}: {}", identity.channel_id, e),
+                        );
+                    }
                     return;
                 }
             }
 
-            _ = async {
-                tokio::time::sleep(coalesce_wait.unwrap_or(Duration::ZERO)).await;
-            }, if pending => {
+            _ = tokio::time::sleep(FLUSH_COALESCE), if pending => {
                 if let Err(e) = sampled_io(
                     writer.flush(),
                     &identity,
@@ -338,17 +259,15 @@ pub async fn pump_egress(
                 )
                 .await
                 {
-                    report_write_fatal(
-                        &running,
-                        &identity,
-                        labels.as_ref(),
-                        &worker_health,
-                        "write failed",
-                        e,
-                    );
+                    if running.load(Ordering::Relaxed) {
+                        increment_disconnects(&identity, labels.as_ref());
+                        worker_health.report_fatal(
+                            WorkerFatalReason::TransportDisconnect,
+                            format!("[TCP] write failed channel {}: {}", identity.channel_id, e),
+                        );
+                    }
                     return;
                 }
-                unflushed_since = None;
             }
 
             _ = tokio::time::sleep(METRICS_TICK), if !pending => {
@@ -363,65 +282,8 @@ pub async fn pump_egress(
     }
 }
 
-async fn write_queued_frames<W>(
-    writer: &mut W,
-    first: Message,
-    rx: &mut BatchReceiver,
-    identity: &EdgeIdentity,
-    labels: Option<&MetricsLabels>,
-    window_start: &mut Instant,
-    blocked_ns: &mut u64,
-) -> io::Result<()>
-where
-    W: AsyncWriteExt + Unpin,
-{
-    let mut next = Some(first);
-    while let Some(message) = next {
-        let bytes = message.to_bytes();
-        sampled_io(
-            write_frame(writer, &bytes),
-            identity,
-            labels,
-            window_start,
-            blocked_ns,
-        )
-        .await?;
-        next = match rx.try_recv() {
-            Ok(message) => Some(message),
-            Err(TryRecvError::Empty | TryRecvError::Disconnected) => None,
-        };
-    }
-    Ok(())
-}
-
-/// Flush when the buffer is already empty (auto-flushed because full), or when
-/// the edge queue is drained and the coalesce window has elapsed.
-async fn flush_if_ready<W>(
-    writer: &mut BufWriter<W>,
-    unflushed_since: &mut Option<Instant>,
-    coalesce: Duration,
-    identity: &EdgeIdentity,
-    labels: Option<&MetricsLabels>,
-    window_start: &mut Instant,
-    blocked_ns: &mut u64,
-) -> io::Result<()>
-where
-    W: AsyncWriteExt + Unpin,
-{
-    if writer.buffer().is_empty() {
-        *unflushed_since = None;
-        return Ok(());
-    }
-    let started = *unflushed_since.get_or_insert_with(Instant::now);
-    if started.elapsed() >= coalesce {
-        sampled_io(writer.flush(), identity, labels, window_start, blocked_ns).await?;
-        *unflushed_since = None;
-    }
-    Ok(())
-}
-
-/// Sample write-block while a write or flush is in flight so a multi-second TCP
-/// window stall shows up on the gauge before the IO returns.
+/// Sample write-block while `write_all` / `flush` is in flight so a multi-second
+/// TCP window stall shows up on the gauge before the IO returns.
 async fn sampled_io<F>(
     fut: F,
     identity: &EdgeIdentity,
@@ -674,46 +536,6 @@ mod tests {
     use super::*;
     use crate::common::message::WatermarkMessage;
     use crate::transport::batch_channel::batch_bounded_channel;
-    use std::pin::Pin;
-    use std::sync::atomic::AtomicUsize;
-    use std::task::{Context, Poll};
-    use tokio::io::AsyncWrite;
-
-    struct CountIo<W> {
-        inner: W,
-        writes: Arc<AtomicUsize>,
-        flushes: Arc<AtomicUsize>,
-    }
-
-    impl<W: AsyncWrite + Unpin> AsyncWrite for CountIo<W> {
-        fn poll_write(
-            mut self: Pin<&mut Self>,
-            cx: &mut Context<'_>,
-            buf: &[u8],
-        ) -> Poll<io::Result<usize>> {
-            match Pin::new(&mut self.inner).poll_write(cx, buf) {
-                Poll::Ready(Ok(n)) => {
-                    self.writes.fetch_add(1, Ordering::Relaxed);
-                    Poll::Ready(Ok(n))
-                }
-                other => other,
-            }
-        }
-
-        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-            match Pin::new(&mut self.inner).poll_flush(cx) {
-                Poll::Ready(Ok(())) => {
-                    self.flushes.fetch_add(1, Ordering::Relaxed);
-                    Poll::Ready(Ok(()))
-                }
-                other => other,
-            }
-        }
-
-        fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-            Pin::new(&mut self.inner).poll_shutdown(cx)
-        }
-    }
 
     fn wm(i: u64) -> Message {
         Message::Watermark(WatermarkMessage::new("t".to_string(), i, Some(0)))
@@ -797,73 +619,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn write_frames_coalesce_until_flush() {
+    async fn write_frame_does_not_flush() {
         let (client, mut server) = connected_pair().await;
-        let writes = Arc::new(AtomicUsize::new(0));
-        let flushes = Arc::new(AtomicUsize::new(0));
-        let mut writer = BufWriter::with_capacity(
-            WRITE_BUF_BYTES,
-            CountIo {
-                inner: client,
-                writes: writes.clone(),
-                flushes: flushes.clone(),
-            },
-        );
-        const N: u32 = 32;
-        for i in 0..N {
-            write_frame(&mut writer, &i.to_le_bytes()).await.unwrap();
-        }
-        assert_eq!(
-            writes.load(Ordering::Relaxed),
-            0,
-            "small frames must stay in the write buf until flush"
-        );
-        assert_eq!(flushes.load(Ordering::Relaxed), 0);
-        writer.flush().await.unwrap();
-        assert!(writes.load(Ordering::Relaxed) >= 1);
-        assert_eq!(flushes.load(Ordering::Relaxed), 1);
-        for i in 0..N {
-            let payload = read_frame(&mut server).await.unwrap().unwrap();
-            assert_eq!(payload, i.to_le_bytes());
-        }
-    }
-
-    #[tokio::test]
-    async fn write_buf_full_flushes_without_explicit_flush() {
-        let (client, mut server) = connected_pair().await;
-        let writes = Arc::new(AtomicUsize::new(0));
-        let flushes = Arc::new(AtomicUsize::new(0));
-        let mut writer = BufWriter::with_capacity(
-            32,
-            CountIo {
-                inner: client,
-                writes: writes.clone(),
-                flushes: flushes.clone(),
-            },
-        );
-        const N: u64 = 8;
-        for i in 0..N {
-            write_frame(&mut writer, &i.to_le_bytes()).await.unwrap();
-        }
+        let mut writer = BufWriter::with_capacity(WRITE_BUF_BYTES, client);
+        write_frame(&mut writer, b"hello").await.unwrap();
         assert!(
-            writes.load(Ordering::Relaxed) >= 1,
-            "filling the write buf should write through to the socket"
+            tokio::time::timeout(Duration::from_millis(50), read_frame(&mut server))
+                .await
+                .is_err(),
+            "frame must stay in the write buf until flush"
         );
-        let payload = tokio::time::timeout(Duration::from_secs(1), read_frame(&mut server))
-            .await
-            .expect("buf-full should push a frame to the peer without explicit flush")
-            .unwrap()
-            .unwrap();
-        assert_eq!(payload, 0u64.to_le_bytes());
         writer.flush().await.unwrap();
-        for i in 1..N {
-            let payload = read_frame(&mut server).await.unwrap().unwrap();
-            assert_eq!(payload, i.to_le_bytes());
-        }
+        assert_eq!(read_frame(&mut server).await.unwrap().unwrap(), b"hello");
     }
 
     /// Many 1-record messages on one remote edge: frames stay length-prefixed
-    /// and all arrive. Coalesced flush is the soak signal (not per-Message).
+    /// and all arrive. Coalesced flush is write-side only.
     #[tokio::test]
     async fn pump_egress_coalesces_many_small_frames() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

@@ -22,6 +22,5 @@
   "worker.register_connect_timeout": "200ms",
   "worker.register_rpc_timeout": "500ms",
   "transport.tcp_connect_max_retries": 2,
-  "transport.tcp_connect_retry_delay": "50ms",
-  "transport.tcp_flush_coalesce": "1ms"
+  "transport.tcp_connect_retry_delay": "50ms"
 }
