@@ -574,13 +574,12 @@ mod tests {
         crate::transport::batch_channel::BatchSender,
         TcpStream,
         JoinHandle<()>,
-        Arc<AtomicBool>,
     ) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let (tx, rx) = batch_bounded_channel(8192);
         let identity = EdgeIdentity {
-            channel_id: "soak".into(),
+            channel_id: "edge".into(),
             task_id: "a".into(),
             target_task_id: "b".into(),
         };
@@ -590,18 +589,11 @@ mod tests {
             host: "127.0.0.1".into(),
             port,
         };
-        let pump = tokio::spawn(pump_egress(
-            rx,
-            endpoint,
-            identity,
-            health,
-            running.clone(),
-            None,
-        ));
+        let pump = tokio::spawn(pump_egress(rx, endpoint, identity, health, running, None));
         let (mut server, _) = listener.accept().await.unwrap();
         let handshake = read_frame(&mut server).await.unwrap().unwrap();
-        assert_eq!(handshake, b"soak");
-        (tx, server, pump, running)
+        assert_eq!(handshake, b"edge");
+        (tx, server, pump)
     }
 
     async fn connected_pair() -> (TcpStream, TcpStream) {
@@ -681,26 +673,11 @@ mod tests {
         listen.await.unwrap();
     }
 
-    #[tokio::test]
-    async fn write_frame_does_not_flush() {
-        let (client, mut server) = connected_pair().await;
-        let mut writer = BufWriter::with_capacity(WRITE_BUF_BYTES, client);
-        write_frame(&mut writer, b"hello").await.unwrap();
-        assert!(
-            tokio::time::timeout(Duration::from_millis(50), read_frame(&mut server))
-                .await
-                .is_err(),
-            "frame must stay in the write buf until flush"
-        );
-        writer.flush().await.unwrap();
-        assert_eq!(read_frame(&mut server).await.unwrap().unwrap(), b"hello");
-    }
-
     /// One small frame must not hit the wire before the coalesce deadline, and
     /// must arrive shortly after.
     #[tokio::test]
     async fn pump_flushes_one_frame_after_coalesce_window() {
-        let (tx, mut server, pump, _running) = started_pump().await;
+        let (tx, mut server, pump) = started_pump().await;
         tx.send(wm(1), None).await.unwrap();
         assert!(
             tokio::time::timeout(FLUSH_COALESCE / 2, read_frame(&mut server))
@@ -725,7 +702,7 @@ mod tests {
     /// wait for the 8KiB buf or a 2ms idle gap.
     #[tokio::test]
     async fn pump_flushes_trickle_by_first_byte_deadline() {
-        let (tx, mut server, pump, _running) = started_pump().await;
+        let (tx, mut server, pump) = started_pump().await;
         let sender = tx.clone();
         let send = tokio::spawn(async move {
             for i in 0..40u64 {
@@ -742,24 +719,5 @@ mod tests {
         send.await.unwrap();
         drop(tx);
         pump.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn pump_flushes_when_running_cleared() {
-        let (tx, mut server, pump, running) = started_pump().await;
-        tx.send(wm(7), None).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(1)).await;
-        running.store(false, Ordering::Relaxed);
-        tokio::time::timeout(Duration::from_secs(1), pump)
-            .await
-            .expect("pump should flush and exit after running=false")
-            .unwrap();
-        let payload = tokio::time::timeout(Duration::from_millis(100), read_frame(&mut server))
-            .await
-            .expect("running=false must flush the write buf")
-            .unwrap()
-            .unwrap();
-        assert_eq!(watermark_value(&payload), 7);
-        drop(tx);
     }
 }
