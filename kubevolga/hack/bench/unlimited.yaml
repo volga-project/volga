@@ -17,9 +17,11 @@ launch:
   datagen:
     rate: null
     batch_size: 20
+  watermark:
+    out_of_orderness_ms: 0
+    emit_interval_ms: 200
   window:
     tiling: [1s, 5s]
-    out_of_orderness_ms: 0
     allowed_lateness_ms: 0
   sql: |
     SELECT timestamp, key, value,

@@ -769,5 +769,105 @@ mod tests {
         assert!(matches!(seen[0], Message::Regular(_)));
         assert_eq!(seen.len(), 1);
     }
+
+    fn ts_up(upstream: &str, ts_ms: i64) -> Message {
+        let mut m = ts_message(ts_ms);
+        m.set_upstream_vertex_id(upstream.to_string());
+        m
+    }
+
+    fn preprocess_assign(
+        input: crate::runtime::operators::operator::MessageStream,
+        interval: Duration,
+    ) -> crate::runtime::operators::operator::MessageStream {
+        let cfg = WatermarkAssignConfig::new(
+            0,
+            TimeHint::ColumnName {
+                name: "ts_ms".to_string(),
+            },
+        )
+        .with_emit_interval(interval);
+        StreamTask::create_preprocessed_input_stream(
+            input,
+            Arc::<str>::from("v0"),
+            Some(cfg),
+            vec!["u0".to_string()],
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU8::new(StreamTaskStatus::Running as u8)),
+            CheckpointAligner::new(&["u0".to_string()], DataReaderControl::empty_for_test()),
+            None,
+            0,
+        )
+    }
+
+    #[tokio::test]
+    async fn stream_task_preprocess_timer_emits_held_watermark_without_next_record() {
+        let interval = Duration::from_millis(50);
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut out = preprocess_assign(
+            Box::pin(tokio_stream::wrappers::UnboundedReceiverStream::new(rx)),
+            interval,
+        );
+
+        tx.send(ts_up("u0", 100)).unwrap();
+        assert!(matches!(out.next().await, Some(Message::Regular(_))));
+        match out.next().await {
+            Some(Message::Watermark(w)) => assert_eq!(w.watermark_value, 100),
+            other => panic!("expected first watermark, got {other:?}"),
+        }
+
+        tx.send(ts_up("u0", 150)).unwrap();
+        assert!(matches!(out.next().await, Some(Message::Regular(_))));
+
+        let held = tokio::time::timeout(Duration::from_millis(500), out.next())
+            .await
+            .expect("timer should emit held watermark with no following record")
+            .expect("stream ended");
+        match held {
+            Message::Watermark(w) => assert_eq!(w.watermark_value, 150),
+            other => panic!("expected coalesced watermark, got {other:?}"),
+        }
+        drop(tx);
+    }
+
+    #[tokio::test]
+    async fn stream_task_preprocess_flushes_held_watermark_before_aligned_barrier() {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut out = preprocess_assign(
+            Box::pin(tokio_stream::wrappers::UnboundedReceiverStream::new(rx)),
+            Duration::from_secs(30),
+        );
+
+        tx.send(ts_up("u0", 100)).unwrap();
+        assert!(matches!(out.next().await, Some(Message::Regular(_))));
+        match out.next().await {
+            Some(Message::Watermark(w)) => assert_eq!(w.watermark_value, 100),
+            other => panic!("expected first watermark, got {other:?}"),
+        }
+
+        tx.send(ts_up("u0", 180)).unwrap();
+        assert!(matches!(out.next().await, Some(Message::Regular(_))));
+
+        tx.send(Message::CheckpointBarrier(
+            crate::common::message::CheckpointBarrierMessage::new(
+                "u0".to_string(),
+                1,
+                0,
+                None,
+            ),
+        ))
+        .unwrap();
+
+        match out.next().await {
+            Some(Message::Watermark(w)) => assert_eq!(w.watermark_value, 180),
+            other => panic!("expected flushed watermark before barrier, got {other:?}"),
+        }
+        assert!(
+            matches!(out.next().await, Some(Message::CheckpointBarrier(_))),
+            "aligned barrier should follow flushed watermark"
+        );
+        drop(tx);
+    }
 }
 
