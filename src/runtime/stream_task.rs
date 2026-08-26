@@ -461,13 +461,31 @@ impl StreamTask {
         Self::send_to_collectors_if_needed(collectors_per_target_operator, injected).await;
     }
 
-    async fn collect_flushed_watermarks(
+    async fn send_source_assigned_watermarks(
+        collectors_per_target_operator: &mut HashMap<String, Collector>,
+        vertex_id: &VertexId,
+        labels: Option<&MetricsLabels>,
+        wms: Vec<WatermarkMessage>,
+    ) {
+        for wm in wms {
+            Self::send_source_assigned_watermark(
+                collectors_per_target_operator,
+                vertex_id,
+                labels,
+                wm,
+            )
+            .await;
+        }
+    }
+
+    async fn push_assigned_watermarks(
         manager: &mut WatermarkManager,
         vertex_id: &VertexId,
         labels: Option<&MetricsLabels>,
         outgoing: &mut Vec<Message>,
+        wms: Vec<WatermarkMessage>,
     ) {
-        for wm in manager.flush_pending(Instant::now()) {
+        for wm in wms {
             if let Some(out) = Self::merge_assigned_watermark(manager, vertex_id, labels, wm).await {
                 outgoing.push(Message::Watermark(out));
             }
@@ -525,11 +543,13 @@ impl StreamTask {
                         match &message {
                             Message::Watermark(watermark) => {
                                 if watermark.watermark_value == MAX_WATERMARK_VALUE {
-                                    Self::collect_flushed_watermarks(
+                                    let wms = watermark_manager.flush_pending();
+                                    Self::push_assigned_watermarks(
                                         &mut watermark_manager,
                                         &vertex_id,
                                         labels.as_ref(),
                                         &mut outgoing,
+                                        wms,
                                     ).await;
                                 }
                                 if watermark_manager.assigner_enabled() && watermark.watermark_value != MAX_WATERMARK_VALUE {
@@ -553,11 +573,13 @@ impl StreamTask {
                                         );
                                         // Held coalesced WMs must precede the barrier so downstream
                                         // snapshots include event time the assigner already has.
-                                        Self::collect_flushed_watermarks(
+                                        let wms = watermark_manager.flush_pending();
+                                        Self::push_assigned_watermarks(
                                             &mut watermark_manager,
                                             &vertex_id,
                                             labels.as_ref(),
                                             &mut outgoing,
+                                            wms,
                                         ).await;
                                         outgoing.push(Message::CheckpointBarrier(
                                             crate::common::message::CheckpointBarrierMessage::new(
@@ -585,38 +607,37 @@ impl StreamTask {
                                 let injected = watermark_manager.on_data_message(&upstream_for_msg, &message);
                                 outgoing.push(message);
                                 if let Some(wm) = injected {
-                                    if let Some(out) = Self::merge_assigned_watermark(
+                                    Self::push_assigned_watermarks(
                                         &mut watermark_manager,
                                         &vertex_id,
                                         labels.as_ref(),
-                                        wm,
-                                    ).await {
-                                        outgoing.push(Message::Watermark(out));
-                                    }
+                                        &mut outgoing,
+                                        vec![wm],
+                                    ).await;
                                 }
                             }
                         }
                         } else {
-                            Self::collect_flushed_watermarks(
+                            let wms = watermark_manager.flush_pending();
+                            Self::push_assigned_watermarks(
                                 &mut watermark_manager,
                                 &vertex_id,
                                 labels.as_ref(),
                                 &mut outgoing,
+                                wms,
                             ).await;
                             input_ended = true;
                         }
                     }
                     _ = Self::sleep_until_deadline(deadline) => {
-                        for wm in watermark_manager.try_emit_due(Instant::now()) {
-                            if let Some(out) = Self::merge_assigned_watermark(
-                                &mut watermark_manager,
-                                &vertex_id,
-                                labels.as_ref(),
-                                wm,
-                            ).await {
-                                outgoing.push(Message::Watermark(out));
-                            }
-                        }
+                        let wms = watermark_manager.try_emit_due();
+                        Self::push_assigned_watermarks(
+                            &mut watermark_manager,
+                            &vertex_id,
+                            labels.as_ref(),
+                            &mut outgoing,
+                            wms,
+                        ).await;
                     }
                 }
                 for message in outgoing {
@@ -887,15 +908,13 @@ impl StreamTask {
                                 vertex_id, checkpoint_id
                             );
                             if let Some(manager) = source_watermark_manager.as_mut() {
-                                for wm in manager.flush_pending(Instant::now()) {
-                                    Self::send_source_assigned_watermark(
-                                        &mut collectors_per_target_operator,
-                                        &vertex_id,
-                                        metrics_labels.as_ref(),
-                                        wm,
-                                    )
-                                    .await;
-                                }
+                                Self::send_source_assigned_watermarks(
+                                    &mut collectors_per_target_operator,
+                                    &vertex_id,
+                                    metrics_labels.as_ref(),
+                                    manager.flush_pending(),
+                                )
+                                .await;
                             }
                             Some(Message::CheckpointBarrier(
                                 crate::common::message::CheckpointBarrierMessage::new(
@@ -930,15 +949,13 @@ impl StreamTask {
                             res = operator.poll_next() => res,
                             _ = Self::sleep_until_deadline(deadline) => {
                                 if let Some(manager) = source_watermark_manager.as_mut() {
-                                    for wm in manager.try_emit_due(Instant::now()) {
-                                        Self::send_source_assigned_watermark(
-                                            &mut collectors_per_target_operator,
-                                            &vertex_id,
-                                            metrics_labels.as_ref(),
-                                            wm,
-                                        )
-                                        .await;
-                                    }
+                                    Self::send_source_assigned_watermarks(
+                                        &mut collectors_per_target_operator,
+                                        &vertex_id,
+                                        metrics_labels.as_ref(),
+                                        manager.try_emit_due(),
+                                    )
+                                    .await;
                                 }
                                 OperatorPollResult::Continue
                             }
@@ -1102,11 +1119,11 @@ impl StreamTask {
                         ).await;
 
                         if let Some(wm) = injected_wm {
-                            Self::send_source_assigned_watermark(
+                            Self::send_source_assigned_watermarks(
                                 &mut collectors_per_target_operator,
                                 &vertex_id,
                                 metrics_labels.as_ref(),
-                                wm,
+                                vec![wm],
                             )
                             .await;
                         }
@@ -1114,15 +1131,13 @@ impl StreamTask {
                     OperatorPollResult::None => {
                         if is_source {
                             if let Some(manager) = source_watermark_manager.as_mut() {
-                                for wm in manager.flush_pending(Instant::now()) {
-                                    Self::send_source_assigned_watermark(
-                                        &mut collectors_per_target_operator,
-                                        &vertex_id,
-                                        metrics_labels.as_ref(),
-                                        wm,
-                                    )
-                                    .await;
-                                }
+                                Self::send_source_assigned_watermarks(
+                                    &mut collectors_per_target_operator,
+                                    &vertex_id,
+                                    metrics_labels.as_ref(),
+                                    manager.flush_pending(),
+                                )
+                                .await;
                             }
                             let wm = Message::Watermark(WatermarkMessage::new(
                                 vertex_id.as_ref().to_string(),

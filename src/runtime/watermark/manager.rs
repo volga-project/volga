@@ -15,7 +15,6 @@ use super::confg::{TimeHint, WatermarkAssignConfig};
 struct UpstreamWatermarkProgress {
     max_event_time_seen_ms: u64,
     last_emitted_wm_ms: u64,
-    dirty: bool,
     last_emit_at: Option<Instant>,
 }
 
@@ -65,9 +64,41 @@ impl WatermarkAssignerState {
         now: Instant,
     ) -> WatermarkMessage {
         progress.last_emitted_wm_ms = candidate;
-        progress.dirty = false;
         progress.last_emit_at = Some(now);
         WatermarkMessage::new(upstream_vertex_id.to_string(), candidate, None)
+    }
+
+    fn unpublished(progress: &UpstreamWatermarkProgress, out_of_orderness_ms: u64) -> bool {
+        Self::candidate(progress, out_of_orderness_ms) > progress.last_emitted_wm_ms
+    }
+
+    fn maybe_emit(
+        progress: &mut UpstreamWatermarkProgress,
+        upstream_vertex_id: &str,
+        out_of_orderness_ms: u64,
+        interval: Duration,
+        now: Instant,
+        force: bool,
+    ) -> Option<WatermarkMessage> {
+        let candidate = Self::candidate(progress, out_of_orderness_ms);
+        if candidate > progress.last_emitted_wm_ms && (force || Self::is_due(progress, interval, now))
+        {
+            Some(Self::emit(progress, upstream_vertex_id, candidate, now))
+        } else {
+            None
+        }
+    }
+
+    fn emit_all(&mut self, now: Instant, force: bool) -> Vec<WatermarkMessage> {
+        let interval = self.emit_interval;
+        let ooo = self.out_of_orderness_ms;
+        let mut out = Vec::new();
+        for (upstream_id, progress) in self.per_upstream.iter_mut() {
+            if let Some(wm) = Self::maybe_emit(progress, upstream_id, ooo, interval, now, force) {
+                out.push(wm);
+            }
+        }
+        out
     }
 
     fn resolve_ts_column_index(&self, batch: &RecordBatch) -> usize {
@@ -149,56 +180,33 @@ impl WatermarkAssignerState {
             .or_default();
 
         progress.max_event_time_seen_ms = progress.max_event_time_seen_ms.max(batch_max);
-        let candidate = Self::candidate(progress, self.out_of_orderness_ms);
-
-        if candidate > progress.last_emitted_wm_ms {
-            if Self::is_due(progress, self.emit_interval, now) {
-                Some(Self::emit(progress, upstream_vertex_id, candidate, now))
-            } else {
-                progress.dirty = true;
-                None
-            }
-        } else {
-            None
-        }
+        Self::maybe_emit(
+            progress,
+            upstream_vertex_id,
+            self.out_of_orderness_ms,
+            self.emit_interval,
+            now,
+            false,
+        )
     }
 
     pub fn try_emit_due(&mut self, now: Instant) -> Vec<WatermarkMessage> {
-        let interval = self.emit_interval;
-        let ooo = self.out_of_orderness_ms;
-        let mut out = Vec::new();
-        for (upstream_id, progress) in self.per_upstream.iter_mut() {
-            let candidate = Self::candidate(progress, ooo);
-            if progress.dirty
-                && candidate > progress.last_emitted_wm_ms
-                && Self::is_due(progress, interval, now)
-            {
-                out.push(Self::emit(progress, upstream_id, candidate, now));
-            }
-        }
-        out
+        self.emit_all(now, false)
     }
 
-    /// Publish any advanced candidate regardless of interval (EOF / max watermark).
+    /// Publish any advanced candidate regardless of interval (EOF / barrier / max).
     pub fn flush(&mut self, now: Instant) -> Vec<WatermarkMessage> {
-        let ooo = self.out_of_orderness_ms;
-        let mut out = Vec::new();
-        for (upstream_id, progress) in self.per_upstream.iter_mut() {
-            let candidate = Self::candidate(progress, ooo);
-            if candidate > progress.last_emitted_wm_ms {
-                out.push(Self::emit(progress, upstream_id, candidate, now));
-            }
-        }
-        out
+        self.emit_all(now, true)
     }
 
     pub fn next_emit_deadline(&self) -> Option<Instant> {
         if self.emit_interval.is_zero() {
             return None;
         }
+        let ooo = self.out_of_orderness_ms;
         self.per_upstream
             .values()
-            .filter(|p| p.dirty)
+            .filter(|p| Self::unpublished(p, ooo))
             .filter_map(|p| p.last_emit_at.map(|t| t + self.emit_interval))
             .min()
     }
@@ -250,14 +258,16 @@ impl WatermarkManager {
             .and_then(|assigner| assigner.on_data_message_at(upstream_vertex_id, message, now))
     }
 
-    pub fn try_emit_due(&mut self, now: Instant) -> Vec<WatermarkMessage> {
+    pub fn try_emit_due(&mut self) -> Vec<WatermarkMessage> {
+        let now = Instant::now();
         self.assigner
             .as_mut()
             .map(|assigner| assigner.try_emit_due(now))
             .unwrap_or_default()
     }
 
-    pub fn flush_pending(&mut self, now: Instant) -> Vec<WatermarkMessage> {
+    pub fn flush_pending(&mut self) -> Vec<WatermarkMessage> {
+        let now = Instant::now();
         self.assigner
             .as_mut()
             .map(|assigner| assigner.flush(now))
@@ -480,7 +490,7 @@ mod tests {
     }
 
     #[test]
-    fn timer_does_not_emit_when_not_dirty() {
+    fn timer_does_not_emit_when_already_published() {
         let mut assigner = assigner_with_interval(Duration::from_millis(50));
         let t0 = Instant::now();
         assert!(assigner
@@ -493,7 +503,7 @@ mod tests {
     }
 
     #[test]
-    fn flush_emits_dirty_before_interval() {
+    fn flush_emits_unpublished_before_interval() {
         let mut assigner = assigner_with_interval(Duration::from_millis(200));
         let t0 = Instant::now();
         assigner
