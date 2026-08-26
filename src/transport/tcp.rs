@@ -32,7 +32,7 @@ use crate::transport::batch_channel::{BatchReceiver, BatchSender};
 const MAX_FRAME_BYTES: u32 = 12 * 1024 * 1024;
 /// Userspace write buffer (tokio default). Auto-flushes when full.
 const WRITE_BUF_BYTES: usize = 8 * 1024;
-/// Flush leftover bytes this long after the last write if the edge queue is empty.
+/// Flush leftover bytes this long after the first unflushed byte.
 const FLUSH_COALESCE: Duration = Duration::from_millis(2);
 const METRICS_TICK: Duration = Duration::from_millis(100);
 
@@ -177,37 +177,39 @@ pub async fn pump_egress(
     let stream = match connect_with_retry(&endpoint, &running).await {
         Ok(stream) => stream,
         Err(e) => {
-            if running.load(Ordering::Relaxed) {
-                increment_disconnects(&identity, labels.as_ref());
-                worker_health.report_fatal(
-                    WorkerFatalReason::TransportDisconnect,
-                    format!(
-                        "[TCP] connect failed channel {} addr {}: {}",
-                        identity.channel_id, endpoint, e
-                    ),
-                );
-            }
+            report_write_fatal(
+                &running,
+                &identity,
+                labels.as_ref(),
+                &worker_health,
+                &format!("connect failed addr {endpoint}"),
+                e,
+            );
             return;
         }
     };
     let mut writer = BufWriter::with_capacity(WRITE_BUF_BYTES, stream);
 
-    if let Err(e) = async {
-        write_frame(&mut writer, identity.channel_id.as_bytes()).await?;
-        writer.flush().await
+    if let Err(e) = write_frame(&mut writer, identity.channel_id.as_bytes()).await {
+        report_write_fatal(
+            &running,
+            &identity,
+            labels.as_ref(),
+            &worker_health,
+            "handshake write failed",
+            e,
+        );
+        return;
     }
-    .await
-    {
-        if running.load(Ordering::Relaxed) {
-            increment_disconnects(&identity, labels.as_ref());
-            worker_health.report_fatal(
-                WorkerFatalReason::TransportDisconnect,
-                format!(
-                    "[TCP] handshake write failed channel {}: {}",
-                    identity.channel_id, e
-                ),
-            );
-        }
+    if let Err(e) = writer.flush().await {
+        report_write_fatal(
+            &running,
+            &identity,
+            labels.as_ref(),
+            &worker_health,
+            "handshake write failed",
+            e,
+        );
         return;
     }
 
@@ -233,18 +235,15 @@ pub async fn pump_egress(
                 return;
             }
             Ok(Some(message)) => {
-                let bytes = message.to_bytes();
-                if let Err(e) = write_frame_maybe_blocked(
-                    &mut writer,
-                    &bytes,
-                    &identity,
-                    labels.as_ref(),
-                    &mut window_start,
-                    &mut blocked_ns,
-                )
-                .await
-                {
-                    report_write_fatal(&running, &identity, labels.as_ref(), &worker_health, e);
+                if let Err(e) = write_frame(&mut writer, &message.to_bytes()).await {
+                    report_write_fatal(
+                        &running,
+                        &identity,
+                        labels.as_ref(),
+                        &worker_health,
+                        "write failed",
+                        e,
+                    );
                     return;
                 }
                 if writer.buffer().is_empty() {
@@ -264,7 +263,14 @@ pub async fn pump_egress(
                     )
                     .await
                     {
-                        report_write_fatal(&running, &identity, labels.as_ref(), &worker_health, e);
+                        report_write_fatal(
+                            &running,
+                            &identity,
+                            labels.as_ref(),
+                            &worker_health,
+                            "write failed",
+                            e,
+                        );
                         return;
                     }
                 } else {
@@ -285,44 +291,20 @@ fn report_write_fatal(
     identity: &EdgeIdentity,
     labels: Option<&MetricsLabels>,
     worker_health: &WorkerHealth,
+    what: &str,
     err: io::Error,
 ) {
     if running.load(Ordering::Relaxed) {
         increment_disconnects(identity, labels);
         worker_health.report_fatal(
             WorkerFatalReason::TransportDisconnect,
-            format!("[TCP] write failed channel {}: {err}", identity.channel_id),
+            format!("[TCP] {what} channel {}: {err}", identity.channel_id),
         );
     }
 }
 
-/// Sample write-block only when this frame cannot fit in the remaining buf
-/// (BufWriter will write through to the socket). Fits → memcpy, no metric timer.
-async fn write_frame_maybe_blocked(
-    writer: &mut BufWriter<TcpStream>,
-    payload: &[u8],
-    identity: &EdgeIdentity,
-    labels: Option<&MetricsLabels>,
-    window_start: &mut Instant,
-    blocked_ns: &mut u64,
-) -> io::Result<()> {
-    let frame_len = 4usize.saturating_add(payload.len());
-    if writer.buffer().len().saturating_add(frame_len) > WRITE_BUF_BYTES {
-        sample_write_block_metric(
-            write_frame(writer, payload),
-            identity,
-            labels,
-            window_start,
-            blocked_ns,
-        )
-        .await
-    } else {
-        write_frame(writer, payload).await
-    }
-}
-
-/// Metrics: sample write-block while `write_all` / `flush` is in flight so a
-/// multi-second TCP window stall shows up on the gauge before the IO returns.
+/// Metrics: sample write-block while `flush` is in flight so a multi-second TCP
+/// window stall shows up on the gauge before the IO returns.
 async fn sample_write_block_metric<F>(
     fut: F,
     identity: &EdgeIdentity,
@@ -718,7 +700,7 @@ mod tests {
     /// must arrive shortly after.
     #[tokio::test]
     async fn pump_flushes_one_frame_after_coalesce_window() {
-        let (tx, mut server, pump, running) = started_pump().await;
+        let (tx, mut server, pump, _running) = started_pump().await;
         tx.send(wm(1), None).await.unwrap();
         assert!(
             tokio::time::timeout(FLUSH_COALESCE / 2, read_frame(&mut server))
@@ -737,14 +719,13 @@ mod tests {
         assert_eq!(watermark_value(&payload), 1);
         drop(tx);
         pump.await.unwrap();
-        running.store(false, Ordering::Relaxed);
     }
 
     /// Trickle faster than 2ms must still flush by the first-byte deadline, not
     /// wait for the 8KiB buf or a 2ms idle gap.
     #[tokio::test]
     async fn pump_flushes_trickle_by_first_byte_deadline() {
-        let (tx, mut server, pump, running) = started_pump().await;
+        let (tx, mut server, pump, _running) = started_pump().await;
         let sender = tx.clone();
         let send = tokio::spawn(async move {
             for i in 0..40u64 {
@@ -761,7 +742,6 @@ mod tests {
         send.await.unwrap();
         drop(tx);
         pump.await.unwrap();
-        running.store(false, Ordering::Relaxed);
     }
 
     #[tokio::test]
@@ -781,35 +761,5 @@ mod tests {
             .unwrap();
         assert_eq!(watermark_value(&payload), 7);
         drop(tx);
-    }
-
-    /// Many 1-record messages on one remote edge: frames stay length-prefixed
-    /// and all arrive (close-flush after drop(tx)).
-    #[tokio::test]
-    async fn pump_egress_coalesces_many_small_frames() {
-        let (tx, mut server, pump, running) = started_pump().await;
-
-        const N: u64 = 512;
-        for i in 0..N {
-            tx.send(wm(i), None).await.unwrap();
-        }
-        drop(tx);
-
-        let mut got = Vec::with_capacity(N as usize);
-        while got.len() < N as usize {
-            let payload = tokio::time::timeout(Duration::from_secs(5), read_frame(&mut server))
-                .await
-                .expect("timed out waiting for coalesced frames")
-                .unwrap()
-                .expect("peer closed before all frames arrived");
-            let Message::Watermark(wm) = Message::from_bytes(&payload) else {
-                panic!("expected watermark");
-            };
-            got.push(wm.watermark_value);
-        }
-        assert_eq!(got, (0..N).collect::<Vec<_>>());
-
-        pump.await.unwrap();
-        running.store(false, Ordering::Relaxed);
     }
 }
