@@ -2,10 +2,13 @@
 
 use datafusion::scalar::ScalarValue;
 
+use crate::common::message::Message;
 use crate::common::MAX_WATERMARK_VALUE;
+use crate::runtime::operators::operator::{OperatorPollResult, OperatorTrait};
 use crate::runtime::operators::window::operator::WindowOperatorConfig;
 use crate::test_utils::window::harness::{
-    assert_window_values, batch, run_wo, window_exec_from_sql, Harness, WoWroHarness,
+    assert_window_values, batch, keyed_message, run_wo, watermark_message, window_exec_from_sql,
+    Harness, WoWroHarness,
 };
 use crate::runtime::operators::window::{
     TileConfig, TimeGranularity, TASK_METADATA_ROWS_ACCEPTED, TASK_METADATA_ROWS_DROPPED_LATE,
@@ -135,4 +138,45 @@ WINDOW w AS (
             .await;
         assert_window_values(&out, 3, &[vec![wro_expected]], "aggregate WRO");
     }
+}
+
+#[tokio::test]
+async fn ingest_drains_ready_messages_then_stops_before_watermark() {
+    let sql = r#"SELECT timestamp, value, partition_key, SUM(value) OVER w as sum_val
+FROM test_table
+WINDOW w AS (
+  PARTITION BY partition_key
+  ORDER BY timestamp
+  RANGE BETWEEN INTERVAL '5000' MILLISECOND PRECEDING AND CURRENT ROW
+)"#;
+    let exec = window_exec_from_sql(sql).await;
+    let mut h = Harness::new(WindowOperatorConfig::new(exec)).await;
+    h.op.set_input(Some(Box::pin(futures::stream::iter(vec![
+        keyed_message(batch(vec![1000], vec![1.0], vec!["A"]), "A"),
+        keyed_message(batch(vec![2000], vec![2.0], vec!["A"]), "A"),
+        watermark_message(2000),
+    ]))));
+
+    assert!(matches!(
+        h.op.poll_next().await,
+        OperatorPollResult::Continue
+    ));
+    let out = match h.op.poll_next().await {
+        OperatorPollResult::Ready(Message::Regular(base)) => base.record_batch,
+        other => panic!("expected emit on deferred watermark, got {other:?}"),
+    };
+    let wm = match h.op.poll_next().await {
+        OperatorPollResult::Ready(Message::Watermark(w)) => w.watermark_value,
+        other => panic!("expected passthrough watermark, got {other:?}"),
+    };
+    assert_eq!(wm, 2000);
+    assert_window_values(
+        &out,
+        3,
+        &[
+            vec![ScalarValue::Float64(Some(1.0))],
+            vec![ScalarValue::Float64(Some(3.0))],
+        ],
+        "both data messages ingested before the watermark",
+    );
 }
