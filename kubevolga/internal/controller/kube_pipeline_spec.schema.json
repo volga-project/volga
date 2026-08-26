@@ -299,7 +299,7 @@
       "type": "object",
       "properties": {
         "emit_interval_ms": {
-          "description": "Processing-time interval for coalescing watermark emits (ms).\nUnset uses the execution-mode default: 200 Streaming, 20 Request.\nBatch does not assign watermarks (EOF flush only).",
+          "description": "Processing-time interval for coalescing watermark emits (ms).\nUnset uses the runtime default (200ms). Batch does not assign watermarks (EOF flush only).",
           "type": [
             "integer",
             "null"

@@ -287,7 +287,9 @@ pub async fn run_window_benchmark(config: WindowBenchmarkConfig) -> Result<Bench
     // Set execution mode
     if config.output_mode == WindowOutputMode::StateOnly {
         // request mode has no direct sink
-        spec_builder = spec_builder.with_execution_mode(ExecutionMode::Request);
+        spec_builder = spec_builder
+            .with_execution_mode(ExecutionMode::Request)
+            .with_watermark_emit_interval_ms(Some(20));
     } else {
         spec_builder = spec_builder.with_sink(SinkSpec::in_memory_grpc(format!(
             "http://{}",

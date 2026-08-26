@@ -591,8 +591,8 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .emit_interval,
-            std::time::Duration::from_millis(200),
-            "streaming default emit interval"
+            crate::runtime::watermark::WatermarkAssignConfig::DEFAULT_EMIT_INTERVAL,
+            "default emit interval"
         );
 
         for node in graph.get_nodes() {

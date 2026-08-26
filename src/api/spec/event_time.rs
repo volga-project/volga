@@ -23,8 +23,8 @@ pub struct WatermarkSpec {
     #[serde(default)]
     pub idle_timeout_ms: Option<u64>,
     /// Processing-time interval for coalescing watermark emits (ms).
-    /// Unset uses the execution-mode default: 200 Streaming, 20 Request.
-    /// Batch does not assign watermarks (EOF flush only).
+    /// Unset uses the runtime default (200ms). Batch does not assign watermarks
+    /// (EOF flush only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub emit_interval_ms: Option<u64>,
 }

@@ -194,6 +194,7 @@ pub async fn run_window_request_benchmark(
             num_threads_per_task: 4,
         })
         .with_execution_mode(ExecutionMode::Request)
+        .with_watermark_emit_interval_ms(Some(20))
         .with_source(
             SourceSpec::new(
                 "events",

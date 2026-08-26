@@ -11,8 +11,7 @@ pub struct WatermarkAssignConfig {
 
 impl WatermarkAssignConfig {
     pub const DEFAULT_IDLE_TIMEOUT_MS: u64 = 1_000;
-    pub const DEFAULT_STREAMING_EMIT_INTERVAL: Duration = Duration::from_millis(200);
-    pub const DEFAULT_REQUEST_EMIT_INTERVAL: Duration = Duration::from_millis(20);
+    pub const DEFAULT_EMIT_INTERVAL: Duration = Duration::from_millis(200);
 
     pub fn new(out_of_orderness_ms: u64, time_hint: TimeHint) -> Self {
         Self {
@@ -20,7 +19,7 @@ impl WatermarkAssignConfig {
             time_hint,
             idle_timeout_ms: Some(Self::DEFAULT_IDLE_TIMEOUT_MS),
             // Tests / direct construction: emit on every advance. Planner fills
-            // streaming/request defaults; do not treat zero as a user-facing spec value.
+            // DEFAULT_EMIT_INTERVAL; do not treat zero as a user-facing spec value.
             emit_interval: Duration::ZERO,
         }
     }

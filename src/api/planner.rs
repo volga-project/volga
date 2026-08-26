@@ -40,7 +40,6 @@ use crate::runtime::operators::sink::sink_operator::SinkConfig;
 use crate::runtime::operators::aggregate::aggregate_operator::AggregateConfig;
 use crate::runtime::operators::window::operator::WindowOperatorConfig;
 use crate::runtime::watermark::WatermarkAssignConfig;
-use std::time::Duration;
 
 // pub static REQUEST_SOURCE_NAME: &str = "request_source";
 
@@ -198,11 +197,8 @@ impl Planner {
         optimized_plan.visit_with_subqueries(self)?;
         // Batch mode forbids watermark_assign on StreamTasks.
         if self.context.execution_mode != ExecutionMode::Batch {
-            self.logical_graph.set_emit_interval(match self.context.execution_mode {
-                ExecutionMode::Streaming => WatermarkAssignConfig::DEFAULT_STREAMING_EMIT_INTERVAL,
-                ExecutionMode::Request => WatermarkAssignConfig::DEFAULT_REQUEST_EMIT_INTERVAL,
-                ExecutionMode::Batch => Duration::ZERO,
-            });
+            self.logical_graph
+                .set_emit_interval(WatermarkAssignConfig::DEFAULT_EMIT_INTERVAL);
             apply_auto_watermark_assigns(&optimized_plan, &mut self.logical_graph)?;
         }
 
@@ -1013,8 +1009,8 @@ mod tests {
         assert!(
             assign_intervals
                 .iter()
-                .all(|&d| d == WatermarkAssignConfig::DEFAULT_REQUEST_EMIT_INTERVAL),
-            "request default emit interval: {assign_intervals:?}"
+                .all(|&d| d == WatermarkAssignConfig::DEFAULT_EMIT_INTERVAL),
+            "request uses the same emit-interval default unless spec overrides: {assign_intervals:?}"
         );
 
         // Verify window node has no outgoing edges
