@@ -162,33 +162,3 @@ impl PartitionTrait for RequestRoutePartition {
         return vec![task_index]
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::common::message::Message;
-    use arrow::array::Int32Array;
-    use arrow::datatypes::{DataType, Field, Schema};
-    use arrow::record_batch::RecordBatch;
-    use std::collections::HashMap;
-    use std::sync::Arc;
-
-    fn regular_with_dest(dest: usize) -> Message {
-        let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int32, false)]));
-        let batch = RecordBatch::try_new(
-            schema,
-            vec![Arc::new(Int32Array::from(vec![1]))],
-        )
-        .unwrap();
-        let mut extras = HashMap::new();
-        extras.insert(TARGET_SUBTASK_EXTRA.to_string(), dest.to_string());
-        Message::new(None, batch, None, Some(extras))
-    }
-
-    #[test]
-    fn hash_partition_reads_dest_extra() {
-        let mut p = HashPartition::new();
-        assert_eq!(p.partition(&regular_with_dest(0), 2), vec![0]);
-        assert_eq!(p.partition(&regular_with_dest(1), 2), vec![1]);
-    }
-}

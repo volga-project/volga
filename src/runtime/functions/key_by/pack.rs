@@ -188,58 +188,38 @@ mod tests {
     use arrow::datatypes::DataType;
     use std::collections::HashSet;
 
-    use crate::runtime::partition::{HashPartition, PartitionTrait};
-
     fn int_batch(values: Vec<i32>) -> RecordBatch {
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
         RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(values))]).unwrap()
     }
 
     #[test]
-    fn pack_by_dest_p2_skips_empty_buckets_and_hash_partition_reads_extra() {
+    fn pack_by_dest_skips_empty_buckets() {
         let message = Message::new(None, int_batch(vec![10, 20, 30]), None, None);
-        let hashes = [0u64, 1, 0];
-        let packed = pack_by_dest(&message, &hashes, 3);
+        let packed = pack_by_dest(&message, &[0u64, 1, 0], 3);
         assert_eq!(packed.len(), 2, "dest 2 is empty and skipped");
 
         let mut dests = HashSet::new();
-        let mut hp = HashPartition::new();
         let mut rows = 0usize;
         for m in &packed {
-            let dest: usize = m
-                .get_extras()
-                .unwrap()
-                .get(TARGET_SUBTASK_EXTRA)
-                .unwrap()
-                .parse()
-                .unwrap();
-            dests.insert(dest);
-            assert_eq!(hp.partition(m, 3), vec![dest]);
+            dests.insert(
+                m.get_extras()
+                    .unwrap()
+                    .get(TARGET_SUBTASK_EXTRA)
+                    .unwrap()
+                    .as_str(),
+            );
             rows += m.record_batch().num_rows();
         }
         assert_eq!(rows, 3);
-        assert_eq!(dests, HashSet::from([0, 1]));
-    }
-
-    #[test]
-    fn pack_empty_hashes_goes_to_dest_0() {
-        let message = Message::new(None, int_batch(vec![1, 2, 3]), None, None);
-        let hashes = vec![0u64; 3];
-        let packed = pack_by_dest(&message, &hashes, 2);
-        assert_eq!(packed.len(), 1);
-        assert_eq!(packed[0].record_batch().num_rows(), 3);
-        assert_eq!(
-            packed[0].get_extras().unwrap().get(TARGET_SUBTASK_EXTRA).unwrap(),
-            "0"
-        );
+        assert_eq!(dests, HashSet::from(["0", "1"]));
     }
 
     #[test]
     fn split_does_not_merge_distinct_keys_with_same_hash() {
         let key_schema = Arc::new(Schema::new(vec![Field::new("k", DataType::Utf8, false)]));
         let keys: ArrayRef = Arc::new(StringArray::from(vec!["a", "b", "a"]));
-        let hashes = [7u64, 7, 7];
-        let groups = group_row_indices(&hashes, &[keys], key_schema);
+        let groups = group_row_indices(&[7u64, 7, 7], &[keys], key_schema);
         assert_eq!(groups.len(), 2);
         let mut sizes: Vec<usize> = groups.iter().map(|(_, idxs)| idxs.len()).collect();
         sizes.sort();

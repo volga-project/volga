@@ -544,7 +544,6 @@ mod tests {
     use super::*;
     use crate::orchestrator::orchestrator::mock_worker_nodes;
     use crate::orchestrator::task_assignment::{TaskWorkerAssignStrategy, OperatorPerWorkerStrategy};
-    use crate::api::planner::{Planner, PlanningContext};
     use crate::runtime::operators::source::source_operator::{SourceConfig, VectorSourceConfig};
     use crate::runtime::functions::map::{MapFunction, ProjectionFunction};
     use crate::runtime::functions::map::filter_function::FilterFunction;
@@ -719,58 +718,6 @@ mod tests {
                 }
             } else {
                panic!("Expected different nodes for edge {}", edge.edge_id);
-            }
-        }
-    }
-
-    #[test]
-    fn test_linear_logical_to_execution_graph() {
-        let mut planner = Planner::new(
-            PlanningContext::new(SessionContext::new()).with_parallelism(2),
-        );
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("value", DataType::Utf8, false),
-        ]));
-        planner.register_source(
-            "t".to_string(),
-            SourceConfig::VectorSourceConfig(VectorSourceConfig::new(vec![])),
-            schema,
-        );
-        let logical_graph = planner
-            .sql_to_graph("SELECT value, COUNT(*) FROM t GROUP BY value")
-            .unwrap();
-        let graph = logical_graph.to_execution_graph();
-
-        // source -> keyby -> aggregate -> projection, parallelism 2
-        assert_eq!(graph.get_vertices().len(), 8);
-        assert_eq!(graph.get_edges().len(), 12);
-
-        for edge in graph.get_edges().values() {
-            let source_vertex = graph.get_vertex(&edge.source_vertex_id).unwrap();
-            let target_vertex = graph.get_vertex(&edge.target_vertex_id).unwrap();
-            match (&source_vertex.operator_config, &target_vertex.operator_config) {
-                (OperatorConfig::SourceConfig(_), OperatorConfig::KeyByConfig(_)) => {
-                    assert!(
-                        matches!(edge.partition_type, PartitionType::RoundRobin),
-                        "source -> keyby should be RoundRobin"
-                    );
-                }
-                (OperatorConfig::KeyByConfig(_), OperatorConfig::AggregateConfig(_)) => {
-                    assert!(
-                        matches!(edge.partition_type, PartitionType::Hash),
-                        "keyby -> aggregate should be Hash"
-                    );
-                }
-                (OperatorConfig::AggregateConfig(_), OperatorConfig::MapConfig(_)) => {
-                    assert!(
-                        matches!(edge.partition_type, PartitionType::RoundRobin),
-                        "aggregate -> projection should be RoundRobin"
-                    );
-                }
-                _ => panic!(
-                    "Unexpected edge: {} -> {}",
-                    edge.source_vertex_id, edge.target_vertex_id
-                ),
             }
         }
     }

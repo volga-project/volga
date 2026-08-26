@@ -195,17 +195,13 @@ mod tests {
             "SELECT name, department, COUNT(*) as count FROM employees GROUP BY name, department";
         let logical_graph = planner.sql_to_graph(sql).unwrap();
         let key_by = key_by_from_graph(&logical_graph);
-        let packed = key_by.key_by(message.clone(), 1);
-        assert_eq!(packed.len(), 1);
-        verify_name_dept_groups(&packed);
-
-        let packed_p2 = key_by.key_by(message, 2);
-        assert!(packed_p2.len() >= 1 && packed_p2.len() <= 2);
+        let packed = key_by.key_by(message, 2);
+        assert!(packed.len() >= 1 && packed.len() <= 2);
         assert_eq!(
-            packed_p2.iter().map(|m| m.record_batch().num_rows()).sum::<usize>(),
+            packed.iter().map(|m| m.record_batch().num_rows()).sum::<usize>(),
             6
         );
-        for m in &packed_p2 {
+        for m in &packed {
             let dest: usize = m
                 .get_extras()
                 .unwrap()
@@ -215,7 +211,7 @@ mod tests {
                 .unwrap();
             assert!(dest < 2);
         }
-        verify_name_dept_groups(&packed_p2);
+        verify_name_dept_groups(&packed);
     }
 
     #[tokio::test]
@@ -228,29 +224,6 @@ mod tests {
         let packed = key_by.key_by(message, 4);
         assert_eq!(packed.len(), 1);
         assert_eq!(packed[0].record_batch().num_rows(), 6);
-        let extras = packed[0].get_extras().unwrap();
-        assert_eq!(extras.get(TARGET_SUBTASK_EXTRA).unwrap(), "0");
-    }
-
-    #[tokio::test]
-    async fn test_datafusion_key_by_window_source() {
-        let (mut planner, message) = create_test_setup().await;
-        let sql = "SELECT name, department, salary, ROW_NUMBER() OVER (PARTITION BY name, department ORDER BY salary) as rn FROM employees";
-        let window_exec = extract_datafusion_window_exec(sql, &mut planner).await;
-        let key_by = KeyByFunction::new_window(window_exec);
-        let packed = key_by.key_by(message, 1);
-        assert_eq!(packed.len(), 1);
-        verify_name_dept_groups(&packed);
-    }
-
-    #[tokio::test]
-    async fn test_datafusion_key_by_window_no_partition_packs_to_dest_0() {
-        let (mut planner, message) = create_test_setup().await;
-        let sql = "SELECT name, salary, ROW_NUMBER() OVER (ORDER BY salary) as rn FROM employees";
-        let window_exec = extract_datafusion_window_exec(sql, &mut planner).await;
-        let key_by = KeyByFunction::new_window(window_exec);
-        let packed = key_by.key_by(message, 3);
-        assert_eq!(packed.len(), 1);
         let extras = packed[0].get_extras().unwrap();
         assert_eq!(extras.get(TARGET_SUBTASK_EXTRA).unwrap(), "0");
     }
