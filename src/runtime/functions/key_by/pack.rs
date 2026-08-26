@@ -202,17 +202,12 @@ mod tests {
         let mut dests = HashSet::new();
         let mut rows = 0usize;
         for m in &packed {
-            dests.insert(
-                m.get_extras()
-                    .unwrap()
-                    .get(TARGET_SUBTASK_EXTRA)
-                    .unwrap()
-                    .as_str(),
-            );
+            let extras = m.get_extras().unwrap();
+            dests.insert(extras.get(TARGET_SUBTASK_EXTRA).unwrap().clone());
             rows += m.record_batch().num_rows();
         }
         assert_eq!(rows, 3);
-        assert_eq!(dests, HashSet::from(["0", "1"]));
+        assert_eq!(dests, HashSet::from(["0".to_string(), "1".to_string()]));
     }
 
     #[test]
