@@ -39,6 +39,8 @@ use crate::runtime::operators::source::source_operator::SourceConfig;
 use crate::runtime::operators::sink::sink_operator::SinkConfig;
 use crate::runtime::operators::aggregate::aggregate_operator::AggregateConfig;
 use crate::runtime::operators::window::operator::WindowOperatorConfig;
+use crate::runtime::watermark::WatermarkAssignConfig;
+use std::time::Duration;
 
 // pub static REQUEST_SOURCE_NAME: &str = "request_source";
 
@@ -196,6 +198,11 @@ impl Planner {
         optimized_plan.visit_with_subqueries(self)?;
         // Batch mode forbids watermark_assign on StreamTasks.
         if self.context.execution_mode != ExecutionMode::Batch {
+            self.logical_graph.set_emit_interval(match self.context.execution_mode {
+                ExecutionMode::Streaming => WatermarkAssignConfig::DEFAULT_STREAMING_EMIT_INTERVAL,
+                ExecutionMode::Request => WatermarkAssignConfig::DEFAULT_REQUEST_EMIT_INTERVAL,
+                ExecutionMode::Batch => Duration::ZERO,
+            });
             apply_auto_watermark_assigns(&optimized_plan, &mut self.logical_graph)?;
         }
 
@@ -995,6 +1002,21 @@ mod tests {
             (OperatorKind::Projection, OperatorKind::Sink, PartitionType::RequestRoute, 1), // root -> request_sink (uses RequestRoute partition type)
         ]);
         
+        let assign_intervals: Vec<_> = nodes_after
+            .iter()
+            .filter_map(|n| n.watermark_assign.as_ref().map(|c| c.emit_interval))
+            .collect();
+        assert!(
+            !assign_intervals.is_empty(),
+            "request window lineage should attach an assigner"
+        );
+        assert!(
+            assign_intervals
+                .iter()
+                .all(|&d| d == WatermarkAssignConfig::DEFAULT_REQUEST_EMIT_INTERVAL),
+            "request default emit interval: {assign_intervals:?}"
+        );
+
         // Verify window node has no outgoing edges
         let window_node = nodes_after.iter()
             .find(|n| matches!(n.operator_config, OperatorConfig::WindowConfig(_)))

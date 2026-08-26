@@ -15,6 +15,8 @@ use super::confg::{TimeHint, WatermarkAssignConfig};
 struct UpstreamWatermarkProgress {
     max_event_time_seen_ms: u64,
     last_emitted_wm_ms: u64,
+    dirty: bool,
+    last_emit_at: Option<Instant>,
 }
 
 /// Stateful event-time watermark generator.
@@ -25,6 +27,7 @@ struct UpstreamWatermarkProgress {
 pub struct WatermarkAssignerState {
     out_of_orderness_ms: u64,
     ts_column_name: String,
+    emit_interval: Duration,
     per_upstream: HashMap<String, UpstreamWatermarkProgress>,
 }
 
@@ -34,8 +37,37 @@ impl WatermarkAssignerState {
         Self {
             out_of_orderness_ms: cfg.out_of_orderness_ms,
             ts_column_name: name,
+            emit_interval: cfg.emit_interval,
             per_upstream: HashMap::new(),
         }
+    }
+
+    fn candidate(progress: &UpstreamWatermarkProgress, out_of_orderness_ms: u64) -> u64 {
+        progress
+            .max_event_time_seen_ms
+            .saturating_sub(out_of_orderness_ms)
+    }
+
+    fn is_due(progress: &UpstreamWatermarkProgress, interval: Duration, now: Instant) -> bool {
+        if interval.is_zero() {
+            return true;
+        }
+        match progress.last_emit_at {
+            None => true,
+            Some(t) => now.saturating_duration_since(t) >= interval,
+        }
+    }
+
+    fn emit(
+        progress: &mut UpstreamWatermarkProgress,
+        upstream_vertex_id: &str,
+        candidate: u64,
+        now: Instant,
+    ) -> WatermarkMessage {
+        progress.last_emitted_wm_ms = candidate;
+        progress.dirty = false;
+        progress.last_emit_at = Some(now);
+        WatermarkMessage::new(upstream_vertex_id.to_string(), candidate, None)
     }
 
     fn resolve_ts_column_index(&self, batch: &RecordBatch) -> usize {
@@ -96,6 +128,15 @@ impl WatermarkAssignerState {
         upstream_vertex_id: &str,
         message: &Message,
     ) -> Option<WatermarkMessage> {
+        self.on_data_message_at(upstream_vertex_id, message, Instant::now())
+    }
+
+    pub fn on_data_message_at(
+        &mut self,
+        upstream_vertex_id: &str,
+        message: &Message,
+        now: Instant,
+    ) -> Option<WatermarkMessage> {
         let batch = message.record_batch();
         let ts_column_index = self.resolve_ts_column_index(batch);
         let Some(batch_max) = self.batch_max_ts_ms(batch, ts_column_index) else {
@@ -108,20 +149,58 @@ impl WatermarkAssignerState {
             .or_default();
 
         progress.max_event_time_seen_ms = progress.max_event_time_seen_ms.max(batch_max);
-        let candidate = progress
-            .max_event_time_seen_ms
-            .saturating_sub(self.out_of_orderness_ms);
+        let candidate = Self::candidate(progress, self.out_of_orderness_ms);
 
         if candidate > progress.last_emitted_wm_ms {
-            progress.last_emitted_wm_ms = candidate;
-            Some(WatermarkMessage::new(
-                upstream_vertex_id.to_string(),
-                candidate,
-                None,
-            ))
+            if Self::is_due(progress, self.emit_interval, now) {
+                Some(Self::emit(progress, upstream_vertex_id, candidate, now))
+            } else {
+                progress.dirty = true;
+                None
+            }
         } else {
             None
         }
+    }
+
+    pub fn try_emit_due(&mut self, now: Instant) -> Vec<WatermarkMessage> {
+        let interval = self.emit_interval;
+        let ooo = self.out_of_orderness_ms;
+        let mut out = Vec::new();
+        for (upstream_id, progress) in self.per_upstream.iter_mut() {
+            let candidate = Self::candidate(progress, ooo);
+            if progress.dirty
+                && candidate > progress.last_emitted_wm_ms
+                && Self::is_due(progress, interval, now)
+            {
+                out.push(Self::emit(progress, upstream_id, candidate, now));
+            }
+        }
+        out
+    }
+
+    /// Publish any advanced candidate regardless of interval (EOF / max watermark).
+    pub fn flush(&mut self, now: Instant) -> Vec<WatermarkMessage> {
+        let ooo = self.out_of_orderness_ms;
+        let mut out = Vec::new();
+        for (upstream_id, progress) in self.per_upstream.iter_mut() {
+            let candidate = Self::candidate(progress, ooo);
+            if candidate > progress.last_emitted_wm_ms {
+                out.push(Self::emit(progress, upstream_id, candidate, now));
+            }
+        }
+        out
+    }
+
+    pub fn next_emit_deadline(&self) -> Option<Instant> {
+        if self.emit_interval.is_zero() {
+            return None;
+        }
+        self.per_upstream
+            .values()
+            .filter(|p| p.dirty)
+            .filter_map(|p| p.last_emit_at.map(|t| t + self.emit_interval))
+            .min()
     }
 }
 
@@ -163,11 +242,32 @@ impl WatermarkManager {
     }
 
     pub fn on_data_message(&mut self, upstream_vertex_id: &str, message: &Message) -> Option<WatermarkMessage> {
+        let now = Instant::now();
         self.last_seen_processing_time
-            .insert(upstream_vertex_id.to_string(), Instant::now());
+            .insert(upstream_vertex_id.to_string(), now);
         self.assigner
             .as_mut()
-            .and_then(|assigner| assigner.on_data_message(upstream_vertex_id, message))
+            .and_then(|assigner| assigner.on_data_message_at(upstream_vertex_id, message, now))
+    }
+
+    pub fn try_emit_due(&mut self, now: Instant) -> Vec<WatermarkMessage> {
+        self.assigner
+            .as_mut()
+            .map(|assigner| assigner.try_emit_due(now))
+            .unwrap_or_default()
+    }
+
+    pub fn flush_pending(&mut self, now: Instant) -> Vec<WatermarkMessage> {
+        self.assigner
+            .as_mut()
+            .map(|assigner| assigner.flush(now))
+            .unwrap_or_default()
+    }
+
+    pub fn next_emit_deadline(&self) -> Option<Instant> {
+        self.assigner
+            .as_ref()
+            .and_then(|assigner| assigner.next_emit_deadline())
     }
 
     pub async fn merge_watermark(&mut self, watermark: WatermarkMessage) -> Option<u64> {
@@ -276,7 +376,7 @@ mod tests {
         use crate::runtime::stream_task::{CheckpointAligner, StreamTask};
     use crate::transport::transport_client::DataReaderControl;
     use std::sync::atomic::AtomicU8;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn assigner_tracks_per_upstream_independently() {
@@ -300,6 +400,7 @@ mod tests {
                 name: "ts_ms".to_string(),
             },
             idle_timeout_ms: Some(WatermarkAssignConfig::DEFAULT_IDLE_TIMEOUT_MS),
+            emit_interval: Duration::ZERO,
         };
         let mut assigner = WatermarkAssignerState::new(cfg);
 
@@ -310,6 +411,116 @@ mod tests {
         let wm2 = assigner.on_data_message("upB", &msg).unwrap();
         assert_eq!(wm2.metadata.upstream_vertex_id.as_deref(), Some("upB"));
         assert_eq!(wm2.watermark_value, 100);
+    }
+
+    fn ts_message(ts_ms: i64) -> Message {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("k", DataType::Utf8, false),
+            Field::new("ts_ms", DataType::Int64, false),
+        ]));
+        let b = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["A"])) as ArrayRef,
+                Arc::new(Int64Array::from(vec![ts_ms])) as ArrayRef,
+            ],
+        )
+        .unwrap();
+        Message::new(None, b, None, None)
+    }
+
+    fn assigner_with_interval(interval: Duration) -> WatermarkAssignerState {
+        WatermarkAssignerState::new(
+            WatermarkAssignConfig::new(
+                0,
+                TimeHint::ColumnName {
+                    name: "ts_ms".to_string(),
+                },
+            )
+            .with_emit_interval(interval),
+        )
+    }
+
+    #[test]
+    fn zero_interval_emits_on_every_advance() {
+        let mut assigner = assigner_with_interval(Duration::ZERO);
+        let t0 = Instant::now();
+        let wm1 = assigner
+            .on_data_message_at("u", &ts_message(100), t0)
+            .unwrap();
+        assert_eq!(wm1.watermark_value, 100);
+        let wm2 = assigner
+            .on_data_message_at("u", &ts_message(150), t0)
+            .unwrap();
+        assert_eq!(wm2.watermark_value, 150);
+    }
+
+    #[test]
+    fn coalesce_holds_until_interval() {
+        let mut assigner = assigner_with_interval(Duration::from_millis(200));
+        let t0 = Instant::now();
+        let first = assigner
+            .on_data_message_at("u", &ts_message(100), t0)
+            .unwrap();
+        assert_eq!(first.watermark_value, 100);
+
+        let held = assigner.on_data_message_at(
+            "u",
+            &ts_message(150),
+            t0 + Duration::from_millis(10),
+        );
+        assert!(held.is_none());
+        assert!(assigner
+            .try_emit_due(t0 + Duration::from_millis(10))
+            .is_empty());
+
+        let due = assigner.try_emit_due(t0 + Duration::from_millis(200));
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].watermark_value, 150);
+    }
+
+    #[test]
+    fn timer_does_not_emit_when_not_dirty() {
+        let mut assigner = assigner_with_interval(Duration::from_millis(50));
+        let t0 = Instant::now();
+        assert!(assigner
+            .on_data_message_at("u", &ts_message(100), t0)
+            .is_some());
+        assert!(assigner
+            .try_emit_due(t0 + Duration::from_millis(50))
+            .is_empty());
+        assert!(assigner.next_emit_deadline().is_none());
+    }
+
+    #[test]
+    fn flush_emits_dirty_before_interval() {
+        let mut assigner = assigner_with_interval(Duration::from_millis(200));
+        let t0 = Instant::now();
+        assigner
+            .on_data_message_at("u", &ts_message(100), t0)
+            .unwrap();
+        assert!(assigner
+            .on_data_message_at("u", &ts_message(180), t0 + Duration::from_millis(5))
+            .is_none());
+        let flushed = assigner.flush(t0 + Duration::from_millis(5));
+        assert_eq!(flushed.len(), 1);
+        assert_eq!(flushed[0].watermark_value, 180);
+    }
+
+    #[test]
+    fn data_path_emits_when_interval_elapsed() {
+        let mut assigner = assigner_with_interval(Duration::from_millis(200));
+        let t0 = Instant::now();
+        assigner
+            .on_data_message_at("u", &ts_message(100), t0)
+            .unwrap();
+        assert!(assigner
+            .on_data_message_at("u", &ts_message(120), t0 + Duration::from_millis(10))
+            .is_none());
+        let late = assigner
+            .on_data_message_at("u", &ts_message(300), t0 + Duration::from_millis(200))
+            .unwrap();
+        assert_eq!(late.watermark_value, 300);
     }
 
     #[tokio::test]
