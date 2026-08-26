@@ -1,10 +1,10 @@
 use arrow::record_batch::RecordBatch;
-use anyhow::Result;
 use serde::{Serialize, Deserialize};
 use std::io::{Cursor, Read, Write};
 use std::collections::HashMap;
 
-use super::Key;
+/// Dest subtask index set by KeyBy pack-by-dest; HashPartition reads it.
+pub const TARGET_SUBTASK_EXTRA: &str = "volga.target_subtask";
 
 #[derive(Debug, Clone)]
 pub struct BaseMessage {
@@ -135,71 +135,6 @@ impl MessageMetadata {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct KeyedMessage {
-    pub base: BaseMessage,
-    pub key: Key,
-}
-
-impl KeyedMessage {
-    pub fn new(base: BaseMessage, key: Key) -> Self {
-        Self {
-            base,
-            key,
-        }
-    }
-
-    pub fn key(&self) -> &Key {
-        &self.key
-    }
-
-    /// Serialize the KeyedMessage to bytes
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut buffer = Vec::new();
-        
-        // Serialize the base message
-        let base_bytes = self.base.to_bytes();
-        buffer.write_all(&(base_bytes.len() as u32).to_le_bytes()).unwrap();
-        buffer.write_all(&base_bytes).unwrap();
-        
-        // Serialize the key
-        let key_bytes = self.key.to_bytes();
-        buffer.write_all(&(key_bytes.len() as u32).to_le_bytes()).unwrap();
-        buffer.write_all(&key_bytes).unwrap();
-        
-        buffer
-    }
-
-    /// Deserialize KeyedMessage from bytes
-    pub fn from_bytes(bytes: &[u8]) -> Self {
-        let mut cursor = Cursor::new(bytes);
-        
-        // Read base message length and deserialize
-        let mut base_len_bytes = [0u8; 4];
-        cursor.read_exact(&mut base_len_bytes).unwrap();
-        let base_len = u32::from_le_bytes(base_len_bytes) as usize;
-        
-        let mut base_bytes = vec![0u8; base_len];
-        cursor.read_exact(&mut base_bytes).unwrap();
-        let base = BaseMessage::from_bytes(&base_bytes);
-        
-        // Read key length and deserialize
-        let mut key_len_bytes = [0u8; 4];
-        cursor.read_exact(&mut key_len_bytes).unwrap();
-        let key_len = u32::from_le_bytes(key_len_bytes) as usize;
-        
-        let mut key_bytes = vec![0u8; key_len];
-        cursor.read_exact(&mut key_bytes).unwrap();
-        let key = Key::from_bytes(&key_bytes);
-        
-        Self { base, key }
-    }
-
-    pub fn get_memory_size(&self) -> usize {
-        self.base.get_memory_size() + self.key.get_memory_size()
-    }
-}
-
 pub const MAX_WATERMARK_VALUE: u64 = u64::MAX;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -289,7 +224,6 @@ impl CheckpointBarrierMessage {
 #[derive(Debug, Clone)]
 pub enum Message {
     Regular(BaseMessage),
-    Keyed(KeyedMessage),
     Watermark(WatermarkMessage),
     CheckpointBarrier(CheckpointBarrierMessage),
 }
@@ -300,17 +234,9 @@ impl Message {
         Message::Regular(BaseMessage::new(upstream_vertex_id, record_batch, ingest_timestamp, extras))
     }
 
-    pub fn new_keyed(upstream_vertex_id: Option<String>, record_batch: RecordBatch, key: Key, ingest_timestamp: Option<u64>, extras: Option<HashMap<String, String>>) -> Self {
-        Message::Keyed(KeyedMessage::new(
-            BaseMessage::new(upstream_vertex_id, record_batch, ingest_timestamp, extras),
-            key,
-        ))
-    }
-
     pub fn upstream_vertex_id(&self) -> Option<String> {
         match self {
             Message::Regular(message) => message.metadata.upstream_vertex_id.clone(),
-            Message::Keyed(message) => message.base.metadata.upstream_vertex_id.clone(),
             Message::Watermark(message) => message.metadata.upstream_vertex_id.clone(),
             Message::CheckpointBarrier(message) => message.metadata.upstream_vertex_id.clone(),
         }
@@ -319,26 +245,14 @@ impl Message {
     pub fn record_batch(&self) -> &RecordBatch {
         match self {
             Message::Regular(message) => &message.record_batch,
-            Message::Keyed(message) => &message.base.record_batch,
             Message::Watermark(_) => panic!("Watermark message does not have a record batch"),
             Message::CheckpointBarrier(_) => panic!("Checkpoint barrier does not have a record batch"),
-        }
-    }
-
-    // TODO no reason to return Result, just return &Key, panic otherwise
-    pub fn key(&self) -> Result<&Key> {
-        match self {
-            Message::Regular(_) => Err(anyhow::anyhow!("Regular message does not have a key")),
-            Message::Keyed(message) => Ok(&message.key),
-            Message::Watermark(_) => Err(anyhow::anyhow!("Watermark message does not have a key")),
-            Message::CheckpointBarrier(_) => Err(anyhow::anyhow!("Checkpoint barrier does not have a key")),
         }
     }
 
     pub fn ingest_timestamp(&self) -> Option<u64> {
         match self {
             Message::Regular(message) => message.metadata.ingest_timestamp,
-            Message::Keyed(message) => message.base.metadata.ingest_timestamp,
             Message::Watermark(message) => message.metadata.ingest_timestamp,
             Message::CheckpointBarrier(message) => message.metadata.ingest_timestamp,
         }
@@ -347,7 +261,6 @@ impl Message {
     pub fn set_ingest_timestamp(&mut self, ingest_timestamp: u64) {
         match self {
             Message::Regular(message) => message.set_ingest_timestamp(ingest_timestamp),
-            Message::Keyed(message) => message.base.set_ingest_timestamp(ingest_timestamp),
             Message::Watermark(message) => message.set_ingest_timestamp(ingest_timestamp),
             Message::CheckpointBarrier(message) => message.set_ingest_timestamp(ingest_timestamp),
         }
@@ -356,7 +269,6 @@ impl Message {
     pub fn set_upstream_vertex_id(&mut self, upstream_vertex_id: String) {
         match self {
             Message::Regular(message) => message.set_upstream_vertex_id(upstream_vertex_id),
-            Message::Keyed(message) => message.base.set_upstream_vertex_id(upstream_vertex_id),
             Message::Watermark(message) => message.set_upstream_vertex_id(upstream_vertex_id),
             Message::CheckpointBarrier(message) => message.set_upstream_vertex_id(upstream_vertex_id),
         }
@@ -365,7 +277,6 @@ impl Message {
     pub fn get_extras(&self) -> Option<HashMap<String, String>> {
         let metadata = match self {
             Message::Regular(message) => &message.metadata,
-            Message::Keyed(message) => &message.base.metadata,
             Message::Watermark(message) => &message.metadata,
             Message::CheckpointBarrier(message) => &message.metadata,
         };
@@ -376,7 +287,6 @@ impl Message {
     pub fn append_trace(&mut self, vertex_id: &str) {
         let extras = match self {
             Message::Regular(m) => m.metadata.extras.get_or_insert_with(HashMap::new),
-            Message::Keyed(m) => m.base.metadata.extras.get_or_insert_with(HashMap::new),
             Message::Watermark(m) => m.metadata.extras.get_or_insert_with(HashMap::new),
             Message::CheckpointBarrier(m) => m.metadata.extras.get_or_insert_with(HashMap::new),
         };
@@ -393,7 +303,6 @@ impl Message {
     pub fn get_memory_size(&self) -> usize {
         match self {
             Message::Regular(msg) => msg.get_memory_size(),
-            Message::Keyed(msg) => msg.get_memory_size(),
             Message::Watermark(msg) => msg.get_memory_size(),
             Message::CheckpointBarrier(msg) => msg.get_memory_size(),
         }
@@ -402,7 +311,6 @@ impl Message {
     pub fn num_records(&self) -> usize {
         match self {
             Message::Regular(msg) => msg.record_batch.num_rows(),
-            Message::Keyed(msg) => msg.base.record_batch.num_rows(),
             Message::Watermark(_) => 1,
             Message::CheckpointBarrier(_) => 1,
         }
@@ -412,10 +320,9 @@ impl Message {
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut buffer = Vec::new();
         
-        // Write message type discriminator
+        // Write message type discriminator (1 was Keyed, retired)
         let message_type = match self {
             Message::Regular(_) => 0u8,
-            Message::Keyed(_) => 1u8,
             Message::Watermark(_) => 2u8,
             Message::CheckpointBarrier(_) => 3u8,
         };
@@ -424,11 +331,6 @@ impl Message {
         // Serialize the specific message type
         match self {
             Message::Regular(msg) => {
-                let msg_bytes = msg.to_bytes();
-                buffer.write_all(&(msg_bytes.len() as u32).to_le_bytes()).unwrap();
-                buffer.write_all(&msg_bytes).unwrap();
-            }
-            Message::Keyed(msg) => {
                 let msg_bytes = msg.to_bytes();
                 buffer.write_all(&(msg_bytes.len() as u32).to_le_bytes()).unwrap();
                 buffer.write_all(&msg_bytes).unwrap();
@@ -472,10 +374,7 @@ impl Message {
                 let base_msg = BaseMessage::from_bytes(&msg_bytes);
                 Message::Regular(base_msg)
             }
-            1 => {
-                let keyed_msg = KeyedMessage::from_bytes(&msg_bytes);
-                Message::Keyed(keyed_msg)
-            }
+            1 => panic!("Keyed message type was retired"),
             2 => {
                 let watermark_msg = WatermarkMessage::from_bytes(&msg_bytes);
                 Message::Watermark(watermark_msg)
@@ -536,61 +435,6 @@ mod tests {
         assert_eq!(original_batch.num_rows(), deserialized_batch.num_rows());
         assert_eq!(original_batch.num_columns(), deserialized_batch.num_columns());
         assert_eq!(original_batch.schema(), deserialized_batch.schema());
-    }
-
-    #[test]
-    fn test_keyed_message_serialization() {
-        // Create a test record batch
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("id", DataType::Int64, false),
-            Field::new("name", DataType::Utf8, false),
-        ]));
-        
-        let record_batch = RecordBatch::try_new(
-            schema.clone(),
-            vec![
-                Arc::new(Int64Array::from(vec![1, 2, 3])),
-                Arc::new(StringArray::from(vec!["a", "b", "c"])),
-            ]
-        ).unwrap();
-
-        // Create a key
-        let key_batch = RecordBatch::try_new(
-            schema,
-            vec![
-                Arc::new(Int64Array::from(vec![42])),
-                Arc::new(StringArray::from(vec!["key_value"])),
-            ]
-        ).unwrap();
-        let key = Key::new(key_batch).unwrap();
-
-        // Create a keyed message
-        let original_message = Message::new_keyed(
-            Some("upstream_vertex".to_string()),
-            record_batch,
-            key.clone(),
-            Some(1234567890),
-            None
-        );
-
-        // Test serialization and deserialization
-        let bytes = original_message.to_bytes();
-        let deserialized_message = Message::from_bytes(&bytes);
-
-        // Verify the message was correctly deserialized
-        assert_eq!(original_message.upstream_vertex_id(), deserialized_message.upstream_vertex_id());
-        assert_eq!(original_message.ingest_timestamp(), deserialized_message.ingest_timestamp());
-        
-        // Compare keys
-        let original_key = original_message.key().unwrap();
-        let deserialized_key = deserialized_message.key().unwrap();
-        assert_eq!(original_key, deserialized_key);
-        
-        // Compare record batches
-        let original_batch = original_message.record_batch();
-        let deserialized_batch = deserialized_message.record_batch();
-        assert_eq!(original_batch.num_rows(), deserialized_batch.num_rows());
-        assert_eq!(original_batch.num_columns(), deserialized_batch.num_columns());
     }
 
     #[test]

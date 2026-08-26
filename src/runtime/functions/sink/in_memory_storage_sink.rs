@@ -145,17 +145,8 @@ impl SinkFunctionTrait for InMemoryStorageSinkFunction {
             return Ok(());
         }
 
-        match &message {
-            Message::Keyed(keyed_message) => {
-                let key = keyed_message.key().hash().to_string();
-                let mut keyed_buffer = self.keyed_buffer.lock().await;
-                keyed_buffer.insert(key, message);
-            }
-            _ => {
-                let mut buffer = self.buffer.lock().await;
-                buffer.push(message);
-            }
-        }
+        let mut buffer = self.buffer.lock().await;
+        buffer.push(message);
         Ok(())
     }
 
@@ -223,10 +214,8 @@ mod tests {
     use arrow::array::{StringArray, TimestampMillisecondArray};
     use arrow::datatypes::{Field, Schema, TimeUnit};
     use arrow::record_batch::RecordBatch;
-    use crate::common::message::{BaseMessage, KeyedMessage};
     use crate::common::ports::gen_unique_grpc_port;
     use crate::test_utils::common::create_test_string_batch;
-    use crate::common::Key;
     use crate::storage::in_memory_storage_grpc_server::InMemoryStorageServer;
 
     #[tokio::test]
@@ -252,31 +241,6 @@ mod tests {
             ),
         ];
 
-        let key1_batch = create_test_string_batch(vec!["key1".to_string()]);
-        let key2_batch = create_test_string_batch(vec!["key2".to_string()]);
-        let key1 = Key::new(key1_batch)?;
-        let key2 = Key::new(key2_batch)?;
-        let keyed_messages = vec![
-            Message::Keyed(KeyedMessage::new(
-                BaseMessage::new(
-                    None,
-                    create_test_string_batch(vec!["value1".to_string()]),
-                    None,
-                    None,
-                ),
-                key1.clone(),
-            )),
-            Message::Keyed(KeyedMessage::new(
-                BaseMessage::new(
-                    None,
-                    create_test_string_batch(vec!["value2".to_string()]),
-                    None,
-                    None,
-                ),
-                key2.clone(),
-            )),
-        ];
-
         let mut storage_server = InMemoryStorageServer::new();
         let server_addr = format!("127.0.0.1:{}", gen_unique_grpc_port());
         storage_server.start(&server_addr).await?;
@@ -290,16 +254,13 @@ mod tests {
         for message in regular_messages {
             sink_function.sink(message).await?;
         }
-        for message in keyed_messages {
-            sink_function.sink(message).await?;
-        }
 
         tokio::time::sleep(Duration::from_millis(200)).await;
         sink_function.close().await?;
 
         let mut client = InMemoryStorageClient::new(format!("http://{}", server_addr)).await?;
         let vector_messages = client.get_vector().await?;
-        let map_messages = client.get_map().await?;
+        assert!(client.get_map().await?.is_empty());
 
         assert_eq!(vector_messages.len(), 3);
         assert_eq!(
@@ -331,32 +292,6 @@ mod tests {
                 .unwrap()
                 .value(0),
             "regular3"
-        );
-
-        assert_eq!(map_messages.len(), 2);
-        assert_eq!(
-            map_messages
-                .get(&key1.hash().to_string())
-                .unwrap()
-                .record_batch()
-                .column(0)
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .unwrap()
-                .value(0),
-            "value1"
-        );
-        assert_eq!(
-            map_messages
-                .get(&key2.hash().to_string())
-                .unwrap()
-                .record_batch()
-                .column(0)
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .unwrap()
-                .value(0),
-            "value2"
         );
 
         storage_server.stop().await;

@@ -8,7 +8,6 @@ use crate::runtime::operators::chained::chained_operator::ChainedOperator;
 use crate::runtime::operators::join::join_operator::JoinOperator;
 use crate::runtime::operators::key_by::key_by_operator::KeyByOperator;
 use crate::runtime::operators::map::map_operator::MapOperator;
-use crate::runtime::operators::reduce::reduce_operator::ReduceOperator;
 use crate::runtime::operators::sink::sink_operator::{SinkConfig, SinkOperator};
 use crate::runtime::operators::source::source_operator::{SourceConfig, SourceOperator};
 use crate::runtime::operators::window::operator::{WindowOperator, WindowOperatorConfig};
@@ -23,7 +22,6 @@ use crate::runtime::functions::{
     function_trait::FunctionTrait,
     map::MapFunction,
     key_by::{KeyByFunction},
-    reduce::{ReduceFunction, AggregationResultExtractor},
 };
 
 pub type MessageStream = Pin<Box<dyn Stream<Item = Message> + Send + Sync>>;
@@ -104,7 +102,6 @@ pub enum Operator {
     Sink(SinkOperator),
     Source(SourceOperator),
     KeyBy(KeyByOperator),
-    Reduce(ReduceOperator),
     Aggregate(AggregateOperator),
     Window(WindowOperator),
     WindowRequest(WindowRequestOperator),
@@ -118,7 +115,6 @@ pub enum OperatorConfig {
     SinkConfig(SinkConfig),
     SourceConfig(SourceConfig),
     KeyByConfig(KeyByFunction),
-    ReduceConfig(ReduceFunction, Option<AggregationResultExtractor>),
     AggregateConfig(AggregateConfig),
     WindowConfig(WindowOperatorConfig),
     WindowRequestConfig(WindowRequestOperatorConfig),
@@ -133,7 +129,6 @@ impl fmt::Display for OperatorConfig {
             OperatorConfig::SinkConfig(sink_config) => write!(f, "Sink({})", sink_config),
             OperatorConfig::SourceConfig(source_config) => write!(f, "Source({})", source_config),
             OperatorConfig::KeyByConfig(key_by_func) => write!(f, "KeyBy({})", key_by_func),
-            OperatorConfig::ReduceConfig(reduce_func, _) => write!(f, "Reduce({})", reduce_func),
             OperatorConfig::AggregateConfig(_) => write!(f, "Aggregate"),
             OperatorConfig::WindowConfig(_) => write!(f, "Window"),
             OperatorConfig::WindowRequestConfig(_) => write!(f, "WindowRequest"),
@@ -151,7 +146,6 @@ impl OperatorTrait for Operator {
             Operator::Sink(op) => op.open(context).await,
             Operator::Source(op) => op.open(context).await,
             Operator::KeyBy(op) => op.open(context).await,
-            Operator::Reduce(op) => op.open(context).await,
             Operator::Aggregate(op) => op.open(context).await,
             Operator::Window(op) => op.open(context).await,
             Operator::WindowRequest(op) => op.open(context).await,
@@ -166,7 +160,6 @@ impl OperatorTrait for Operator {
             Operator::Sink(op) => op.close().await,
             Operator::Source(op) => op.close().await,
             Operator::KeyBy(op) => op.close().await,
-            Operator::Reduce(op) => op.close().await,
             Operator::Aggregate(op) => op.close().await,
             Operator::Window(op) => op.close().await,
             Operator::WindowRequest(op) => op.close().await,
@@ -181,7 +174,6 @@ impl OperatorTrait for Operator {
             Operator::Sink(op) => op.operator_type(),
             Operator::Source(op) => op.operator_type(),
             Operator::KeyBy(op) => op.operator_type(),
-            Operator::Reduce(op) => op.operator_type(),
             Operator::Aggregate(op) => op.operator_type(),
             Operator::Window(op) => op.operator_type(),
             Operator::WindowRequest(op) => op.operator_type(),
@@ -196,7 +188,6 @@ impl OperatorTrait for Operator {
             Operator::Sink(op) => op.operator_config(),
             Operator::Source(op) => op.operator_config(),
             Operator::KeyBy(op) => op.operator_config(),
-            Operator::Reduce(op) => op.operator_config(),
             Operator::Aggregate(op) => op.operator_config(),
             Operator::Window(op) => op.operator_config(),
             Operator::WindowRequest(op) => op.operator_config(),
@@ -211,7 +202,6 @@ impl OperatorTrait for Operator {
             Operator::Sink(op) => op.set_input(input),
             Operator::Source(op) => op.set_input(input),
             Operator::KeyBy(op) => op.set_input(input),
-            Operator::Reduce(op) => op.set_input(input),
             Operator::Aggregate(op) => op.set_input(input),
             Operator::Window(op) => op.set_input(input),
             Operator::WindowRequest(op) => op.set_input(input),
@@ -226,7 +216,6 @@ impl OperatorTrait for Operator {
             Operator::Sink(op) => op.poll_next().await,
             Operator::Source(op) => op.poll_next().await,
             Operator::KeyBy(op) => op.poll_next().await,
-            Operator::Reduce(op) => op.poll_next().await,
             Operator::Aggregate(op) => op.poll_next().await,
             Operator::Window(op) => op.poll_next().await,
             Operator::WindowRequest(op) => op.poll_next().await,
@@ -241,7 +230,6 @@ impl OperatorTrait for Operator {
             Operator::Sink(op) => op.checkpoint(checkpoint_id).await,
             Operator::Source(op) => op.checkpoint(checkpoint_id).await,
             Operator::KeyBy(op) => op.checkpoint(checkpoint_id).await,
-            Operator::Reduce(op) => op.checkpoint(checkpoint_id).await,
             Operator::Aggregate(op) => op.checkpoint(checkpoint_id).await,
             Operator::Window(op) => op.checkpoint(checkpoint_id).await,
             Operator::WindowRequest(op) => op.checkpoint(checkpoint_id).await,
@@ -256,7 +244,6 @@ impl OperatorTrait for Operator {
             Operator::Sink(op) => op.restore(restore).await,
             Operator::Source(op) => op.restore(restore).await,
             Operator::KeyBy(op) => op.restore(restore).await,
-            Operator::Reduce(op) => op.restore(restore).await,
             Operator::Aggregate(op) => op.restore(restore).await,
             Operator::Window(op) => op.restore(restore).await,
             Operator::WindowRequest(op) => op.restore(restore).await,
@@ -378,7 +365,6 @@ pub fn create_operator(
         OperatorConfig::SinkConfig(_) => Operator::Sink(SinkOperator::new(operator_config)),
         OperatorConfig::SourceConfig(_) => Operator::Source(SourceOperator::new(operator_config)),
         OperatorConfig::KeyByConfig(_) => Operator::KeyBy(KeyByOperator::new(operator_config)),
-        OperatorConfig::ReduceConfig(_, _) => Operator::Reduce(ReduceOperator::new(operator_config)),
         OperatorConfig::AggregateConfig(_) => Operator::Aggregate(AggregateOperator::new(operator_config)),
         OperatorConfig::WindowConfig(_) => Operator::Window(WindowOperator::new(operator_config)),
         OperatorConfig::WindowRequestConfig(_) => Operator::WindowRequest(WindowRequestOperator::new(operator_config)),
@@ -419,7 +405,6 @@ pub fn get_operator_type_from_config(operator_config: &OperatorConfig) -> Operat
         OperatorConfig::MapConfig(_) | 
         OperatorConfig::JoinConfig(_) | 
         OperatorConfig::KeyByConfig(_) | 
-        OperatorConfig::ReduceConfig(_, _) |
         OperatorConfig::AggregateConfig(_) |
         OperatorConfig::WindowConfig(_) |
         OperatorConfig::WindowRequestConfig(_) => {

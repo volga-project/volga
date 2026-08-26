@@ -775,9 +775,6 @@ mod tests {
                         total_records += batch.num_rows();
                         batch_count += 1;
                     },
-                    FetchResult::Data(Message::Keyed(_)) => {
-                        panic!("Unexpected keyed message");
-                    },
                     FetchResult::Data(Message::Watermark(_)) => panic!("DatagenSourceFunction should not emit watermarks directly"),
                     FetchResult::Data(Message::CheckpointBarrier(_)) => break,
                     FetchResult::Idle | FetchResult::Interrupted => break,
@@ -1043,9 +1040,6 @@ mod tests {
                     panic!("DatagenSourceFunction should not emit watermarks directly")
                 }
                 FetchResult::Data(Message::CheckpointBarrier(_)) => break,
-                FetchResult::Data(Message::Keyed(_)) => {
-                    panic!("Unexpected keyed message from datagen")
-                }
                 FetchResult::Idle | FetchResult::Interrupted => break,
             }
         }

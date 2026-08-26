@@ -1,4 +1,4 @@
-use crate::{common::message::Message, runtime::functions::source::request_source::SOURCE_TASK_INDEX_FIELD};
+use crate::{common::message::{Message, TARGET_SUBTASK_EXTRA}, runtime::functions::source::request_source::SOURCE_TASK_INDEX_FIELD};
 use std::fmt;
 
 pub trait PartitionTrait: Send + Sync + fmt::Debug {
@@ -85,10 +85,18 @@ impl HashPartition {
 
 impl PartitionTrait for HashPartition {
     fn partition(&mut self, message: &Message, num_partitions: usize) -> Vec<usize> {
-        let key = message.key().unwrap();
-        let hash = key.hash();
-        let partition = (hash % num_partitions as u64) as usize;
-        vec![partition]
+        let extras = message
+            .get_extras()
+            .expect("HashPartition requires extras (KeyBy dest)");
+        let idx = extras
+            .get(TARGET_SUBTASK_EXTRA)
+            .expect("HashPartition requires volga.target_subtask extra")
+            .parse::<usize>()
+            .expect("target_subtask should be usize");
+        if idx >= num_partitions {
+            panic!("target_subtask {idx} >= num_partitions {num_partitions}");
+        }
+        vec![idx]
     }
 }
 
