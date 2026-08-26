@@ -10,15 +10,8 @@ use crate::{
     test_utils::common::print_pipeline_state,
     test_utils::pipeline_exec,
     runtime::{
-        functions::{
-            key_by::KeyByFunction,
-            reduce::{AggregationResultExtractor, AggregationType, ReduceFunction},
-            source::word_count_source::BatchingMode,
-        },
-        operators::{
-            operator::OperatorConfig,
-            source::source_operator::{SourceConfig, WordCountSourceConfig},
-        },
+        functions::source::word_count_source::BatchingMode,
+        operators::source::source_operator::{SourceConfig, WordCountSourceConfig},
     },
     storage::{InMemoryStorageClient, InMemoryStorageServer},
 };

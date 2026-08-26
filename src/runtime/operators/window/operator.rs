@@ -8,10 +8,11 @@ use anyhow::Result;
 use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
-use futures::{future, TryStreamExt};
+use futures::{future, stream, StreamExt, TryStreamExt};
 
 use crate::common::message::Message;
 use crate::common::MAX_WATERMARK_VALUE;
+use crate::runtime::functions::key_by::pack::split_by_key_exprs;
 use crate::runtime::checkpoint::{SerializedCheckpoint, SerializedRestore};
 use crate::runtime::operators::operator::{
     MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType,
@@ -26,11 +27,13 @@ use crate::runtime::operators::window::spec::WindowSpec;
 use crate::runtime::operators::window::state::{WindowOperatorState, WindowStateSnapshot};
 use crate::runtime::operators::window::store::{open_window_operator_store, StateNamespace};
 use crate::runtime::operators::window::TileConfig;
+use crate::runtime::operators::window::PARTITION_IO_CONCURRENCY;
 use crate::runtime::observability::TaskMetadata;
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::state::{OperatorTaskState, StateRegistry};
 use crate::runtime::VertexId;
 use datafusion::physical_plan::windows::BoundedWindowAggExec;
+use datafusion::physical_plan::PhysicalExpr;
 
 #[cfg(test)]
 use crate::runtime::operators::window::store::WindowOperatorStore;
@@ -81,6 +84,7 @@ pub struct WindowOperator {
     output_schema: SchemaRef,
     input_schema: SchemaRef,
     ts_column_index: usize,
+    partition_by: Vec<Arc<dyn PhysicalExpr>>,
     task_metadata: TaskMetadata,
     state_registry: Option<Arc<StateRegistry>>,
     vertex_id: Option<VertexId>,
@@ -131,6 +135,9 @@ impl WindowOperator {
             output_schema: built.output_schema,
             input_schema: built.input_schema,
             ts_column_index: built.ts_column_index,
+            partition_by: window_operator_config.window_exec.window_expr()[0]
+                .partition_by()
+                .to_vec(),
             task_metadata: TaskMetadata::default(),
             state_registry: None,
             vertex_id: None,
@@ -299,17 +306,20 @@ impl OperatorTrait for WindowOperator {
 
         match self.base.next_input().await {
             Some(message) => match message {
-                Message::Keyed(keyed_message) => {
-                    let key = keyed_message.key();
-                    let input_rows = keyed_message.base.record_batch.num_rows();
-                    let state = self.state_ref();
+                Message::Regular(base) => {
+                    let batch = &base.record_batch;
+                    let input_rows = batch.num_rows();
+                    let state = self.state_ref().clone();
                     let ingest_started = Instant::now();
-                    let dropped = state
-                        .insert_batch(
-                            key,
-                            keyed_message.base.record_batch.clone(),
-                            self.output_mode == WindowOutputMode::Emit,
-                        )
+                    let emit = self.output_mode == WindowOutputMode::Emit;
+                    let groups = split_by_key_exprs(batch, &self.partition_by);
+                    let dropped: usize = stream::iter(groups)
+                        .map(|(key, payload)| {
+                            let state = state.clone();
+                            async move { state.insert_batch(&key, payload, emit).await }
+                        })
+                        .buffer_unordered(PARTITION_IO_CONCURRENCY)
+                        .fold(0usize, |acc, n| async move { acc + n })
                         .await;
                     debug_assert!(dropped <= input_rows);
                     self.task_metadata.increment_u64(
@@ -375,7 +385,6 @@ impl OperatorTrait for WindowOperator {
                 Message::CheckpointBarrier(barrier) => {
                     OperatorPollResult::Ready(Message::CheckpointBarrier(barrier))
                 }
-                _ => panic!("Window operator expects keyed messages or watermarks"),
             },
             None => OperatorPollResult::None,
         }

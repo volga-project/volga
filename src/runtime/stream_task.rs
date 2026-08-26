@@ -820,7 +820,7 @@ impl StreamTask {
 
                 match poll_res {
                     OperatorPollResult::Ready(mut message) => {
-                        let injected_wm = if is_source && matches!(message, Message::Regular(_) | Message::Keyed(_)) {
+                        let injected_wm = if is_source && matches!(message, Message::Regular(_)) {
                             source_watermark_manager
                                 .as_mut()
                                 .and_then(|manager| manager.on_data_message(vertex_id.as_ref(), &message))

@@ -7,10 +7,13 @@ use arrow::array::{RecordBatch, TimestampMillisecondArray};
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use datafusion::physical_plan::windows::BoundedWindowAggExec;
+use datafusion::physical_plan::PhysicalExpr;
 use datafusion::scalar::ScalarValue;
+use futures::{stream, StreamExt};
 
 use crate::common::message::Message;
 use crate::common::Key;
+use crate::runtime::functions::key_by::pack::split_by_key_exprs;
 use crate::runtime::operators::operator::{
     MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType,
 };
@@ -24,6 +27,7 @@ use crate::runtime::operators::window::store::{
     open_window_request_store, PartitionKey, StateNamespace, WindowRequestStore,
 };
 use crate::runtime::operators::window::TileConfig;
+use crate::runtime::operators::window::PARTITION_IO_CONCURRENCY;
 use crate::runtime::runtime_context::RuntimeContext;
 
 #[derive(Debug, Clone)]
@@ -55,6 +59,7 @@ pub struct WindowRequestOperator {
     namespace: Option<StateNamespace>,
     state_owner_operator_id: Option<String>,
     ts_column_index: usize,
+    partition_by: Vec<Arc<dyn PhysicalExpr>>,
     output_schema: SchemaRef,
     input_schema: SchemaRef,
 }
@@ -93,6 +98,9 @@ impl WindowRequestOperator {
             namespace: None,
             state_owner_operator_id: window_request_operator_config.state_owner_operator_id,
             ts_column_index: built.ts_column_index,
+            partition_by: window_request_operator_config.window_exec.window_expr()[0]
+                .partition_by()
+                .to_vec(),
             output_schema: built.output_schema,
             input_schema: built.input_schema,
         }
@@ -151,6 +159,24 @@ impl WindowRequestOperator {
             &self.output_schema,
             &self.input_schema,
         )
+    }
+
+    async fn process_groups(&self, groups: Vec<(Key, RecordBatch)>) -> RecordBatch {
+        let mut batches: Vec<(usize, RecordBatch)> = stream::iter(groups.into_iter().enumerate())
+            .map(|(i, (key, payload))| async move {
+                (i, self.process_key(&key, &payload).await)
+            })
+            .buffer_unordered(PARTITION_IO_CONCURRENCY)
+            .collect()
+            .await;
+        batches.sort_by_key(|(i, _)| *i);
+        let batches: Vec<RecordBatch> = batches.into_iter().map(|(_, batch)| batch).collect();
+        if batches.len() == 1 {
+            batches.into_iter().next().unwrap()
+        } else {
+            arrow::compute::concat_batches(&self.output_schema, &batches)
+                .expect("concat WRO batches")
+        }
     }
 }
 
@@ -218,13 +244,23 @@ impl OperatorTrait for WindowRequestOperator {
 
         match self.base.next_input().await {
             Some(message) => match message {
-                Message::Keyed(keyed) => {
-                    let key = keyed.key();
-                    let out = self.process_key(key, &keyed.base.record_batch).await;
+                Message::Regular(base) => {
+                    let groups = split_by_key_exprs(&base.record_batch, &self.partition_by);
+                    if groups.is_empty() {
+                        return OperatorPollResult::Ready(Message::new(
+                            None,
+                            RecordBatch::new_empty(self.output_schema.clone()),
+                            None,
+                            None,
+                        ));
+                    }
+                    let out = self.process_groups(groups).await;
                     OperatorPollResult::Ready(Message::new(None, out, None, None))
                 }
                 Message::Watermark(w) => OperatorPollResult::Ready(Message::Watermark(w)),
-                other => panic!("WindowRequestOperator unexpected message: {:?}", other),
+                Message::CheckpointBarrier(barrier) => {
+                    OperatorPollResult::Ready(Message::CheckpointBarrier(barrier))
+                }
             },
             None => OperatorPollResult::None,
         }

@@ -288,7 +288,7 @@ async fn test_word_count_source(
     let start_time = std::time::Instant::now();
     while let Some(message) = source.fetch(None).await.into_message() {
         match message {
-            Message::Regular(_) | Message::Keyed(_) => {
+            Message::Regular(_) => {
                 let record_batch = message.record_batch();
                 let word_array = record_batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
                 

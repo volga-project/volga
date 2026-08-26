@@ -97,12 +97,14 @@ WINDOW w AS (
                 vec!["K", "K", "K"],
             ),
         ),
+        // Mixed A/B are cate groups; a constant PARTITION BY keeps them in one window
+        // (PARTITION BY partition_key would isolate each key).
         (
             r#"SELECT timestamp, value, partition_key,
   sum_cate(value, partition_key) OVER w as sums
 FROM test_table
 WINDOW w AS (
-  PARTITION BY partition_key
+  PARTITION BY 1
   ORDER BY timestamp
   RANGE BETWEEN INTERVAL '10' MINUTE PRECEDING AND CURRENT ROW
 )"#,
