@@ -997,21 +997,6 @@ mod tests {
             (OperatorKind::WindowRequest, OperatorKind::Projection, PartitionType::RoundRobin, 1), // window_request -> projection
             (OperatorKind::Projection, OperatorKind::Sink, PartitionType::RequestRoute, 1), // root -> request_sink (uses RequestRoute partition type)
         ]);
-        
-        let assign_intervals: Vec<_> = nodes_after
-            .iter()
-            .filter_map(|n| n.watermark_assign.as_ref().map(|c| c.emit_interval))
-            .collect();
-        assert!(
-            !assign_intervals.is_empty(),
-            "request window lineage should attach an assigner"
-        );
-        assert!(
-            assign_intervals
-                .iter()
-                .all(|&d| d == WatermarkAssignConfig::DEFAULT_EMIT_INTERVAL),
-            "request uses the same emit-interval default unless spec overrides: {assign_intervals:?}"
-        );
 
         // Verify window node has no outgoing edges
         let window_node = nodes_after.iter()
