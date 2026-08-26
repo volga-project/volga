@@ -1,5 +1,6 @@
 use async_trait::async_trait;
-use futures::{Stream, StreamExt};
+use futures::stream::Peekable;
+use futures::{FutureExt, Stream, StreamExt};
 
 use crate::runtime::checkpoint::{SerializedCheckpoint, SerializedRestore};
 use crate::runtime::functions::join::join_function::JoinFunction;
@@ -41,6 +42,18 @@ impl OperatorPollResult {
             OperatorPollResult::None => panic!("OperatorPollResult is None, expected Ready"),
         }
     }
+}
+
+/// Result of [`OperatorBase::next_inputs`].
+///
+/// A following control or over-budget data message is left peeked on the stream.
+#[derive(Debug)]
+pub enum NextInputs {
+    Exhausted,
+    /// Watermark or checkpoint barrier.
+    Control(Message),
+    /// One or more data messages.
+    Data(Vec<Message>),
 }
 
 /// Execution role in the topology (not the logical operator kind).
@@ -257,7 +270,7 @@ pub struct OperatorBase {
     pub runtime_context: Option<RuntimeContext>,
     pub function: Option<Box<dyn FunctionTrait>>,
     pub operator_config: OperatorConfig,
-    pub input: Option<MessageStream>,
+    pub input: Option<Peekable<MessageStream>>,
     pub pending_messages: Vec<Message>,
 }
 
@@ -313,6 +326,16 @@ impl OperatorBase {
         input_stream.next().await
     }
 
+    /// Wait for the first message, then take more only if already ready.
+    ///
+    /// `max_records` is a cap, not a fill target. The first data message is
+    /// always accepted even if it exceeds the cap. Stops before watermarks /
+    /// barriers (left peeked).
+    pub async fn next_inputs(&mut self, max_records: usize) -> NextInputs {
+        let input = self.input.as_mut().expect("input stream not set");
+        drain_ready_inputs(input, max_records).await
+    }
+
     pub fn operator_config(&self) -> &OperatorConfig {
         &self.operator_config
     }
@@ -346,7 +369,7 @@ impl OperatorTrait for OperatorBase {
     }
     
     fn set_input(&mut self, input: Option<MessageStream>) {
-        self.input = input;
+        self.input = input.map(|s| s.peekable());
     }
     
     async fn poll_next(&mut self) -> OperatorPollResult {
@@ -410,5 +433,145 @@ pub fn get_operator_type_from_config(operator_config: &OperatorConfig) -> Operat
         OperatorConfig::WindowRequestConfig(_) => {
             OperatorType::Processor
         }
+    }
+}
+
+/// Pull ready data messages until `max_records` or a control / empty / pending stop.
+async fn drain_ready_inputs<S>(input: &mut Peekable<S>, max_records: usize) -> NextInputs
+where
+    S: Stream<Item = Message> + Unpin,
+{
+    let Some(first) = input.next().await else {
+        return NextInputs::Exhausted;
+    };
+    if first.is_control() {
+        return NextInputs::Control(first);
+    }
+
+    let mut data = vec![first];
+    let mut rows = data_rows(&data[0]);
+
+    loop {
+        let n = match Pin::new(&mut *input).peek().now_or_never() {
+            None | Some(None) => break,
+            Some(Some(msg)) if msg.is_control() => break,
+            Some(Some(msg)) => {
+                let n = data_rows(msg);
+                if rows.saturating_add(n) > max_records {
+                    break;
+                }
+                n
+            }
+        };
+        let msg = input.next().await.expect("peeked item");
+        rows += n;
+        data.push(msg);
+    }
+    NextInputs::Data(data)
+}
+
+fn data_rows(msg: &Message) -> usize {
+    match msg {
+        Message::Regular(m) => m.record_batch.num_rows(),
+        Message::Watermark(_) | Message::CheckpointBarrier(_) => 0,
+    }
+}
+
+#[cfg(test)]
+mod next_inputs_tests {
+    use super::*;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use arrow::array::Int64Array;
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use futures::{FutureExt, StreamExt, stream};
+
+    use crate::common::message::WatermarkMessage;
+
+    fn int_batch(rows: Vec<i64>) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int64, false)]));
+        RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(rows))]).unwrap()
+    }
+
+    fn data(rows: Vec<i64>) -> Message {
+        Message::new(None, int_batch(rows), None, None)
+    }
+
+    fn wm(v: u64) -> Message {
+        Message::Watermark(WatermarkMessage::new("src".to_string(), v, None))
+    }
+
+    fn data_len(out: &NextInputs) -> usize {
+        match out {
+            NextInputs::Data(msgs) => msgs.len(),
+            other => panic!("expected Data, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_stream() {
+        let mut stream = stream::empty().peekable();
+        let out = drain_ready_inputs(&mut stream, 8).await;
+        assert!(matches!(out, NextInputs::Exhausted));
+    }
+
+    #[tokio::test]
+    async fn does_not_block_waiting_to_fill_budget() {
+        let mut stream = stream::iter(vec![data(vec![1])])
+            .chain(stream::pending())
+            .peekable();
+        let out = tokio::time::timeout(
+            Duration::from_millis(200),
+            drain_ready_inputs(&mut stream, 8),
+        )
+        .await
+        .expect("must not wait on pending input");
+        assert_eq!(data_len(&out), 1);
+    }
+
+    #[tokio::test]
+    async fn stops_before_watermark() {
+        let mut stream = stream::iter(vec![data(vec![1]), data(vec![2]), wm(9)]).peekable();
+        let out = drain_ready_inputs(&mut stream, 8).await;
+        assert_eq!(data_len(&out), 2);
+        match Pin::new(&mut stream).peek().now_or_never() {
+            Some(Some(Message::Watermark(w))) => assert_eq!(w.watermark_value, 9),
+            other => panic!("expected peeked watermark, got {other:?}"),
+        }
+        let again = drain_ready_inputs(&mut stream, 8).await;
+        match again {
+            NextInputs::Control(Message::Watermark(w)) => assert_eq!(w.watermark_value, 9),
+            other => panic!("next fetch should see the watermark, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn record_limit_leaves_over_budget_message_peeked() {
+        let mut stream = stream::iter(vec![
+            data(vec![1, 2, 3]),
+            data(vec![4, 5, 6]),
+        ])
+        .peekable();
+        let out = drain_ready_inputs(&mut stream, 5).await;
+        assert_eq!(data_len(&out), 1);
+        assert!(matches!(
+            Pin::new(&mut stream).peek().now_or_never(),
+            Some(Some(Message::Regular(_)))
+        ));
+    }
+
+    #[tokio::test]
+    async fn first_message_accepted_even_when_over_record_limit() {
+        let mut stream =
+            stream::iter(vec![data(vec![1, 2, 3]), data(vec![4])]).peekable();
+        let out = drain_ready_inputs(&mut stream, 1).await;
+        assert_eq!(data_len(&out), 1);
+        assert!(matches!(
+            Pin::new(&mut stream).peek().now_or_never(),
+            Some(Some(Message::Regular(_)))
+        ));
     }
 }
