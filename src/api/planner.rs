@@ -651,7 +651,7 @@ mod tests {
 
         // Verify edge connectivity: source -> projection
         verify_edge_connectivity(&graph, &[
-            (OperatorKind::Source, OperatorKind::Projection, PartitionType::RoundRobin, 1),
+            (OperatorKind::Source, OperatorKind::Projection, PartitionType::Forward, 1),
         ]);
     }
 
@@ -681,8 +681,8 @@ mod tests {
 
         // Verify edge connectivity: source -> projection -> sink
         verify_edge_connectivity(&graph, &[
-            (OperatorKind::Source, OperatorKind::Projection, PartitionType::RoundRobin, 1),
-            (OperatorKind::Projection, OperatorKind::Sink, PartitionType::RoundRobin, 1),
+            (OperatorKind::Source, OperatorKind::Projection, PartitionType::Forward, 1),
+            (OperatorKind::Projection, OperatorKind::Sink, PartitionType::Forward, 1),
         ]);
     }
 
@@ -709,8 +709,8 @@ mod tests {
 
         // Verify edge connectivity: source -> filter -> projection
         verify_edge_connectivity(&graph, &[
-            (OperatorKind::Source, OperatorKind::Filter, PartitionType::RoundRobin, 1),
-            (OperatorKind::Filter, OperatorKind::Projection, PartitionType::RoundRobin, 1),
+            (OperatorKind::Source, OperatorKind::Filter, PartitionType::Forward, 1),
+            (OperatorKind::Filter, OperatorKind::Projection, PartitionType::Forward, 1),
         ]);
     }
 
@@ -767,11 +767,11 @@ mod tests {
         assert_eq!(edges.len(), 3, "Expected 3 edges, found {}", edges.len());
         
         // Verify edge connectivity: source -> keyby -> aggregate -> projection
-        // keyby -> aggregate should be Hash, others RoundRobin
+        // keyby -> aggregate should be Hash, others Forward (equal default parallelism)
         verify_edge_connectivity(&graph, &[
-            (OperatorKind::Source, OperatorKind::KeyBy, PartitionType::RoundRobin, 1),
+            (OperatorKind::Source, OperatorKind::KeyBy, PartitionType::Forward, 1),
             (OperatorKind::KeyBy, OperatorKind::Aggregate, PartitionType::Hash, 1),
-            (OperatorKind::Aggregate, OperatorKind::Projection, PartitionType::RoundRobin, 1),
+            (OperatorKind::Aggregate, OperatorKind::Projection, PartitionType::Forward, 1),
         ]);
     }
     
@@ -850,12 +850,12 @@ mod tests {
 
         // Verify edge connectivity for complex multi-GROUP BY query
         // Structure: source -> keyby1 -> aggregate1 -> projection1 -> keyby2 -> aggregate2 -> projection2
-        // 2 Hash edges (keyby->aggregate), 4 RoundRobin edges (all others)
+        // 2 Hash edges (keyby->aggregate), 4 Forward edges (all others, equal parallelism)
         verify_edge_connectivity(&graph, &[
-            (OperatorKind::Source, OperatorKind::KeyBy, PartitionType::RoundRobin, 1),
+            (OperatorKind::Source, OperatorKind::KeyBy, PartitionType::Forward, 1),
             (OperatorKind::KeyBy, OperatorKind::Aggregate, PartitionType::Hash, 2),
-            (OperatorKind::Aggregate, OperatorKind::Projection, PartitionType::RoundRobin, 2),
-            (OperatorKind::Projection, OperatorKind::KeyBy, PartitionType::RoundRobin, 1),
+            (OperatorKind::Aggregate, OperatorKind::Projection, PartitionType::Forward, 2),
+            (OperatorKind::Projection, OperatorKind::KeyBy, PartitionType::Forward, 1),
         ]);
     }
 
@@ -906,11 +906,11 @@ mod tests {
         assert_eq!(edges.len(), 3, "Expected 3 edges, found {}", edges.len());
         
         // Verify edge connectivity: source -> keyby -> window -> projection
-        // keyby -> window should be Hash (for partitioning), others RoundRobin
+        // keyby -> window should be Hash (for partitioning), others Forward
         verify_edge_connectivity(&graph, &[
-            (OperatorKind::Source, OperatorKind::KeyBy, PartitionType::RoundRobin, 1),
+            (OperatorKind::Source, OperatorKind::KeyBy, PartitionType::Forward, 1),
             (OperatorKind::KeyBy, OperatorKind::Window, PartitionType::Hash, 1),
-            (OperatorKind::Window, OperatorKind::Projection, PartitionType::RoundRobin, 1),
+            (OperatorKind::Window, OperatorKind::Projection, PartitionType::Forward, 1),
         ]);
 
         // Event-time lineage: assign on Source (defining site), not Window/KeyBy.
@@ -988,10 +988,10 @@ mod tests {
         //   - request_source -> keyby -> window_request -> projection (root)
         //   - root -> request_sink
         verify_edge_connectivity(&graph, &[
-            (OperatorKind::Source, OperatorKind::KeyBy, PartitionType::RoundRobin, 2), // original source -> keyby + request_source -> keyby
+            (OperatorKind::Source, OperatorKind::KeyBy, PartitionType::Forward, 2), // original source -> keyby + request_source -> keyby
             (OperatorKind::KeyBy, OperatorKind::Window, PartitionType::Hash, 1), // original keyby -> window
             (OperatorKind::KeyBy, OperatorKind::WindowRequest, PartitionType::Hash, 1), // new keyby -> window_request
-            (OperatorKind::WindowRequest, OperatorKind::Projection, PartitionType::RoundRobin, 1), // window_request -> projection
+            (OperatorKind::WindowRequest, OperatorKind::Projection, PartitionType::Forward, 1), // window_request -> projection
             (OperatorKind::Projection, OperatorKind::Sink, PartitionType::RequestRoute, 1), // root -> request_sink (uses RequestRoute partition type)
         ]);
         
