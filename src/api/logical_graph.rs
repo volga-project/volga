@@ -116,10 +116,6 @@ impl LogicalGraph {
         self.max_parallelism = max_parallelism;
     }
 
-    pub fn max_parallelism(&self) -> usize {
-        self.max_parallelism
-    }
-
     pub(crate) fn watermark_assign_config_for_column(&self, column_name: String) -> WatermarkAssignConfig {
         let mut cfg = WatermarkAssignConfig::new(
             self.event_time.watermark.out_of_orderness_ms,
