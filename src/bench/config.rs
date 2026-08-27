@@ -354,9 +354,7 @@ fn datagen_from_file(file: Option<&DatagenFile>, parallelism: usize) -> Result<D
 
 fn watermark_from_file(file: Option<&WatermarkFile>) -> Result<(u64, Option<u64>, Option<u64>)> {
     let file = file.cloned().unwrap_or_default();
-    if let Some(0) = file.emit_interval_ms {
-        bail!("launch.watermark.emit_interval_ms must be > 0 (omit for planner default)");
-    }
+    // 0 → Duration::ZERO: emit on every advancing batch (pre-#267 / tests).
     Ok((
         file.out_of_orderness_ms.unwrap_or(0),
         file.idle_timeout_ms,
