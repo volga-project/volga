@@ -316,6 +316,15 @@ impl Message {
         }
     }
 
+    /// Watermarks and checkpoint barriers bound an ingest group; they are
+    /// never coalesced into multi-message data drains.
+    pub fn is_control(&self) -> bool {
+        matches!(
+            self,
+            Message::Watermark(_) | Message::CheckpointBarrier(_)
+        )
+    }
+
     /// Serialize the Message to bytes
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut buffer = Vec::new();

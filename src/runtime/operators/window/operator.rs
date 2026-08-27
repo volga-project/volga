@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -6,16 +6,19 @@ use std::time::Instant;
 
 use anyhow::Result;
 use arrow::array::RecordBatch;
+use arrow::compute::concat_batches;
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use futures::{future, stream, StreamExt, TryStreamExt};
 
+use crate::common::key::Key;
 use crate::common::message::Message;
 use crate::common::MAX_WATERMARK_VALUE;
 use crate::runtime::functions::key_by::pack::split_by_key_exprs;
 use crate::runtime::checkpoint::{SerializedCheckpoint, SerializedRestore};
 use crate::runtime::operators::operator::{
-    MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType,
+    MessageStream, NextInputs, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait,
+    OperatorType,
 };
 use crate::runtime::operators::window::config::{BuiltWindows, WindowConfig};
 use crate::runtime::operators::window::eval::advance_key;
@@ -40,6 +43,9 @@ use crate::runtime::operators::window::store::WindowOperatorStore;
 
 pub const TASK_METADATA_ROWS_ACCEPTED: &str = "window_rows_accepted";
 pub const TASK_METADATA_ROWS_DROPPED_LATE: &str = "window_rows_dropped_late";
+
+/// One ingest step: take ready data inputs until this many records.
+const INGEST_MAX_RECORDS: usize = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WindowOutputMode {
@@ -217,6 +223,108 @@ impl WindowOperator {
         }
         arrow::compute::concat_batches(&self.output_schema, &batches).expect("concat")
     }
+
+    async fn ingest_data(&mut self, messages: Vec<Message>) -> OperatorPollResult {
+        let ingest_started = Instant::now();
+        let emit = self.output_mode == WindowOutputMode::Emit;
+        let mut by_key: HashMap<Key, Vec<RecordBatch>> = HashMap::new();
+        let mut input_rows = 0usize;
+        for message in messages {
+            let Message::Regular(base) = message else {
+                panic!("window ingest expects data messages, got {message:?}");
+            };
+            input_rows += base.record_batch.num_rows();
+            for (key, payload) in split_by_key_exprs(&base.record_batch, &self.partition_by) {
+                by_key.entry(key).or_default().push(payload);
+            }
+        }
+        let groups = by_key.into_iter().map(|(key, batches)| {
+            let batch = if batches.len() == 1 {
+                batches.into_iter().next().unwrap()
+            } else {
+                concat_batches(&batches[0].schema(), &batches).expect("concat same-key rows")
+            };
+            (key, batch)
+        });
+        let state = self.state_ref().clone();
+        let dropped: usize = stream::iter(groups)
+            .map(|(key, payload)| {
+                let state = state.clone();
+                async move { state.insert_batch(&key, payload, emit).await }
+            })
+            .buffer_unordered(PARTITION_IO_CONCURRENCY)
+            .fold(0usize, |acc, n| async move { acc + n })
+            .await;
+        debug_assert!(dropped <= input_rows);
+        self.task_metadata.increment_u64(
+            TASK_METADATA_ROWS_ACCEPTED,
+            (input_rows - dropped) as u64,
+        );
+        self.task_metadata
+            .increment_u64(TASK_METADATA_ROWS_DROPPED_LATE, dropped as u64);
+        if let Some((task_id, labels)) = self.metrics_target() {
+            metrics::record_ingest_ms(
+                task_id,
+                labels,
+                ingest_started.elapsed().as_secs_f64() * 1000.0,
+            );
+            metrics::add_late_dropped(task_id, labels, dropped as u64);
+        }
+        OperatorPollResult::Continue
+    }
+
+    async fn handle_control(&mut self, message: Message) -> OperatorPollResult {
+        match message {
+            Message::Watermark(watermark) => {
+                let wm_ts = if watermark.watermark_value == MAX_WATERMARK_VALUE {
+                    i64::MAX
+                } else {
+                    watermark.watermark_value as i64
+                };
+                let advance_to = Cursor::new(wm_ts, u64::MAX);
+                let state = self.state_ref();
+
+                let advances_frontier = state
+                    .watermark_frontier()
+                    .map_or(true, |frontier| wm_ts > frontier);
+                let result = if advances_frontier
+                    && self.output_mode == WindowOutputMode::Emit
+                {
+                    let started = Instant::now();
+                    let batch = self.process_due(advance_to).await;
+                    if let Some((task_id, labels)) = self.metrics_target() {
+                        metrics::record_wm_process_ms(
+                            task_id,
+                            labels,
+                            started.elapsed().as_secs_f64() * 1000.0,
+                        );
+                    }
+                    batch
+                } else {
+                    RecordBatch::new_empty(self.output_schema.clone())
+                };
+                if advances_frontier {
+                    state
+                        .watermark_frontier
+                        .store(wm_ts, Ordering::Release);
+                }
+
+                self.base
+                    .pending_messages
+                    .push(Message::Watermark(watermark));
+
+                if self.output_mode == WindowOutputMode::StateOnly {
+                    OperatorPollResult::Continue
+                } else {
+                    OperatorPollResult::Ready(Message::new(None, result, None, None))
+                }
+            }
+            Message::CheckpointBarrier(barrier) => {
+                OperatorPollResult::Ready(Message::CheckpointBarrier(barrier))
+            }
+            other => panic!("Window operator expects data messages or watermarks, got {other:?}"),
+        }
+    }
 }
 
 #[async_trait]
@@ -304,89 +412,10 @@ impl OperatorTrait for WindowOperator {
             return OperatorPollResult::Ready(msg);
         }
 
-        match self.base.next_input().await {
-            Some(message) => match message {
-                Message::Regular(base) => {
-                    let batch = &base.record_batch;
-                    let input_rows = batch.num_rows();
-                    let state = self.state_ref().clone();
-                    let ingest_started = Instant::now();
-                    let emit = self.output_mode == WindowOutputMode::Emit;
-                    let groups = split_by_key_exprs(batch, &self.partition_by);
-                    let dropped: usize = stream::iter(groups)
-                        .map(|(key, payload)| {
-                            let state = state.clone();
-                            async move { state.insert_batch(&key, payload, emit).await }
-                        })
-                        .buffer_unordered(PARTITION_IO_CONCURRENCY)
-                        .fold(0usize, |acc, n| async move { acc + n })
-                        .await;
-                    debug_assert!(dropped <= input_rows);
-                    self.task_metadata.increment_u64(
-                        TASK_METADATA_ROWS_ACCEPTED,
-                        (input_rows - dropped) as u64,
-                    );
-                    self.task_metadata
-                        .increment_u64(TASK_METADATA_ROWS_DROPPED_LATE, dropped as u64);
-                    if let Some((task_id, labels)) = self.metrics_target() {
-                        metrics::record_ingest_ms(
-                            task_id,
-                            labels,
-                            ingest_started.elapsed().as_secs_f64() * 1000.0,
-                        );
-                        metrics::add_late_dropped(task_id, labels, dropped as u64);
-                    }
-                    OperatorPollResult::Continue
-                }
-                Message::Watermark(watermark) => {
-                    let wm_ts = if watermark.watermark_value == MAX_WATERMARK_VALUE {
-                        i64::MAX
-                    } else {
-                        watermark.watermark_value as i64
-                    };
-                    let advance_to = Cursor::new(wm_ts, u64::MAX);
-                    let state = self.state_ref();
-
-                    let advances_frontier = state
-                        .watermark_frontier()
-                        .map_or(true, |frontier| wm_ts > frontier);
-                    let result = if advances_frontier
-                        && self.output_mode == WindowOutputMode::Emit
-                    {
-                        let started = Instant::now();
-                        let batch = self.process_due(advance_to).await;
-                        if let Some((task_id, labels)) = self.metrics_target() {
-                            metrics::record_wm_process_ms(
-                                task_id,
-                                labels,
-                                started.elapsed().as_secs_f64() * 1000.0,
-                            );
-                        }
-                        batch
-                    } else {
-                        RecordBatch::new_empty(self.output_schema.clone())
-                    };
-                    if advances_frontier {
-                        state
-                            .watermark_frontier
-                            .store(wm_ts, Ordering::Release);
-                    }
-
-                    self.base
-                        .pending_messages
-                        .push(Message::Watermark(watermark));
-
-                    if self.output_mode == WindowOutputMode::StateOnly {
-                        OperatorPollResult::Continue
-                    } else {
-                        OperatorPollResult::Ready(Message::new(None, result, None, None))
-                    }
-                }
-                Message::CheckpointBarrier(barrier) => {
-                    OperatorPollResult::Ready(Message::CheckpointBarrier(barrier))
-                }
-            },
-            None => OperatorPollResult::None,
+        match self.base.next_inputs(INGEST_MAX_RECORDS).await {
+            NextInputs::Exhausted => OperatorPollResult::None,
+            NextInputs::Control(message) => self.handle_control(message).await,
+            NextInputs::Data(messages) => self.ingest_data(messages).await,
         }
     }
 }
