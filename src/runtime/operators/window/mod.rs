@@ -28,6 +28,10 @@ pub use tile::TileConfig;
 
 pub const SEQ_NO_COLUMN_NAME: &str = "__seq_no";
 
+/// Max in-flight `advance_key` calls for one `process_due` page.
+/// Caps the in-mem due page (256) so eval does not stampede partition locks.
+pub(crate) const PROCESS_DUE_CONCURRENCY: usize = 8;
+
 pub use aggs::{
     create_window_accumulator, merge_accumulator_state, retract_accumulator_state,
     window_supports_tile_slide, AccumulatorType,

@@ -8,7 +8,7 @@ use anyhow::Result;
 use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
-use futures::{future, TryStreamExt};
+use futures::{stream, StreamExt, TryStreamExt};
 
 use crate::common::message::Message;
 use crate::common::MAX_WATERMARK_VALUE;
@@ -25,7 +25,7 @@ use crate::runtime::operators::window::model::{Cursor, WindowId};
 use crate::runtime::operators::window::spec::WindowSpec;
 use crate::runtime::operators::window::state::{WindowOperatorState, WindowStateSnapshot};
 use crate::runtime::operators::window::store::{open_window_operator_store, StateNamespace};
-use crate::runtime::operators::window::TileConfig;
+use crate::runtime::operators::window::{TileConfig, PROCESS_DUE_CONCURRENCY};
 use crate::runtime::observability::TaskMetadata;
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::state::{OperatorTaskState, StateRegistry};
@@ -188,22 +188,22 @@ impl WindowOperator {
             .await
             .expect("stream due window triggers")
         {
-            let futures = work.into_iter().map(|work| {
-                advance_key(
-                    state.store(),
-                    work,
-                    self.window_configs.as_ref(),
-                    self.ts_column_index,
-                    &self.output_schema,
-                    &self.input_schema,
-                )
-            });
-            batches.extend(
-                // TODO add concurrency limit
-                future::try_join_all(futures)
-                    .await
-                    .expect("advance due window triggers"),
-            );
+            let page = stream::iter(work)
+                .map(|work| {
+                    advance_key(
+                        state.store(),
+                        work,
+                        self.window_configs.as_ref(),
+                        self.ts_column_index,
+                        &self.output_schema,
+                        &self.input_schema,
+                    )
+                })
+                .buffered(PROCESS_DUE_CONCURRENCY)
+                .try_collect::<Vec<_>>()
+                .await
+                .expect("advance due window triggers");
+            batches.extend(page);
         }
         if batches.is_empty() {
             return RecordBatch::new_empty(self.output_schema.clone());
