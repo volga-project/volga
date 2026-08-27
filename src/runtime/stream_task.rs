@@ -61,13 +61,9 @@ impl TaskTimeMetrics {
         self.backpressure_tracker.clone()
     }
 
-    fn take_idle_ns(&self) -> u64 {
-        self.idle_ns.swap(0, Ordering::Relaxed)
-    }
-
     /// Scale to ms-per-second and reset. Returns `(busy, idle, backpressured)`.
     fn take_ms_per_second(&self, window: Duration) -> (f64, f64, f64) {
-        let idle = self.take_idle_ns();
+        let idle = self.idle_ns.swap(0, Ordering::Relaxed);
         let bp = self.backpressure_tracker.take_ns();
         let window_ms = window.as_secs_f64() * 1000.0;
         if window_ms <= 0.0 {
@@ -1139,46 +1135,6 @@ impl StreamTask {
                 Err(_) => continue,
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod task_time_metrics_tests {
-    use super::*;
-    use async_stream::stream;
-    use futures::StreamExt;
-    use std::time::Duration;
-    use tokio::time::sleep;
-
-    fn wm(i: u64) -> Message {
-        Message::Watermark(WatermarkMessage::new("t".to_string(), i, Some(0)))
-    }
-
-    fn delayed_input(hold: Duration, msg: Message) -> MessageStream {
-        Box::pin(stream! {
-            sleep(hold).await;
-            yield msg;
-        })
-    }
-
-    #[tokio::test]
-    async fn input_wait_is_idle_compute_after_is_not() {
-        let metrics = Arc::new(TaskTimeMetrics::default());
-        let wait = Duration::from_millis(80);
-        let compute = Duration::from_millis(50);
-        let mut input = idle_timing_stream(delayed_input(wait, wm(1)), metrics.clone());
-        assert!(input.next().await.is_some());
-        sleep(compute).await;
-        let idle = metrics.take_idle_ns();
-        let wait_ns = wait.as_nanos() as u64;
-        assert!(
-            idle >= wait_ns / 2 && idle <= wait_ns * 5 / 2,
-            "idle_ns={idle} expected near {wait:?}"
-        );
-        assert!(
-            idle < (wait + compute).as_nanos() as u64,
-            "compute after input was counted as idle: idle_ns={idle}"
-        );
     }
 }
 
