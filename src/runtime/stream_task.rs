@@ -10,7 +10,7 @@ use crate::{
             MetricsLabels, LABEL_PIPELINE_ID, LABEL_TASK_ID, LABEL_WORKER_ID,
             METRIC_STREAM_TASK_BACKPRESSURED_TIME_MS_PER_SECOND,
             METRIC_STREAM_TASK_BUSY_TIME_MS_PER_SECOND, METRIC_STREAM_TASK_BYTES_RECV,
-            METRIC_STREAM_TASK_BYTES_SENT, METRIC_STREAM_TASK_CHECKPOINT_ALIGN_WAIT_MS,
+            METRIC_STREAM_TASK_BYTES_SENT,
             METRIC_STREAM_TASK_CHECKPOINT_BARRIER_PROPAGATION_MS,
             METRIC_STREAM_TASK_CHECKPOINT_DURATION_MS, METRIC_STREAM_TASK_CHECKPOINT_FAILED,
             METRIC_STREAM_TASK_CHECKPOINT_PAYLOAD_BYTES, METRIC_STREAM_TASK_CHECKPOINT_SUCCESS,
@@ -22,7 +22,7 @@ use crate::{
         },
         observability::{TaskMetadata, TaskSnapshot, StreamTaskStatus},
         operators::operator::{
-            create_operator, MessageStream, OperatorConfig, OperatorPollResult, OperatorTrait,
+            create_operator, OperatorConfig, OperatorPollResult, OperatorTrait,
             OperatorType,
         },
         runtime_context::RuntimeContext,
@@ -30,8 +30,7 @@ use crate::{
     transport::transport_client::TransportClientConfig,
 };
 use anyhow::Result;
-use futures::{FutureExt, StreamExt};
-use async_stream::stream;
+use futures::FutureExt;
 use metrics::counter;
 use tokio::{task::JoinHandle, sync::Mutex, sync::watch, sync::mpsc};
 use crate::transport::transport_client::DataReaderControl;
@@ -84,7 +83,9 @@ use crate::common::grpc::GrpcConfig;
 use crate::runtime::master::server::master_service::master_service_client::MasterServiceClient;
 use std::sync::atomic::AtomicBool;
 use crate::runtime::VertexId;
-use crate::runtime::watermark::WatermarkAssignConfig;
+use crate::runtime::stream_task_preprocess::{
+    create_preprocessed_input_stream, sleep_until_deadline,
+};
 use crate::runtime::watermark::WatermarkManager;
 
 pub static MESSAGE_TRACE_ENABLED: AtomicBool = AtomicBool::new(false);
@@ -115,7 +116,7 @@ impl CheckpointAligner {
     }
 
     /// Returns `Some((checkpoint_id, inject_stamp, align_wait_ms))` when fully aligned.
-    fn on_barrier(
+    pub(crate) fn on_barrier(
         &mut self,
         barrier: &crate::common::message::CheckpointBarrierMessage,
         expected_attempt_id: u64,
@@ -284,14 +285,14 @@ impl StreamTask {
         Ok(())
     }
 
-    fn now_ms() -> u64 {
+    pub(crate) fn now_ms() -> u64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64
     }
 
-    fn record_histogram(
+    pub(crate) fn record_histogram(
         name: &'static str,
         value_ms: f64,
         vertex_id: &VertexId,
@@ -300,7 +301,7 @@ impl StreamTask {
         record_task_histogram(name, value_ms, vertex_id.as_ref(), labels);
     }
 
-    fn record_control_propagation(
+    pub(crate) fn record_control_propagation(
         vertex_id: &VertexId,
         message: &Message,
         labels: Option<&MetricsLabels>,
@@ -330,7 +331,7 @@ impl StreamTask {
         }
     }
 
-    fn set_watermark_lag_gauge(
+    pub(crate) fn set_watermark_lag_gauge(
         vertex_id: &VertexId,
         watermark_value: u64,
         labels: Option<&MetricsLabels>,
@@ -347,7 +348,7 @@ impl StreamTask {
         );
     }
 
-    fn record_metrics(
+    pub(crate) fn record_metrics(
         vertex_id: VertexId,
         message: &Message,
         recv_or_send: bool,
@@ -436,104 +437,37 @@ impl StreamTask {
         }
     }
 
-    // Create preprocessed input stream that handles watermark advancement + barrier alignment (blocks upstreams).
-    // It never yields checkpoint barriers to the operator; instead it notifies the run loop via `aligned_checkpoint_sender`.
-    pub(crate) fn create_preprocessed_input_stream(
-        input_stream: MessageStream,
-        vertex_id: VertexId,
-        watermark_assign: Option<WatermarkAssignConfig>,
-        upstream_vertices: Vec<String>,
-        upstream_watermarks: Arc<Mutex<HashMap<String, u64>>>,
-        current_watermark: Arc<AtomicU64>,
-        _status: Arc<AtomicU8>,
-        mut aligner: CheckpointAligner,
-        labels: Option<MetricsLabels>,
-        execution_attempt_id: u64,
-    ) -> MessageStream {
-        Box::pin(stream! {
-            let mut input_stream = input_stream;
-            let mut watermark_manager = WatermarkManager::new(
-                watermark_assign,
-                upstream_vertices.clone(),
-                upstream_watermarks.clone(),
-                current_watermark.clone(),
-            );
-            while let Some(message) = input_stream.next().await {
-                Self::record_metrics(vertex_id.clone(), &message, true, labels.as_ref());
-                Self::record_control_propagation(&vertex_id, &message, labels.as_ref());
+    async fn send_source_assigned_watermark(
+        collectors_per_target_operator: &mut HashMap<String, Collector>,
+        vertex_id: &VertexId,
+        labels: Option<&MetricsLabels>,
+        wm: WatermarkMessage,
+    ) {
+        let mut injected = Message::Watermark(wm);
+        injected.set_upstream_vertex_id(vertex_id.as_ref().to_string());
+        injected.set_ingest_timestamp(Self::now_ms());
+        if let Message::Watermark(ref w) = injected {
+            Self::set_watermark_lag_gauge(vertex_id, w.watermark_value, labels);
+        }
+        Self::record_metrics(vertex_id.clone(), &injected, false, labels);
+        Self::send_to_collectors_if_needed(collectors_per_target_operator, injected).await;
+    }
 
-                match &message {
-                    Message::Watermark(watermark) => {
-                        if watermark_manager.assigner_enabled() && watermark.watermark_value != MAX_WATERMARK_VALUE {
-                            continue;
-                        }
-                        // Advance watermark and only forward to operator if advanced.
-                        if let Some(new_watermark) = watermark_manager.merge_watermark(watermark.clone()).await {
-                            Self::set_watermark_lag_gauge(&vertex_id, new_watermark, labels.as_ref());
-                            let mut wm = watermark.clone();
-                            wm.watermark_value = new_watermark;
-                            wm.metadata.upstream_vertex_id = Some(vertex_id.as_ref().to_string());
-                            // Keep create stamp for downstream propagation.
-                            yield Message::Watermark(wm);
-                        }
-                    }
-                    Message::CheckpointBarrier(barrier) => {
-                        match aligner.on_barrier(barrier, execution_attempt_id) {
-                            Ok(Some((checkpoint_id, inject_stamp, align_wait_ms))) => {
-                                Self::record_histogram(
-                                    METRIC_STREAM_TASK_CHECKPOINT_ALIGN_WAIT_MS,
-                                    align_wait_ms,
-                                    &vertex_id,
-                                    labels.as_ref(),
-                                );
-                                // Once fully aligned, yield a single barrier; preserve inject stamp.
-                                yield Message::CheckpointBarrier(
-                                    crate::common::message::CheckpointBarrierMessage::new(
-                                        vertex_id.as_ref().to_string(),
-                                        checkpoint_id,
-                                        execution_attempt_id,
-                                        inject_stamp,
-                                    ),
-                                );
-                            }
-                            Ok(None) => {}
-                            Err(error) => {
-                                panic!(
-                                    "[CHECKPOINT] {} alignment failed: {}",
-                                    vertex_id.as_ref(),
-                                    error
-                                );
-                            }
-                        }
-                    }
-                    _ => {
-                        // Generate per-upstream watermark from this data message (if enabled),
-                        // then run it through the same min-upstream merge logic.
-                        let upstream_for_msg = message
-                            .upstream_vertex_id()
-                            .unwrap_or_else(|| vertex_id.as_ref().to_string());
-                        let injected = watermark_manager.on_data_message(&upstream_for_msg, &message);
-                        yield message;
-                        if let Some(wm) = injected {
-                            // Treat injected watermark exactly like an upstream watermark: merge and
-                            // emit a task-local watermark only if it advances.
-                            if let Some(new_watermark) = watermark_manager.merge_watermark(wm.clone()).await {
-                                Self::set_watermark_lag_gauge(
-                                    &vertex_id,
-                                    new_watermark,
-                                    labels.as_ref(),
-                                );
-                                yield Message::Watermark(WatermarkMessage::new(
-                                    vertex_id.as_ref().to_string(),
-                                    new_watermark,
-                                    Some(Self::now_ms()),
-                                ));
-                            }
-                        }
-                    }
-                }
-            }
-        })
+    async fn send_source_assigned_watermarks(
+        collectors_per_target_operator: &mut HashMap<String, Collector>,
+        vertex_id: &VertexId,
+        labels: Option<&MetricsLabels>,
+        wms: Vec<WatermarkMessage>,
+    ) {
+        for wm in wms {
+            Self::send_source_assigned_watermark(
+                collectors_per_target_operator,
+                vertex_id,
+                labels,
+                wm,
+            )
+            .await;
+        }
     }
 
     // Helper function to send message to collectors (similar to original stream_task.rs).
@@ -767,7 +701,7 @@ impl StreamTask {
 
                 let checkpoint_aligner = CheckpointAligner::new(&upstream_vertices, reader_control);
 
-                let preprocessed_stream = Self::create_preprocessed_input_stream(
+                let preprocessed_stream = create_preprocessed_input_stream(
                     input_stream,
                     vertex_id.clone(),
                     watermark_assign.clone(),
@@ -793,6 +727,15 @@ impl StreamTask {
                                 "[CHECKPOINT] {} received trigger for checkpoint_id={}",
                                 vertex_id, checkpoint_id
                             );
+                            if let Some(manager) = source_watermark_manager.as_mut() {
+                                Self::send_source_assigned_watermarks(
+                                    &mut collectors_per_target_operator,
+                                    &vertex_id,
+                                    metrics_labels.as_ref(),
+                                    manager.flush_pending(),
+                                )
+                                .await;
+                            }
                             Some(Message::CheckpointBarrier(
                                 crate::common::message::CheckpointBarrierMessage::new(
                                     vertex_id.as_ref().to_string(),
@@ -813,7 +756,33 @@ impl StreamTask {
                     OperatorPollResult::Ready(msg)
                 } else {
                     let idle_start = Instant::now();
-                    let res = operator.poll_next().await;
+                    let use_timer = is_source
+                        && source_watermark_manager
+                            .as_ref()
+                            .is_some_and(|m| m.assigner_enabled());
+                    let res = if use_timer {
+                        let deadline = source_watermark_manager
+                            .as_ref()
+                            .and_then(|m| m.next_emit_deadline());
+                        tokio::select! {
+                            biased;
+                            res = operator.poll_next() => res,
+                            _ = sleep_until_deadline(deadline) => {
+                                if let Some(manager) = source_watermark_manager.as_mut() {
+                                    Self::send_source_assigned_watermarks(
+                                        &mut collectors_per_target_operator,
+                                        &vertex_id,
+                                        metrics_labels.as_ref(),
+                                        manager.try_emit_due(),
+                                    )
+                                    .await;
+                                }
+                                OperatorPollResult::Continue
+                            }
+                        }
+                    } else {
+                        operator.poll_next().await
+                    };
                     task_time_metrics.add_idle_ns(idle_start.elapsed().as_nanos() as u64);
                     res
                 };
@@ -970,31 +939,26 @@ impl StreamTask {
                         ).await;
 
                         if let Some(wm) = injected_wm {
-                            let mut injected = Message::Watermark(wm);
-                            injected.set_upstream_vertex_id(vertex_id.as_ref().to_string());
-                            injected.set_ingest_timestamp(Self::now_ms());
-                            if let Message::Watermark(ref w) = injected {
-                                Self::set_watermark_lag_gauge(
-                                    &vertex_id,
-                                    w.watermark_value,
-                                    metrics_labels.as_ref(),
-                                );
-                            }
-                            Self::record_metrics(
-                                vertex_id.clone(),
-                                &injected,
-                                false,
-                                metrics_labels.as_ref(),
-                            );
-                            Self::send_to_collectors_if_needed(
+                            Self::send_source_assigned_watermarks(
                                 &mut collectors_per_target_operator,
-                                injected,
+                                &vertex_id,
+                                metrics_labels.as_ref(),
+                                vec![wm],
                             )
                             .await;
                         }
                     }
                     OperatorPollResult::None => {
                         if is_source {
+                            if let Some(manager) = source_watermark_manager.as_mut() {
+                                Self::send_source_assigned_watermarks(
+                                    &mut collectors_per_target_operator,
+                                    &vertex_id,
+                                    metrics_labels.as_ref(),
+                                    manager.flush_pending(),
+                                )
+                                .await;
+                            }
                             let wm = Message::Watermark(WatermarkMessage::new(
                                 vertex_id.as_ref().to_string(),
                                 MAX_WATERMARK_VALUE,

@@ -585,6 +585,15 @@ mod tests {
             assigns[0].operator_config
         );
         assert_time_hint_column(assigns[0], "timestamp");
+        assert_eq!(
+            assigns[0]
+                .watermark_assign
+                .as_ref()
+                .unwrap()
+                .emit_interval,
+            crate::runtime::watermark::WatermarkAssignConfig::DEFAULT_EMIT_INTERVAL,
+            "default emit interval"
+        );
 
         for node in graph.get_nodes() {
             if matches!(

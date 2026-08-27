@@ -104,6 +104,11 @@ impl PipelineSpecBuilder {
         self
     }
 
+    pub fn with_watermark_emit_interval_ms(mut self, emit_interval_ms: Option<u64>) -> Self {
+        self.spec.event_time.watermark.emit_interval_ms = emit_interval_ms;
+        self
+    }
+
     pub fn with_window_allowed_lateness_ms(mut self, allowed_lateness_ms: i64) -> Self {
         self.spec.event_time.window.allowed_lateness_ms = allowed_lateness_ms;
         self

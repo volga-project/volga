@@ -68,6 +68,7 @@ pub struct LaunchFile {
     pub threads_per_task: Option<usize>,
     pub checkpoint: Option<CheckpointFile>,
     pub datagen: Option<DatagenFile>,
+    pub watermark: Option<WatermarkFile>,
     pub window: Option<WindowFile>,
 }
 
@@ -89,11 +90,20 @@ pub struct DatagenFile {
     pub num_unique: Option<usize>,
 }
 
+/// Pipeline-wide watermark assigner knobs (`event_time.watermark`).
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WatermarkFile {
+    pub out_of_orderness_ms: Option<u64>,
+    pub idle_timeout_ms: Option<u64>,
+    /// Processing-time coalesce. Omit → planner default (200ms).
+    pub emit_interval_ms: Option<u64>,
+}
+
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WindowFile {
     pub tiling: Option<Vec<String>>,
-    pub out_of_orderness_ms: Option<u64>,
     pub allowed_lateness_ms: Option<i64>,
 }
 
@@ -207,8 +217,9 @@ fn compile_launch(launch: Option<&LaunchFile>) -> Result<PipelineLaunchSpec> {
         .unwrap_or(DEFAULT_SQL);
     let (interval_ms, timeout_ms, retention) = checkpoint_from_file(launch.checkpoint.as_ref())?;
     let datagen = datagen_from_file(launch.datagen.as_ref(), parallelism)?;
-    let (tiling, out_of_orderness_ms, allowed_lateness_ms) =
-        window_from_file(launch.window.as_ref())?;
+    let (out_of_orderness_ms, idle_timeout_ms, emit_interval_ms) =
+        watermark_from_file(launch.watermark.as_ref())?;
+    let (tiling, allowed_lateness_ms) = window_from_file(launch.window.as_ref())?;
 
     let schema = Arc::new(Schema::new(vec![
         Field::new(
@@ -233,6 +244,8 @@ fn compile_launch(launch: Option<&LaunchFile>) -> Result<PipelineLaunchSpec> {
             schema_to_json(schema.as_ref()),
         ))
         .with_out_of_orderness_ms(out_of_orderness_ms)
+        .with_watermark_idle_timeout_ms(idle_timeout_ms)
+        .with_watermark_emit_interval_ms(emit_interval_ms)
         .with_window_allowed_lateness_ms(allowed_lateness_ms)
         .with_operator_overrides_defaults(OperatorOverride {
             tuning: Some(OperatorTuningSpec::Window(WindowSpec {
@@ -339,7 +352,19 @@ fn datagen_from_file(file: Option<&DatagenFile>, parallelism: usize) -> Result<D
     })
 }
 
-fn window_from_file(file: Option<&WindowFile>) -> Result<(TileConfig, u64, i64)> {
+fn watermark_from_file(file: Option<&WatermarkFile>) -> Result<(u64, Option<u64>, Option<u64>)> {
+    let file = file.cloned().unwrap_or_default();
+    if let Some(0) = file.emit_interval_ms {
+        bail!("launch.watermark.emit_interval_ms must be > 0 (omit for planner default)");
+    }
+    Ok((
+        file.out_of_orderness_ms.unwrap_or(0),
+        file.idle_timeout_ms,
+        file.emit_interval_ms,
+    ))
+}
+
+fn window_from_file(file: Option<&WindowFile>) -> Result<(TileConfig, i64)> {
     let file = file.cloned().unwrap_or_default();
     let tiling_raw = file
         .tiling
@@ -352,11 +377,7 @@ fn window_from_file(file: Option<&WindowFile>) -> Result<(TileConfig, u64, i64)>
         granularities.push(parse_granularity(raw)?);
     }
     let tiling = TileConfig::new(granularities).map_err(|error| anyhow!("{error}"))?;
-    Ok((
-        tiling,
-        file.out_of_orderness_ms.unwrap_or(0),
-        file.allowed_lateness_ms.unwrap_or(0),
-    ))
+    Ok((tiling, file.allowed_lateness_ms.unwrap_or(0)))
 }
 
 fn nonzero_usize(value: Option<usize>, default: usize, field: &str) -> Result<usize> {
@@ -521,6 +542,9 @@ launch:
   datagen:
     rate: 100
     num_unique: 32
+  watermark:
+    out_of_orderness_ms: 0
+    emit_interval_ms: 200
   sql: SELECT timestamp, key, value FROM datagen_source
 oracles:
   lag_p99: 15s
@@ -548,6 +572,18 @@ extra_prom_queries:
         assert_eq!(
             spec.launch.pipeline.sql.as_deref(),
             Some("SELECT timestamp, key, value FROM datagen_source")
+        );
+        assert_eq!(
+            spec.launch
+                .pipeline
+                .event_time
+                .watermark
+                .emit_interval_ms,
+            Some(200)
+        );
+        assert_eq!(
+            spec.launch.pipeline.event_time.watermark.out_of_orderness_ms,
+            0
         );
         assert_eq!(spec.oracles.lag_p99, Duration::from_secs(15));
         assert_eq!(spec.oracles.restore_catchup, Duration::from_secs(90));
