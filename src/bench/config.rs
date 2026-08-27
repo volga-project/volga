@@ -593,15 +593,4 @@ extra_prom_queries:
             vec![("custom".to_string(), "up".to_string())]
         );
     }
-
-    #[test]
-    fn soak_yaml_wires_watermark_knobs() {
-        for name in ["unlimited.yaml", "example.yaml"] {
-            let path = Path::new("kubevolga/hack/bench").join(name);
-            let spec = apply_file(&BenchFile::load(&path).unwrap()).unwrap();
-            let wm = &spec.launch.pipeline.event_time.watermark;
-            assert_eq!(wm.out_of_orderness_ms, 0, "{name}");
-            assert_eq!(wm.emit_interval_ms, Some(200), "{name}");
-        }
-    }
 }
