@@ -192,7 +192,8 @@ impl InMemWindowStore {
         f: impl FnOnce(&PartitionState) -> R,
     ) -> Option<R> {
         let slot = self.partitions.get(partition).map(|entry| entry.clone())?;
-        f(&slot.read())
+        let state = slot.read();
+        Some(f(&state))
     }
 
     fn write_part<R>(
