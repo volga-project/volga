@@ -89,7 +89,7 @@ impl WatermarkAssignerState {
         }
     }
 
-    fn emit_all(&mut self, now: Instant, force: bool) -> Vec<WatermarkMessage> {
+    fn emit_from_upstreams(&mut self, now: Instant, force: bool) -> Vec<WatermarkMessage> {
         let interval = self.emit_interval;
         let ooo = self.out_of_orderness_ms;
         let mut out = Vec::new();
@@ -191,12 +191,12 @@ impl WatermarkAssignerState {
     }
 
     pub fn try_emit_due(&mut self, now: Instant) -> Vec<WatermarkMessage> {
-        self.emit_all(now, false)
+        self.emit_from_upstreams(now, false)
     }
 
     /// Publish any advanced candidate regardless of interval (EOF / barrier / max).
     pub fn flush(&mut self, now: Instant) -> Vec<WatermarkMessage> {
-        self.emit_all(now, true)
+        self.emit_from_upstreams(now, true)
     }
 
     pub fn next_emit_deadline(&self) -> Option<Instant> {
