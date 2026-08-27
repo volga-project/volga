@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::sync::oneshot;
@@ -112,9 +113,8 @@ impl TransportBackend {
                 ..
             } => RemoteEndpoint {
                 host: target_node_ip.clone(),
-                port: u16::try_from(*target_transport_port).unwrap_or_else(|_| {
-                    panic!("invalid transport port {target_transport_port}")
-                }),
+                port: u16::try_from(*target_transport_port)
+                    .unwrap_or_else(|_| panic!("invalid transport port {target_transport_port}")),
             },
             Channel::Local { .. } => panic!("Expected remote channel"),
         }
@@ -311,14 +311,22 @@ impl TransportBackendTrait for TransportBackend {
             let _ = shutdown_tx.send(());
         }
 
+        // BufWriter does not flush on drop. Let pumps flush, then abort if a
+        // TCP window stall holds the write.
+        const PUMP_CLOSE_FLUSH: Duration = Duration::from_secs(2);
+        for mut handle in self.pump_handles.drain(..) {
+            tokio::select! {
+                _ = &mut handle => {}
+                _ = tokio::time::sleep(PUMP_CLOSE_FLUSH) => {
+                    handle.abort();
+                    let _ = handle.await;
+                }
+            }
+        }
+
         if let Some(server_handle) = self.server_handle.take() {
             server_handle.abort();
             let _ = server_handle.await;
-        }
-
-        for handle in self.pump_handles.drain(..) {
-            handle.abort();
-            let _ = handle.await;
         }
 
         println!("[TCP] All tasks completed");
