@@ -22,7 +22,7 @@ use crate::{
         },
         observability::{TaskMetadata, TaskSnapshot, StreamTaskStatus},
         operators::operator::{
-            create_operator, OperatorConfig, OperatorPollResult, OperatorTrait,
+            create_operator, MessageStream, OperatorConfig, OperatorPollResult, OperatorTrait,
             OperatorType,
         },
         runtime_context::RuntimeContext,
@@ -30,7 +30,8 @@ use crate::{
     transport::transport_client::TransportClientConfig,
 };
 use anyhow::Result;
-use futures::FutureExt;
+use async_stream::stream;
+use futures::{FutureExt, StreamExt};
 use metrics::counter;
 use tokio::{task::JoinHandle, sync::Mutex, sync::watch, sync::mpsc};
 use crate::transport::transport_client::DataReaderControl;
@@ -41,9 +42,10 @@ use std::{collections::HashMap, sync::{atomic::{AtomicU8, AtomicU64, Ordering}, 
 
 /// Accumulates Flink-style task time metrics within a report window.
 ///
-/// Idle = `poll_next` wait (source produce or input); backpressured = exclusive
-/// tx-queue wait via [`BackpressureTracker`] (same write path as BP ratio
-/// gauges); busy = residual wall time so the three ms/s gauges sum to ~1000.
+/// Idle = waiting on the input stream (`next()`), not operator compute such as
+/// Window `insert_batch` / `process_due`. Backpressured = exclusive tx-queue
+/// wait via [`BackpressureTracker`]; busy = residual wall time so the three
+/// ms/s gauges sum to ~1000.
 #[derive(Debug, Default)]
 pub(crate) struct TaskTimeMetrics {
     idle_ns: AtomicU64,
@@ -76,6 +78,25 @@ impl TaskTimeMetrics {
         let scale = 1000.0 / window_ms;
         (busy_ms * scale, idle_ms * scale, bp_ms * scale)
     }
+}
+
+/// Idle = time spent in `input.next()`, which is wait-for-mailbox (plus cheap
+/// preprocess). Operator compute after `next_input` returns is not included.
+fn input_with_idle_tracking(
+    mut input: MessageStream,
+    metrics: Arc<TaskTimeMetrics>,
+) -> MessageStream {
+    Box::pin(stream! {
+        loop {
+            let start = Instant::now();
+            let item = input.next().await;
+            metrics.add_idle_ns(start.elapsed().as_nanos() as u64);
+            match item {
+                Some(msg) => yield msg,
+                None => break,
+            }
+        }
+    })
 }
 // serde imports removed; this module does not define serializable DTOs directly.
 use crate::common::grpc::master::master_client as connect_master_client;
@@ -714,7 +735,10 @@ impl StreamTask {
                     execution_attempt_id,
                 );
 
-                operator.set_input(Some(preprocessed_stream))
+                operator.set_input(Some(input_with_idle_tracking(
+                    preprocessed_stream,
+                    task_time_metrics.clone(),
+                )))
             };
 
             while status.load(Ordering::SeqCst) == StreamTaskStatus::Running as u8 {
@@ -755,12 +779,11 @@ impl StreamTask {
                 let poll_res = if let Some(msg) = produced {
                     OperatorPollResult::Ready(msg)
                 } else {
-                    let idle_start = Instant::now();
                     let use_timer = is_source
                         && source_watermark_manager
                             .as_ref()
                             .is_some_and(|m| m.assigner_enabled());
-                    let res = if use_timer {
+                    if use_timer {
                         let deadline = source_watermark_manager
                             .as_ref()
                             .and_then(|m| m.next_emit_deadline());
@@ -782,9 +805,7 @@ impl StreamTask {
                         }
                     } else {
                         operator.poll_next().await
-                    };
-                    task_time_metrics.add_idle_ns(idle_start.elapsed().as_nanos() as u64);
-                    res
+                    }
                 };
 
                 match poll_res {
@@ -1084,3 +1105,4 @@ impl StreamTask {
         }
     }
 }
+
