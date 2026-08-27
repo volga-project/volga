@@ -39,6 +39,7 @@ use crate::runtime::operators::source::source_operator::SourceConfig;
 use crate::runtime::operators::sink::sink_operator::SinkConfig;
 use crate::runtime::operators::aggregate::aggregate_operator::AggregateConfig;
 use crate::runtime::operators::window::operator::WindowOperatorConfig;
+use crate::runtime::watermark::WatermarkAssignConfig;
 
 // pub static REQUEST_SOURCE_NAME: &str = "request_source";
 
@@ -196,6 +197,8 @@ impl Planner {
         optimized_plan.visit_with_subqueries(self)?;
         // Batch mode forbids watermark_assign on StreamTasks.
         if self.context.execution_mode != ExecutionMode::Batch {
+            self.logical_graph
+                .set_emit_interval(WatermarkAssignConfig::DEFAULT_EMIT_INTERVAL);
             apply_auto_watermark_assigns(&optimized_plan, &mut self.logical_graph)?;
         }
 
@@ -994,7 +997,7 @@ mod tests {
             (OperatorKind::WindowRequest, OperatorKind::Projection, PartitionType::Forward, 1), // window_request -> projection
             (OperatorKind::Projection, OperatorKind::Sink, PartitionType::RequestRoute, 1), // root -> request_sink (uses RequestRoute partition type)
         ]);
-        
+
         // Verify window node has no outgoing edges
         let window_node = nodes_after.iter()
             .find(|n| matches!(n.operator_config, OperatorConfig::WindowConfig(_)))

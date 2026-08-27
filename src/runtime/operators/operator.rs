@@ -1,5 +1,6 @@
 use async_trait::async_trait;
-use futures::{Stream, StreamExt};
+use futures::stream::Peekable;
+use futures::{FutureExt, Stream, StreamExt};
 
 use crate::runtime::checkpoint::{SerializedCheckpoint, SerializedRestore};
 use crate::runtime::functions::join::join_function::JoinFunction;
@@ -41,6 +42,18 @@ impl OperatorPollResult {
             OperatorPollResult::None => panic!("OperatorPollResult is None, expected Ready"),
         }
     }
+}
+
+/// Result of [`OperatorBase::next_inputs`].
+///
+/// A following control or over-budget data message is left peeked on the stream.
+#[derive(Debug)]
+pub enum NextInputs {
+    Exhausted,
+    /// Watermark or checkpoint barrier.
+    Control(Message),
+    /// One or more data messages.
+    Data(Vec<Message>),
 }
 
 /// Execution role in the topology (not the logical operator kind).
@@ -257,7 +270,7 @@ pub struct OperatorBase {
     pub runtime_context: Option<RuntimeContext>,
     pub function: Option<Box<dyn FunctionTrait>>,
     pub operator_config: OperatorConfig,
-    pub input: Option<MessageStream>,
+    pub input: Option<Peekable<MessageStream>>,
     pub pending_messages: Vec<Message>,
 }
 
@@ -313,6 +326,16 @@ impl OperatorBase {
         input_stream.next().await
     }
 
+    /// Wait for the first message, then take more only if already ready.
+    ///
+    /// `max_records` is a cap, not a fill target. The first data message is
+    /// always accepted even if it exceeds the cap. Stops before watermarks /
+    /// barriers (left peeked).
+    pub async fn next_inputs(&mut self, max_records: usize) -> NextInputs {
+        let input = self.input.as_mut().expect("input stream not set");
+        drain_ready_inputs(input, max_records).await
+    }
+
     pub fn operator_config(&self) -> &OperatorConfig {
         &self.operator_config
     }
@@ -346,7 +369,7 @@ impl OperatorTrait for OperatorBase {
     }
     
     fn set_input(&mut self, input: Option<MessageStream>) {
-        self.input = input;
+        self.input = input.map(|s| s.peekable());
     }
     
     async fn poll_next(&mut self) -> OperatorPollResult {
@@ -410,5 +433,46 @@ pub fn get_operator_type_from_config(operator_config: &OperatorConfig) -> Operat
         OperatorConfig::WindowRequestConfig(_) => {
             OperatorType::Processor
         }
+    }
+}
+
+/// Pull ready data messages until `max_records` or a control / empty / pending stop.
+async fn drain_ready_inputs<S>(input: &mut Peekable<S>, max_records: usize) -> NextInputs
+where
+    S: Stream<Item = Message> + Unpin,
+{
+    let Some(first) = input.next().await else {
+        return NextInputs::Exhausted;
+    };
+    if first.is_control() {
+        return NextInputs::Control(first);
+    }
+
+    let mut data = vec![first];
+    let mut rows = data_rows(&data[0]);
+
+    loop {
+        let n = match Pin::new(&mut *input).peek().now_or_never() {
+            None | Some(None) => break,
+            Some(Some(msg)) if msg.is_control() => break,
+            Some(Some(msg)) => {
+                let n = data_rows(msg);
+                if rows.saturating_add(n) > max_records {
+                    break;
+                }
+                n
+            }
+        };
+        let msg = input.next().await.expect("peeked item");
+        rows += n;
+        data.push(msg);
+    }
+    NextInputs::Data(data)
+}
+
+fn data_rows(msg: &Message) -> usize {
+    match msg {
+        Message::Regular(m) => m.record_batch.num_rows(),
+        Message::Watermark(_) | Message::CheckpointBarrier(_) => 0,
     }
 }

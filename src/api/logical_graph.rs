@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::fmt;
+use std::time::Duration;
 use arrow::datatypes::Schema as ArrowSchema;
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::prelude::EdgeRef;
@@ -60,6 +61,7 @@ pub struct LogicalGraph {
     root_node_index: Option<NodeIndex>,
     watermarks_enabled: bool,
     event_time: EventTimeSpec,
+    emit_interval: Duration,
 }
 
 impl LogicalGraph {
@@ -70,6 +72,7 @@ impl LogicalGraph {
             root_node_index: None,
             watermarks_enabled: true,
             event_time: EventTimeSpec::default(),
+            emit_interval: Duration::ZERO,
         }
     }
 
@@ -81,15 +84,23 @@ impl LogicalGraph {
         self.watermarks_enabled
     }
 
+    pub(crate) fn set_emit_interval(&mut self, emit_interval: Duration) {
+        self.emit_interval = emit_interval;
+    }
+
     pub(crate) fn set_event_time(&mut self, event_time: EventTimeSpec) {
         self.event_time = event_time;
-        // Refresh ooo/idle on assign configs attached during planning.
+        if let Some(ms) = self.event_time.watermark.emit_interval_ms {
+            self.emit_interval = Duration::from_millis(ms);
+        }
+        // Refresh ooo/idle/emit interval on assign configs attached during planning.
         for node in self.graph.node_weights_mut() {
             if let Some(cfg) = node.watermark_assign.as_mut() {
                 cfg.out_of_orderness_ms = self.event_time.watermark.out_of_orderness_ms;
                 if let Some(idle) = self.event_time.watermark.idle_timeout_ms {
                     cfg.idle_timeout_ms = Some(idle);
                 }
+                cfg.emit_interval = self.emit_interval;
             }
         }
     }
@@ -106,6 +117,7 @@ impl LogicalGraph {
         if let Some(idle) = self.event_time.watermark.idle_timeout_ms {
             cfg.idle_timeout_ms = Some(idle);
         }
+        cfg.emit_interval = self.emit_interval;
         cfg
     }
     

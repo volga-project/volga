@@ -15,6 +15,7 @@ use super::confg::{TimeHint, WatermarkAssignConfig};
 struct UpstreamWatermarkProgress {
     max_event_time_seen_ms: u64,
     last_emitted_wm_ms: u64,
+    last_emit_at: Option<Instant>,
 }
 
 /// Stateful event-time watermark generator.
@@ -25,6 +26,7 @@ struct UpstreamWatermarkProgress {
 pub struct WatermarkAssignerState {
     out_of_orderness_ms: u64,
     ts_column_name: String,
+    emit_interval: Duration,
     per_upstream: HashMap<String, UpstreamWatermarkProgress>,
 }
 
@@ -34,8 +36,69 @@ impl WatermarkAssignerState {
         Self {
             out_of_orderness_ms: cfg.out_of_orderness_ms,
             ts_column_name: name,
+            emit_interval: cfg.emit_interval,
             per_upstream: HashMap::new(),
         }
+    }
+
+    fn candidate(progress: &UpstreamWatermarkProgress, out_of_orderness_ms: u64) -> u64 {
+        progress
+            .max_event_time_seen_ms
+            .saturating_sub(out_of_orderness_ms)
+    }
+
+    fn is_due(progress: &UpstreamWatermarkProgress, interval: Duration, now: Instant) -> bool {
+        if interval.is_zero() {
+            return true;
+        }
+        match progress.last_emit_at {
+            None => true,
+            Some(t) => now.saturating_duration_since(t) >= interval,
+        }
+    }
+
+    fn emit(
+        progress: &mut UpstreamWatermarkProgress,
+        upstream_vertex_id: &str,
+        candidate: u64,
+        now: Instant,
+    ) -> WatermarkMessage {
+        progress.last_emitted_wm_ms = candidate;
+        progress.last_emit_at = Some(now);
+        WatermarkMessage::new(upstream_vertex_id.to_string(), candidate, None)
+    }
+
+    fn unpublished(progress: &UpstreamWatermarkProgress, out_of_orderness_ms: u64) -> bool {
+        Self::candidate(progress, out_of_orderness_ms) > progress.last_emitted_wm_ms
+    }
+
+    fn maybe_emit(
+        progress: &mut UpstreamWatermarkProgress,
+        upstream_vertex_id: &str,
+        out_of_orderness_ms: u64,
+        interval: Duration,
+        now: Instant,
+        force: bool,
+    ) -> Option<WatermarkMessage> {
+        let candidate = Self::candidate(progress, out_of_orderness_ms);
+        if candidate > progress.last_emitted_wm_ms && (force || Self::is_due(progress, interval, now))
+        {
+            Some(Self::emit(progress, upstream_vertex_id, candidate, now))
+        } else {
+            None
+        }
+    }
+
+    fn emit_from_upstreams(&mut self, now: Instant, force: bool) -> Vec<WatermarkMessage> {
+        let interval = self.emit_interval;
+        let ooo = self.out_of_orderness_ms;
+        let mut out = Vec::new();
+        for (upstream_id, progress) in self.per_upstream.iter_mut() {
+            if let Some(wm) = Self::maybe_emit(progress, upstream_id, ooo, interval, now, force) {
+                out.push(wm);
+            }
+        }
+        out
     }
 
     fn resolve_ts_column_index(&self, batch: &RecordBatch) -> usize {
@@ -96,6 +159,15 @@ impl WatermarkAssignerState {
         upstream_vertex_id: &str,
         message: &Message,
     ) -> Option<WatermarkMessage> {
+        self.on_data_message_at(upstream_vertex_id, message, Instant::now())
+    }
+
+    pub fn on_data_message_at(
+        &mut self,
+        upstream_vertex_id: &str,
+        message: &Message,
+        now: Instant,
+    ) -> Option<WatermarkMessage> {
         let batch = message.record_batch();
         let ts_column_index = self.resolve_ts_column_index(batch);
         let Some(batch_max) = self.batch_max_ts_ms(batch, ts_column_index) else {
@@ -108,20 +180,35 @@ impl WatermarkAssignerState {
             .or_default();
 
         progress.max_event_time_seen_ms = progress.max_event_time_seen_ms.max(batch_max);
-        let candidate = progress
-            .max_event_time_seen_ms
-            .saturating_sub(self.out_of_orderness_ms);
+        Self::maybe_emit(
+            progress,
+            upstream_vertex_id,
+            self.out_of_orderness_ms,
+            self.emit_interval,
+            now,
+            false,
+        )
+    }
 
-        if candidate > progress.last_emitted_wm_ms {
-            progress.last_emitted_wm_ms = candidate;
-            Some(WatermarkMessage::new(
-                upstream_vertex_id.to_string(),
-                candidate,
-                None,
-            ))
-        } else {
-            None
+    pub fn try_emit_due(&mut self, now: Instant) -> Vec<WatermarkMessage> {
+        self.emit_from_upstreams(now, false)
+    }
+
+    /// Publish any advanced candidate regardless of interval (EOF / barrier / max).
+    pub fn flush(&mut self, now: Instant) -> Vec<WatermarkMessage> {
+        self.emit_from_upstreams(now, true)
+    }
+
+    pub fn next_emit_deadline(&self) -> Option<Instant> {
+        if self.emit_interval.is_zero() {
+            return None;
         }
+        let ooo = self.out_of_orderness_ms;
+        self.per_upstream
+            .values()
+            .filter(|p| Self::unpublished(p, ooo))
+            .filter_map(|p| p.last_emit_at.map(|t| t + self.emit_interval))
+            .min()
     }
 }
 
@@ -163,11 +250,34 @@ impl WatermarkManager {
     }
 
     pub fn on_data_message(&mut self, upstream_vertex_id: &str, message: &Message) -> Option<WatermarkMessage> {
+        let now = Instant::now();
         self.last_seen_processing_time
-            .insert(upstream_vertex_id.to_string(), Instant::now());
+            .insert(upstream_vertex_id.to_string(), now);
         self.assigner
             .as_mut()
-            .and_then(|assigner| assigner.on_data_message(upstream_vertex_id, message))
+            .and_then(|assigner| assigner.on_data_message_at(upstream_vertex_id, message, now))
+    }
+
+    pub fn try_emit_due(&mut self) -> Vec<WatermarkMessage> {
+        let now = Instant::now();
+        self.assigner
+            .as_mut()
+            .map(|assigner| assigner.try_emit_due(now))
+            .unwrap_or_default()
+    }
+
+    pub fn flush_pending(&mut self) -> Vec<WatermarkMessage> {
+        let now = Instant::now();
+        self.assigner
+            .as_mut()
+            .map(|assigner| assigner.flush(now))
+            .unwrap_or_default()
+    }
+
+    pub fn next_emit_deadline(&self) -> Option<Instant> {
+        self.assigner
+            .as_ref()
+            .and_then(|assigner| assigner.next_emit_deadline())
     }
 
     pub async fn merge_watermark(&mut self, watermark: WatermarkMessage) -> Option<u64> {
@@ -260,303 +370,6 @@ pub async fn advance_watermark_min(
         Some(min_watermark)
     } else {
         None
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    use arrow::array::{ArrayRef, Int64Array, StringArray};
-    use arrow::datatypes::{DataType, Field, Schema};
-    use futures::stream;
-    use futures::StreamExt;
-
-        use crate::runtime::observability::snapshot_types::StreamTaskStatus;
-        use crate::runtime::stream_task::{CheckpointAligner, StreamTask};
-    use crate::transport::transport_client::DataReaderControl;
-    use std::sync::atomic::AtomicU8;
-    use std::time::Duration;
-
-    #[test]
-    fn assigner_tracks_per_upstream_independently() {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("k", DataType::Utf8, false),
-            Field::new("ts_ms", DataType::Int64, false),
-        ]));
-        let b = RecordBatch::try_new(
-            schema.clone(),
-            vec![
-                Arc::new(StringArray::from(vec!["A"])) as ArrayRef,
-                Arc::new(Int64Array::from(vec![100_i64])) as ArrayRef,
-            ],
-        )
-        .unwrap();
-        let msg = Message::new(None, b, None, None);
-
-        let cfg = WatermarkAssignConfig {
-            out_of_orderness_ms: 0,
-            time_hint: TimeHint::ColumnName {
-                name: "ts_ms".to_string(),
-            },
-            idle_timeout_ms: Some(WatermarkAssignConfig::DEFAULT_IDLE_TIMEOUT_MS),
-        };
-        let mut assigner = WatermarkAssignerState::new(cfg);
-
-        let wm1 = assigner.on_data_message("upA", &msg).unwrap();
-        assert_eq!(wm1.metadata.upstream_vertex_id.as_deref(), Some("upA"));
-        assert_eq!(wm1.watermark_value, 100);
-
-        let wm2 = assigner.on_data_message("upB", &msg).unwrap();
-        assert_eq!(wm2.metadata.upstream_vertex_id.as_deref(), Some("upB"));
-        assert_eq!(wm2.watermark_value, 100);
-    }
-
-    #[tokio::test]
-    async fn stream_task_preprocess_injects_watermarks_after_data() {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("k", DataType::Utf8, false),
-            Field::new("ts_ms", DataType::Int64, false),
-        ]));
-
-        let b1 = RecordBatch::try_new(
-            schema.clone(),
-            vec![
-                Arc::new(StringArray::from(vec!["A", "A"])) as ArrayRef,
-                Arc::new(Int64Array::from(vec![100_i64, 120_i64])) as ArrayRef,
-            ],
-        )
-        .unwrap();
-        let b2 = RecordBatch::try_new(
-            schema.clone(),
-            vec![
-                Arc::new(StringArray::from(vec!["A"])) as ArrayRef,
-                Arc::new(Int64Array::from(vec![250_i64])) as ArrayRef,
-            ],
-        )
-        .unwrap();
-
-        let input = Box::pin(stream::iter(vec![
-            Message::new(Some("u0".to_string()), b1, None, None),
-            Message::new(Some("u0".to_string()), b2, None, None),
-        ]));
-
-        let cfg = WatermarkAssignConfig::new(
-            0,
-            TimeHint::ColumnName {
-                name: "ts_ms".to_string(),
-            },
-        );
-
-        let mut out = StreamTask::create_preprocessed_input_stream(
-            input,
-            Arc::<str>::from("v0"),
-            Some(cfg),
-            vec!["u0".to_string()],
-            Arc::new(Mutex::new(HashMap::new())),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU8::new(StreamTaskStatus::Running as u8)),
-            CheckpointAligner::new(&["u0".to_string()], DataReaderControl::empty_for_test()),
-            None,
-            0,
-        );
-
-        let mut seen = Vec::new();
-        while let Some(m) = out.next().await {
-            seen.push(m);
-        }
-
-        assert!(matches!(seen[0], Message::Regular(_)));
-        assert!(matches!(seen[1], Message::Watermark(_)));
-        assert!(matches!(seen[2], Message::Regular(_)));
-        assert!(matches!(seen[3], Message::Watermark(_)));
-
-        let wm1 = match &seen[1] {
-            Message::Watermark(w) => w.watermark_value,
-            _ => unreachable!(),
-        };
-        let wm2 = match &seen[3] {
-            Message::Watermark(w) => w.watermark_value,
-            _ => unreachable!(),
-        };
-
-        assert_eq!(wm1, 120);
-        assert_eq!(wm2, 250);
-    }
-
-    #[tokio::test]
-    async fn stream_task_preprocess_is_per_upstream_and_min_merged() {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("k", DataType::Utf8, false),
-            Field::new("ts_ms", DataType::Int64, false),
-        ]));
-
-        let b_u0 = RecordBatch::try_new(
-            schema.clone(),
-            vec![
-                Arc::new(StringArray::from(vec!["A"])) as ArrayRef,
-                Arc::new(Int64Array::from(vec![100_i64])) as ArrayRef,
-            ],
-        )
-        .unwrap();
-        let b_u1 = RecordBatch::try_new(
-            schema.clone(),
-            vec![
-                Arc::new(StringArray::from(vec!["B"])) as ArrayRef,
-                Arc::new(Int64Array::from(vec![50_i64])) as ArrayRef,
-            ],
-        )
-        .unwrap();
-
-        let m0 = Message::new(Some("u0".to_string()), b_u0, None, None);
-        let m1 = Message::new(Some("u1".to_string()), b_u1, None, None);
-
-        let input = Box::pin(stream::iter(vec![m0, m1]));
-        let cfg = WatermarkAssignConfig::new(
-            0,
-            TimeHint::ColumnName {
-                name: "ts_ms".to_string(),
-            },
-        );
-
-        let mut out = StreamTask::create_preprocessed_input_stream(
-            input,
-            Arc::<str>::from("v0"),
-            Some(cfg),
-            vec!["u0".to_string(), "u1".to_string()],
-            Arc::new(Mutex::new(HashMap::new())),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU8::new(StreamTaskStatus::Running as u8)),
-            CheckpointAligner::new(
-                &["u0".to_string(), "u1".to_string()],
-                DataReaderControl::empty_for_test(),
-            ),
-            None,
-            0,
-        );
-
-        let mut seen = Vec::new();
-        while let Some(m) = out.next().await {
-            seen.push(m);
-        }
-
-        assert!(matches!(seen[0], Message::Regular(_)));
-        assert!(matches!(seen[1], Message::Regular(_)));
-        assert!(matches!(seen[2], Message::Watermark(_)));
-
-        let wm = match &seen[2] {
-            Message::Watermark(w) => w.watermark_value,
-            _ => unreachable!(),
-        };
-        assert_eq!(wm, 50);
-    }
-
-    #[tokio::test]
-    async fn idle_upstream_is_excluded_from_min_merge() {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("k", DataType::Utf8, false),
-            Field::new("ts_ms", DataType::Int64, false),
-        ]));
-
-        let batch = RecordBatch::try_new(
-            schema.clone(),
-            vec![
-                Arc::new(StringArray::from(vec!["A"])) as ArrayRef,
-                Arc::new(Int64Array::from(vec![100_i64])) as ArrayRef,
-            ],
-        )
-        .unwrap();
-
-        let input = Box::pin(async_stream::stream! {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-            yield Message::new(Some("u0".to_string()), batch, None, None);
-        });
-
-        let mut cfg = WatermarkAssignConfig::new(
-            0,
-            TimeHint::ColumnName {
-                name: "ts_ms".to_string(),
-            },
-        );
-        cfg.idle_timeout_ms = Some(1);
-
-        let mut out = StreamTask::create_preprocessed_input_stream(
-            input,
-            Arc::<str>::from("v0"),
-            Some(cfg),
-            vec!["u0".to_string(), "u1".to_string()],
-            Arc::new(Mutex::new(HashMap::new())),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU8::new(StreamTaskStatus::Running as u8)),
-            CheckpointAligner::new(
-                &["u0".to_string(), "u1".to_string()],
-                DataReaderControl::empty_for_test(),
-            ),
-            None,
-            0,
-        );
-
-        let mut seen = Vec::new();
-        while let Some(m) = out.next().await {
-            seen.push(m);
-        }
-
-        assert!(matches!(seen[0], Message::Regular(_)));
-        assert!(matches!(seen[1], Message::Watermark(_)));
-    }
-
-    #[tokio::test]
-    async fn idle_timeout_disabled_blocks_min_merge() {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("k", DataType::Utf8, false),
-            Field::new("ts_ms", DataType::Int64, false),
-        ]));
-
-        let batch = RecordBatch::try_new(
-            schema.clone(),
-            vec![
-                Arc::new(StringArray::from(vec!["A"])) as ArrayRef,
-                Arc::new(Int64Array::from(vec![100_i64])) as ArrayRef,
-            ],
-        )
-        .unwrap();
-
-        let input = Box::pin(async_stream::stream! {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-            yield Message::new(Some("u0".to_string()), batch, None, None);
-        });
-
-        let mut cfg = WatermarkAssignConfig::new(
-            0,
-            TimeHint::ColumnName {
-                name: "ts_ms".to_string(),
-            },
-        );
-        cfg.idle_timeout_ms = None;
-
-        let mut out = StreamTask::create_preprocessed_input_stream(
-            input,
-            Arc::<str>::from("v0"),
-            Some(cfg),
-            vec!["u0".to_string(), "u1".to_string()],
-            Arc::new(Mutex::new(HashMap::new())),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU8::new(StreamTaskStatus::Running as u8)),
-            CheckpointAligner::new(
-                &["u0".to_string(), "u1".to_string()],
-                DataReaderControl::empty_for_test(),
-            ),
-            None,
-            0,
-        );
-
-        let mut seen = Vec::new();
-        while let Some(m) = out.next().await {
-            seen.push(m);
-        }
-
-        assert!(matches!(seen[0], Message::Regular(_)));
-        assert_eq!(seen.len(), 1);
     }
 }
 

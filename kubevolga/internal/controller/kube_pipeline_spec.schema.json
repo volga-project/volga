@@ -298,6 +298,15 @@
     "WatermarkSpec": {
       "type": "object",
       "properties": {
+        "emit_interval_ms": {
+          "description": "Processing-time interval for coalescing watermark emits (ms).\nUnset uses the runtime default (200ms). Batch does not assign watermarks (EOF flush only).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
         "idle_timeout_ms": {
           "description": "If set, idle upstreams older than this are excluded from min-WM merge.\n`None` keeps the runtime assigner default (`WatermarkAssignConfig::DEFAULT_IDLE_TIMEOUT_MS`).",
           "type": [
