@@ -254,7 +254,7 @@ pub async fn pump_egress(
             }
             Err(_) => {
                 if unflushed_since.take().is_some() {
-                    if let Err(e) = sample_write_block_metric(
+                    if let Err(e) = record_write_block_time(
                         writer.flush(),
                         &identity,
                         labels.as_ref(),
@@ -303,9 +303,9 @@ fn report_write_fatal(
     }
 }
 
-/// Metrics: sample write-block while `flush` is in flight so a multi-second TCP
-/// window stall shows up on the gauge before the IO returns.
-async fn sample_write_block_metric<F>(
+/// Metrics: record write-block wall time while `flush` is in flight so a
+/// multi-second TCP stall shows on the gauge before the IO returns.
+async fn record_write_block_time<F>(
     fut: F,
     identity: &EdgeIdentity,
     labels: Option<&MetricsLabels>,
