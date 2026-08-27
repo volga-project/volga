@@ -25,7 +25,7 @@ use crate::runtime::operators::window::model::{Cursor, WindowId};
 use crate::runtime::operators::window::spec::WindowSpec;
 use crate::runtime::operators::window::state::{WindowOperatorState, WindowStateSnapshot};
 use crate::runtime::operators::window::store::{open_window_operator_store, StateNamespace};
-use crate::runtime::operators::window::{TileConfig, PROCESS_DUE_CONCURRENCY};
+use crate::runtime::operators::window::TileConfig;
 use crate::runtime::observability::TaskMetadata;
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::state::{OperatorTaskState, StateRegistry};
@@ -175,6 +175,7 @@ impl WindowOperator {
     }
 
     async fn process_due(&self, through: Cursor) -> RecordBatch {
+        const PROCESS_DUE_CONCURRENCY: usize = 8;
         let state = self.state_ref();
         let after = state
             .watermark_frontier()

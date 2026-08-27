@@ -164,13 +164,14 @@ struct PartitionCheckpoint {
 
 /// Development/test reference backend with inline checkpoints limited to 8 MiB.
 ///
-/// One packed Arrow batch per key. Partitions are independently locked so
-/// `process_due` eval does not share a process-wide lock; loads clone and
-/// return before CPU work. WRO snapshot is one partition read (raw + tiles).
-/// Physical prune runs via [`OperatorStore::maintain`].
+/// One packed Arrow batch per key. Each partition is an `Arc<RwLock<_>>` in a
+/// DashMap so shard guards are dropped before Arrow concat/take. WRO
+/// `load_window_data` is one partition read (raw + tiles). Checkpoint clones
+/// partitions then triggers with no freeze and can interleave with
+/// [`OperatorStore::maintain`]; that is accepted for this process-local backend.
 #[derive(Debug, Clone, Default)]
 pub struct InMemWindowStore {
-    partitions: Arc<DashMap<PartitionKey, RwLock<PartitionState>>>,
+    partitions: Arc<DashMap<PartitionKey, Arc<RwLock<PartitionState>>>>,
     triggers: Arc<RwLock<BTreeSet<WindowTrigger>>>,
     metrics_labels: Option<MetricsLabels>,
 }
@@ -190,7 +191,8 @@ impl InMemWindowStore {
         partition: &PartitionKey,
         f: impl FnOnce(&PartitionState) -> R,
     ) -> Option<R> {
-        self.partitions.get(partition).map(|slot| f(&slot.read()))
+        let slot = self.partitions.get(partition).map(|entry| entry.clone())?;
+        f(&slot.read())
     }
 
     fn write_part<R>(
@@ -198,7 +200,11 @@ impl InMemWindowStore {
         partition: &PartitionKey,
         f: impl FnOnce(&mut PartitionState) -> R,
     ) -> R {
-        let slot = self.partitions.entry(partition.clone()).or_default();
+        let slot = self
+            .partitions
+            .entry(partition.clone())
+            .or_insert_with(|| Arc::new(RwLock::new(PartitionState::default())))
+            .clone();
         let mut state = slot.write();
         f(&mut state)
     }
@@ -223,11 +229,14 @@ impl InMemWindowStore {
         let mut tiles_bytes = 0u64;
         let mut key_states_count = 0u64;
         let mut key_states_bytes = 0u64;
-        for entry in self.partitions.iter() {
-            if entry.key().namespace.as_slice() != namespace {
-                continue;
-            }
-            let part = entry.value().read();
+        let slots: Vec<_> = self
+            .partitions
+            .iter()
+            .filter(|entry| entry.key().namespace.as_slice() == namespace)
+            .map(|entry| entry.value().clone())
+            .collect();
+        for slot in slots {
+            let part = slot.read();
             key_states_count += 1;
             key_states_bytes =
                 key_states_bytes.saturating_add(bincode::serialized_size(&part.meta).unwrap_or(0));
@@ -418,11 +427,15 @@ impl WindowOperatorStore for InMemWindowStore {
     }
 
     async fn checkpoint(&self, namespace: &StateNamespace) -> Result<WindowBackendSnapshot> {
-        let partitions = self
+        let slots: Vec<_> = self
             .partitions
             .iter()
             .filter(|entry| entry.key().namespace.as_slice() == namespace.bytes.as_slice())
-            .map(|entry| (entry.key().clone(), entry.value().read().clone()))
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .collect();
+        let partitions = slots
+            .into_iter()
+            .map(|(partition, slot)| (partition, slot.read().clone()))
             .collect::<HashMap<_, _>>();
         let snapshot = partitions
             .into_iter()
@@ -506,7 +519,8 @@ impl WindowOperatorStore for InMemWindowStore {
         self.partitions
             .retain(|partition, _| partition.namespace.as_slice() != namespace.bytes.as_slice());
         for (partition, state) in restored {
-            self.partitions.insert(partition, RwLock::new(state));
+            self.partitions
+                .insert(partition, Arc::new(RwLock::new(state)));
         }
         let mut triggers = self.triggers.write();
         triggers
@@ -556,12 +570,15 @@ impl OperatorStore for InMemWindowStore {
             trigger.partition.namespace.as_slice() != ns.bytes.as_slice()
                 || trigger.fire_at.ts > watermark
         });
+        let slots: Vec<_> = self
+            .partitions
+            .iter()
+            .filter(|entry| entry.key().namespace.as_slice() == ns.bytes.as_slice())
+            .map(|entry| entry.value().clone())
+            .collect();
         let mut pruned_rows = 0u64;
-        for entry in self.partitions.iter() {
-            if entry.key().namespace.as_slice() != ns.bytes.as_slice() {
-                continue;
-            }
-            let mut part = entry.value().write();
+        for slot in slots {
+            let mut part = slot.write();
             pruned_rows += part.raw.prune_before(floor);
             part.tiles
                 .retain(|&(granularity, start_ts), _| start_ts + granularity.to_millis() > floor);
@@ -1248,7 +1265,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn concurrent_partition_writes_do_not_share_a_process_wide_lock() {
+    async fn concurrent_partition_writes_complete() {
         let store = InMemWindowStore::new();
         let futs = (0..64u64).map(|i| {
             let store = store.clone();

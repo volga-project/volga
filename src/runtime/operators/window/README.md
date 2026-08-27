@@ -161,10 +161,12 @@ partitioning, publication, fencing, caching, and cleanup. They must preserve:
 - ordered, collision-safe row identity.
 
 `InMemWindowStore` is the reference backend. It keeps one packed Arrow batch
-per key, locks partitions independently, and embeds namespace snapshots
-(including durable triggers) in checkpoint data. WRO `load_window_data` is one
-partition read. Live state is process-local. Inline checkpoints are limited to
-8 MiB to stay below the gRPC control-plane message limit.
+per key. DashMap stores `Arc<RwLock<PartitionState>>` so shard guards are
+dropped before Arrow concat/take. WRO `load_window_data` is one partition
+read. Checkpoint clones partitions then triggers with no freeze and can
+interleave with `maintain` prune; that is accepted for this process-local
+backend. Inline checkpoints are limited to 8 MiB to stay below the gRPC
+control-plane message limit.
 
 ## Checkpoint and restore
 
