@@ -240,7 +240,7 @@ impl OperatorTrait for SourceOperator {
             }
             FetchResult::Data(message) => {
                 match &message {
-                    Message::Regular(_) | Message::Keyed(_) => {
+                    Message::Regular(_) => {
                         self.task_metadata.increment_u64(
                             TASK_METADATA_RECORDS_GENERATED,
                             message.num_records() as u64,

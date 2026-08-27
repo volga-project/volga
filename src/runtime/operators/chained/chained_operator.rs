@@ -118,7 +118,8 @@ pub fn group_operators_for_chaining(operators: &[OperatorConfig]) -> Vec<Operato
             let last_op = &current_chain[current_chain.len() - 2];
             let current_op = &current_chain[current_chain.len() - 1];
             
-            if determine_partition_type(&last_op, &current_op) == PartitionType::Hash {
+            // Parallelism is unused for the Hash check (shuffle vs local).
+            if determine_partition_type(&last_op, &current_op, 1, 1) == PartitionType::Hash {
                 // Remove the last operator from current chain and start a new one
                 let last_op = current_chain.pop().unwrap();
                 grouped_operators.push(create_operator_from_chain(&current_chain));

@@ -17,27 +17,41 @@ pub struct Key {
 }
 
 impl Key {
-    /// Creates a new Key from a RecordBatch with a single row
-    pub fn new(key_record_batch: RecordBatch) -> Result<Self> {
-        // Check that the record batch has exactly one row
+    fn hash_random_state() -> RandomState {
+        RandomState::with_seeds(0, 0, 0, 0)
+    }
+
+    /// Row hashes using the same seed as [`Key::new`] / KeyBy packing ([#258](https://github.com/volga-project/volga/issues/258)).
+    pub fn hash_arrays(arrays: &[ArrayRef], num_rows: usize) -> Result<Vec<u64>> {
+        let mut hashes_buffer = vec![0u64; num_rows];
+        create_hashes(arrays, &Self::hash_random_state(), &mut hashes_buffer)
+            .map_err(|e| anyhow::anyhow!("Failed to create hashes: {}", e))?;
+        Ok(hashes_buffer)
+    }
+
+    /// One-row key with a hash already computed (KeyBy / ingest split).
+    pub fn with_hash(key_record_batch: RecordBatch, hash: u64) -> Result<Self> {
         if key_record_batch.num_rows() != 1 {
             return Err(anyhow::anyhow!(
                 "Key must have exactly one row, found {}",
                 key_record_batch.num_rows()
             ));
         }
-        
-        // Compute hash for the key row
-        let arrays: Vec<ArrayRef> = key_record_batch.columns().iter().map(|c| Arc::clone(c)).collect();
-        let random_state = RandomState::with_seeds(0, 0, 0, 0);
-        let mut hashes_buffer = vec![0u64; 1];
-        
-        let hashes = create_hashes(&arrays, &random_state, &mut hashes_buffer)
-            .map_err(|e| anyhow::anyhow!("Failed to create hashes: {}", e))?;
-        
-        // we know there is only one row
-        let hash = hashes[0];
-        Ok(Self { key_record_batch, hash })
+        Ok(Self {
+            key_record_batch,
+            hash,
+        })
+    }
+
+    /// Creates a new Key from a RecordBatch with a single row.
+    pub fn new(key_record_batch: RecordBatch) -> Result<Self> {
+        let arrays: Vec<ArrayRef> = key_record_batch
+            .columns()
+            .iter()
+            .map(|c| Arc::clone(c))
+            .collect();
+        let hashes = Self::hash_arrays(&arrays, key_record_batch.num_rows())?;
+        Self::with_hash(key_record_batch, hashes[0])
     }
     
     pub fn hash(&self) -> u64 {
@@ -150,8 +164,10 @@ mod tests {
             ]
         ).unwrap();
         
-        let original_key = Key::new(batch).unwrap();
-        
+        let original_key = Key::new(batch.clone()).unwrap();
+        let reused = Key::with_hash(batch, original_key.hash()).unwrap();
+        assert_eq!(original_key, reused);
+
         // Test serialization and deserialization
         let bytes = original_key.to_bytes();
         let deserialized_key = Key::from_bytes(&bytes);

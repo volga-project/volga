@@ -31,7 +31,6 @@ use petgraph::graph::NodeIndex;
 use super::event_time_placement::apply_auto_watermark_assigns;
 use super::logical_graph::{LogicalNode, LogicalGraph};
 use crate::api::ExecutionMode;
-use crate::runtime::functions::key_by::key_by_function::{DataFusionKeyFunction};
 use crate::runtime::functions::key_by::KeyByFunction;
 use crate::runtime::operators::operator::OperatorConfig;
 use crate::runtime::functions::map::{FilterFunction, MapFunction, ProjectionFunction};
@@ -361,7 +360,7 @@ impl Planner {
         let partial_aggregate_exec = find_partial_aggregate(&physical_plan).expect("should have found an aggregate exec");
         // create 2 nodes - key by + aggregate node 
         let key_by_node = LogicalNode::new(
-            OperatorConfig::KeyByConfig(KeyByFunction::DataFusion(DataFusionKeyFunction::new(Arc::new(partial_aggregate_exec.clone())))),
+            OperatorConfig::KeyByConfig(KeyByFunction::new(Arc::new(partial_aggregate_exec.clone()))),
             parallelism,
             None,
             None,
@@ -413,7 +412,7 @@ impl Planner {
 
         // KeyBy by PARTITION BY
         let key_by_node = LogicalNode::new(
-            OperatorConfig::KeyByConfig(KeyByFunction::DataFusion(DataFusionKeyFunction::new_window(Arc::new(window_exec.clone())))),
+            OperatorConfig::KeyByConfig(KeyByFunction::new_window(Arc::new(window_exec.clone()))),
             parallelism,
             None,
             None,
@@ -652,7 +651,7 @@ mod tests {
 
         // Verify edge connectivity: source -> projection
         verify_edge_connectivity(&graph, &[
-            (OperatorKind::Source, OperatorKind::Projection, PartitionType::RoundRobin, 1),
+            (OperatorKind::Source, OperatorKind::Projection, PartitionType::Forward, 1),
         ]);
     }
 
@@ -682,8 +681,8 @@ mod tests {
 
         // Verify edge connectivity: source -> projection -> sink
         verify_edge_connectivity(&graph, &[
-            (OperatorKind::Source, OperatorKind::Projection, PartitionType::RoundRobin, 1),
-            (OperatorKind::Projection, OperatorKind::Sink, PartitionType::RoundRobin, 1),
+            (OperatorKind::Source, OperatorKind::Projection, PartitionType::Forward, 1),
+            (OperatorKind::Projection, OperatorKind::Sink, PartitionType::Forward, 1),
         ]);
     }
 
@@ -710,8 +709,8 @@ mod tests {
 
         // Verify edge connectivity: source -> filter -> projection
         verify_edge_connectivity(&graph, &[
-            (OperatorKind::Source, OperatorKind::Filter, PartitionType::RoundRobin, 1),
-            (OperatorKind::Filter, OperatorKind::Projection, PartitionType::RoundRobin, 1),
+            (OperatorKind::Source, OperatorKind::Filter, PartitionType::Forward, 1),
+            (OperatorKind::Filter, OperatorKind::Projection, PartitionType::Forward, 1),
         ]);
     }
 
@@ -758,7 +757,7 @@ mod tests {
         // Check node types in reverse order (projection is first in stack)
         assert!(matches!(nodes[0].operator_config, OperatorConfig::MapConfig(MapFunction::Projection(_))));
         assert!(matches!(nodes[1].operator_config, OperatorConfig::AggregateConfig(_)));
-        assert!(matches!(nodes[2].operator_config, OperatorConfig::KeyByConfig(KeyByFunction::DataFusion(_))));
+        assert!(matches!(nodes[2].operator_config, OperatorConfig::KeyByConfig(_)));
         assert!(matches!(nodes[3].operator_config, OperatorConfig::SourceConfig(_)));
         
         // Check edges - should have 3 edges
@@ -768,11 +767,11 @@ mod tests {
         assert_eq!(edges.len(), 3, "Expected 3 edges, found {}", edges.len());
         
         // Verify edge connectivity: source -> keyby -> aggregate -> projection
-        // keyby -> aggregate should be Hash, others RoundRobin
+        // keyby -> aggregate should be Hash, others Forward (equal default parallelism)
         verify_edge_connectivity(&graph, &[
-            (OperatorKind::Source, OperatorKind::KeyBy, PartitionType::RoundRobin, 1),
+            (OperatorKind::Source, OperatorKind::KeyBy, PartitionType::Forward, 1),
             (OperatorKind::KeyBy, OperatorKind::Aggregate, PartitionType::Hash, 1),
-            (OperatorKind::Aggregate, OperatorKind::Projection, PartitionType::RoundRobin, 1),
+            (OperatorKind::Aggregate, OperatorKind::Projection, PartitionType::Forward, 1),
         ]);
     }
     
@@ -822,10 +821,10 @@ mod tests {
         // Check node types in reverse order (projection2 is first in stack)
         assert!(matches!(nodes[0].operator_config, OperatorConfig::MapConfig(MapFunction::Projection(_))), "Expected final projection");
         assert!(matches!(nodes[1].operator_config, OperatorConfig::AggregateConfig(_)), "Expected second aggregate");
-        assert!(matches!(nodes[2].operator_config, OperatorConfig::KeyByConfig(KeyByFunction::DataFusion(_))), "Expected second key_by");
+        assert!(matches!(nodes[2].operator_config, OperatorConfig::KeyByConfig(_)), "Expected second key_by");
         assert!(matches!(nodes[3].operator_config, OperatorConfig::MapConfig(MapFunction::Projection(_))), "Expected first projection");
         assert!(matches!(nodes[4].operator_config, OperatorConfig::AggregateConfig(_)), "Expected first aggregate");
-        assert!(matches!(nodes[5].operator_config, OperatorConfig::KeyByConfig(KeyByFunction::DataFusion(_))), "Expected first key_by");
+        assert!(matches!(nodes[5].operator_config, OperatorConfig::KeyByConfig(_)), "Expected first key_by");
         assert!(matches!(nodes[6].operator_config, OperatorConfig::SourceConfig(_)), "Expected source");
         
         // Verify first GROUP BY (department, role) has 2 group expressions and 1 aggregate (AVG)
@@ -851,12 +850,12 @@ mod tests {
 
         // Verify edge connectivity for complex multi-GROUP BY query
         // Structure: source -> keyby1 -> aggregate1 -> projection1 -> keyby2 -> aggregate2 -> projection2
-        // 2 Hash edges (keyby->aggregate), 4 RoundRobin edges (all others)
+        // 2 Hash edges (keyby->aggregate), 4 Forward edges (all others, equal parallelism)
         verify_edge_connectivity(&graph, &[
-            (OperatorKind::Source, OperatorKind::KeyBy, PartitionType::RoundRobin, 1),
+            (OperatorKind::Source, OperatorKind::KeyBy, PartitionType::Forward, 1),
             (OperatorKind::KeyBy, OperatorKind::Aggregate, PartitionType::Hash, 2),
-            (OperatorKind::Aggregate, OperatorKind::Projection, PartitionType::RoundRobin, 2),
-            (OperatorKind::Projection, OperatorKind::KeyBy, PartitionType::RoundRobin, 1),
+            (OperatorKind::Aggregate, OperatorKind::Projection, PartitionType::Forward, 2),
+            (OperatorKind::Projection, OperatorKind::KeyBy, PartitionType::Forward, 1),
         ]);
     }
 
@@ -898,7 +897,7 @@ mod tests {
         // Check node types in reverse order (projection is first in stack)
         assert!(matches!(nodes[0].operator_config, OperatorConfig::MapConfig(MapFunction::Projection(_))), "Expected final projection after window");
         assert!(matches!(nodes[1].operator_config, OperatorConfig::WindowConfig(_)), "Expected window operator");
-        assert!(matches!(nodes[2].operator_config, OperatorConfig::KeyByConfig(KeyByFunction::DataFusion(_))), "Expected key_by for PARTITION BY");
+        assert!(matches!(nodes[2].operator_config, OperatorConfig::KeyByConfig(_)), "Expected key_by for PARTITION BY");
         assert!(matches!(nodes[3].operator_config, OperatorConfig::SourceConfig(_)), "Expected source");
         
         // Check edges - should have 3 edges connecting 4 nodes
@@ -907,11 +906,11 @@ mod tests {
         assert_eq!(edges.len(), 3, "Expected 3 edges, found {}", edges.len());
         
         // Verify edge connectivity: source -> keyby -> window -> projection
-        // keyby -> window should be Hash (for partitioning), others RoundRobin
+        // keyby -> window should be Hash (for partitioning), others Forward
         verify_edge_connectivity(&graph, &[
-            (OperatorKind::Source, OperatorKind::KeyBy, PartitionType::RoundRobin, 1),
+            (OperatorKind::Source, OperatorKind::KeyBy, PartitionType::Forward, 1),
             (OperatorKind::KeyBy, OperatorKind::Window, PartitionType::Hash, 1),
-            (OperatorKind::Window, OperatorKind::Projection, PartitionType::RoundRobin, 1),
+            (OperatorKind::Window, OperatorKind::Projection, PartitionType::Forward, 1),
         ]);
 
         // Event-time lineage: assign on Source (defining site), not Window/KeyBy.
@@ -989,10 +988,10 @@ mod tests {
         //   - request_source -> keyby -> window_request -> projection (root)
         //   - root -> request_sink
         verify_edge_connectivity(&graph, &[
-            (OperatorKind::Source, OperatorKind::KeyBy, PartitionType::RoundRobin, 2), // original source -> keyby + request_source -> keyby
+            (OperatorKind::Source, OperatorKind::KeyBy, PartitionType::Forward, 2), // original source -> keyby + request_source -> keyby
             (OperatorKind::KeyBy, OperatorKind::Window, PartitionType::Hash, 1), // original keyby -> window
             (OperatorKind::KeyBy, OperatorKind::WindowRequest, PartitionType::Hash, 1), // new keyby -> window_request
-            (OperatorKind::WindowRequest, OperatorKind::Projection, PartitionType::RoundRobin, 1), // window_request -> projection
+            (OperatorKind::WindowRequest, OperatorKind::Projection, PartitionType::Forward, 1), // window_request -> projection
             (OperatorKind::Projection, OperatorKind::Sink, PartitionType::RequestRoute, 1), // root -> request_sink (uses RequestRoute partition type)
         ]);
         

@@ -2,9 +2,8 @@ use crate::{
     common::{Message, WatermarkMessage, MAX_WATERMARK_VALUE},
     test_utils::common::{create_test_string_batch, gen_unique_grpc_port},
     runtime::{
-        functions::{
-            key_by::KeyByFunction, map::{MapFunction, MapFunctionTrait}
-        }, operators::{
+        functions::map::{MapFunction, MapFunctionTrait},
+        operators::{
             chained::chained_operator::ChainedOperator, operator::{OperatorConfig, OperatorTrait, OperatorType}, sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, VectorSourceConfig}
         }, runtime_context::RuntimeContext},
     storage::{InMemoryStorageClient, InMemoryStorageServer}
@@ -12,7 +11,6 @@ use crate::{
 use anyhow::Result;
 use async_trait::async_trait;
 use arrow::array::StringArray;
-use arrow::datatypes::{Field, Schema};
 use std::sync::Arc;
 
 // Simple test map functions
@@ -130,142 +128,6 @@ async fn test_chained_operator_source_map() {
     
     assert_eq!(array1.value(0), "HELLO");
     assert_eq!(array2.value(0), "WORLD");
-    
-    // Test next watermark - should pass through unchanged
-    let watermark_result = chained_operator.poll_next().await.get_result_message();
-    assert!(matches!(watermark_result, Message::Watermark(_)));
-    
-    // Test close
-    chained_operator.close().await.unwrap();
-}
-
-// #[tokio::test]
-async fn test_chained_operator_source_keyby() {
-    // Create test data with multiple keys
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("value", arrow::datatypes::DataType::Utf8, false),
-        Field::new("key", arrow::datatypes::DataType::Utf8, false),
-    ]));
-    
-    let values = StringArray::from(vec!["hello", "world", "test", "data"]);
-    let keys = StringArray::from(vec!["key1", "key1", "key2", "key2"]); // 2 rows per key
-    
-    let batch = arrow::record_batch::RecordBatch::try_new(
-        schema,
-        vec![Arc::new(values), Arc::new(keys)]
-    ).unwrap();
-    
-    let test_messages = vec![
-        Message::new(None, batch, None, None),
-        Message::Watermark(WatermarkMessage::new("source".to_string(), MAX_WATERMARK_VALUE, None)),
-    ];
-    
-    let configs = vec![
-        OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(VectorSourceConfig::new(test_messages))),
-        OperatorConfig::KeyByConfig(KeyByFunction::new_arrow_key_by(vec!["key".to_string()])),
-    ];
-    
-    let mut chained_operator = ChainedOperator::new(OperatorConfig::ChainedConfig(configs));
-    let context = RuntimeContext::new("test_vertex".to_string().into(), 0, 1, None, None, None);
-    
-    // Test open
-    chained_operator.open(&context).await.unwrap();
-    
-    // Test next from source - should return keyed messages
-    // ArrowKeyByFunction should emit one message per key group
-    // We have 2 keys (key1, key2), so we should get 2 keyed messages
-    let mut keyed_results = Vec::new();
-    
-    // Get the keyed messages
-    for _ in 0..2 {
-        let result = chained_operator.poll_next().await.get_result_message();
-        match &result {
-            Message::Keyed(keyed_msg) => {
-                // Each keyed message should have the key column
-                let key_array = keyed_msg.key().record_batch().column(0).as_any().downcast_ref::<StringArray>().unwrap();
-                let key_value = key_array.value(0);
-                assert!(key_value == "key1" || key_value == "key2");
-                
-                // Each keyed message should have 2 rows (for that key)
-                assert_eq!(keyed_msg.base.record_batch.num_rows(), 2);
-            }
-            _ => panic!("Expected keyed message"),
-        }
-        keyed_results.push(result);
-    }
-    
-    assert_eq!(keyed_results.len(), 2);
-    
-    // Test next watermark - should pass through unchanged
-    let watermark_result = chained_operator.poll_next().await.get_result_message();
-    assert!(matches!(watermark_result, Message::Watermark(_)));
-    
-    // Test close
-    chained_operator.close().await.unwrap();
-}
-
-// #[tokio::test]
-async fn test_chained_operator_source_map_keyby() {
-    // Create test data with single column for map function
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("value", arrow::datatypes::DataType::Utf8, false),
-    ]));
-    
-    let values = StringArray::from(vec!["key1", "key1", "key2", "key2"]); // 2 rows per key
-    
-    let batch = arrow::record_batch::RecordBatch::try_new(
-        schema,
-        vec![Arc::new(values)]
-    ).unwrap();
-    
-    let test_messages = vec![
-        Message::new(None, batch, None, None),
-        Message::Watermark(WatermarkMessage::new("source".to_string(), MAX_WATERMARK_VALUE, None)),
-    ];
-    
-    let configs = vec![
-        OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(VectorSourceConfig::new(test_messages))),
-        OperatorConfig::MapConfig(MapFunction::new_custom(ToUpperCaseMapFunction)),
-        OperatorConfig::KeyByConfig(KeyByFunction::new_arrow_key_by(vec!["value".to_string()])),
-    ];
-    
-    let mut chained_operator = ChainedOperator::new(OperatorConfig::ChainedConfig(configs));
-    let context = RuntimeContext::new("test_vertex".to_string().into(), 0, 1, None, None, None);
-    
-    // Test open
-    chained_operator.open(&context).await.unwrap();
-    
-    // Test next from source - should return keyed messages with uppercase values
-    // ArrowKeyByFunction should emit one message per key group
-    // We have 2 keys (key1, key2), so we should get 2 keyed messages
-    let mut keyed_results = Vec::new();
-    
-    // Get the keyed messages
-    for _ in 0..2 {
-        let result = chained_operator.poll_next().await.get_result_message();
-        match &result {
-            Message::Keyed(keyed_msg) => {
-                // Each keyed message should have the key column
-                let key_array = keyed_msg.key().record_batch().column(0).as_any().downcast_ref::<StringArray>().unwrap();
-                let key_value = key_array.value(0);
-                assert!(key_value == "KEY1" || key_value == "KEY2"); // Should be uppercase due to map
-                
-                // Each keyed message should have 2 rows (for that key)
-                assert_eq!(keyed_msg.base.record_batch.num_rows(), 2);
-                
-                // Values should be uppercase (due to map function)
-                let value_array = keyed_msg.base.record_batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
-                for i in 0..keyed_msg.base.record_batch.num_rows() {
-                    let value = value_array.value(i);
-                    assert_eq!(value, value.to_uppercase());
-                }
-            }
-            _ => panic!("Expected keyed message"),
-        }
-        keyed_results.push(result);
-    }
-    
-    assert_eq!(keyed_results.len(), 2);
     
     // Test next watermark - should pass through unchanged
     let watermark_result = chained_operator.poll_next().await.get_result_message();

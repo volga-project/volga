@@ -351,11 +351,7 @@ async fn test_request_source_sink_e2e() {
     let parallelism = 4; // Test with parallelism > 1
     let operators = vec![
         OperatorConfig::SourceConfig(SourceConfig::HttpRequestSourceConfig(config)),
-        OperatorConfig::KeyByConfig(KeyByFunction::DataFusion(
-            crate::runtime::functions::key_by::key_by_function::DataFusionKeyFunction::new_window(
-                window_exec,
-            ),
-        )),
+        OperatorConfig::KeyByConfig(KeyByFunction::new_window(window_exec)),
         OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction)),
         OperatorConfig::SinkConfig(SinkConfig::RequestSinkConfig),
     ];

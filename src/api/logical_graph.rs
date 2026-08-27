@@ -159,7 +159,12 @@ impl LogicalGraph {
     pub fn add_edge(&mut self, source: NodeIndex, target: NodeIndex) -> petgraph::graph::EdgeIndex {
         let source_node = &self.graph[source];
         let target_node = &self.graph[target];
-        let partition_type = determine_partition_type(&source_node.operator_config, &target_node.operator_config);
+        let partition_type = determine_partition_type(
+            &source_node.operator_config,
+            &target_node.operator_config,
+            source_node.parallelism,
+            target_node.parallelism,
+        );
         let edge = LogicalEdge {
             source_node_id: source_node.operator_id.clone(),
             target_node_id: target_node.operator_id.clone(),
@@ -248,20 +253,47 @@ impl LogicalGraph {
             let target_execution_vertices = &logical_to_execution_mapping[&target_logical_node_index];
 
             let partition_type = logical_edge.partition_type.clone();
+            let target_operator_id = self.graph[target_logical_node_index].operator_id.clone();
 
-            // TODO: Full bipartite mesh is only needed for Hash/RoundRobin/Broadcast, but is wrong for embarrassingly parallel / Forward
-            // https://github.com/volga-project/volga/issues/143
-            for source_execution_vertex_id in source_execution_vertices {
-                for target_execution_vertex_id in target_execution_vertices {
-                    let execution_edge = ExecutionEdge::new(
-                        source_execution_vertex_id.clone(),
-                        target_execution_vertex_id.clone(),
-                        self.graph[target_logical_node_index].operator_id.clone(),
-                        partition_type.clone(),
-                        None, // No channel initially
+            match partition_type {
+                // 1:1: task i → task i. Control (WM/CP) follows the same edge.
+                // https://github.com/volga-project/volga/issues/143
+                PartitionType::Forward => {
+                    assert_eq!(
+                        source_execution_vertices.len(),
+                        target_execution_vertices.len(),
+                        "Forward partition requires equal source/target parallelism, got {} vs {}",
+                        source_execution_vertices.len(),
+                        target_execution_vertices.len(),
                     );
-
-                    execution_graph.add_edge(execution_edge);
+                    for (source_execution_vertex_id, target_execution_vertex_id) in source_execution_vertices
+                        .iter()
+                        .zip(target_execution_vertices.iter())
+                    {
+                        execution_graph.add_edge(ExecutionEdge::new(
+                            source_execution_vertex_id.clone(),
+                            target_execution_vertex_id.clone(),
+                            target_operator_id.clone(),
+                            partition_type.clone(),
+                            None,
+                        ));
+                    }
+                }
+                PartitionType::Hash
+                | PartitionType::RoundRobin
+                | PartitionType::Broadcast
+                | PartitionType::RequestRoute => {
+                    for source_execution_vertex_id in source_execution_vertices {
+                        for target_execution_vertex_id in target_execution_vertices {
+                            execution_graph.add_edge(ExecutionEdge::new(
+                                source_execution_vertex_id.clone(),
+                                target_execution_vertex_id.clone(),
+                                target_operator_id.clone(),
+                                partition_type.clone(),
+                                None,
+                            ));
+                        }
+                    }
                 }
             }
         }
@@ -270,9 +302,6 @@ impl LogicalGraph {
     }
 
     pub fn from_linear_operators(operator_list: Vec<OperatorConfig>, parallelism: usize, chained: bool) -> Self {
-        // Validate configuration
-        validate_linear_operator_list(&operator_list);
-
         // Group operators based on chaining configuration
         let grouped_operators = if chained {
             group_operators_for_chaining(&operator_list)
@@ -505,57 +534,28 @@ fn distance(graph: &DiGraph<LogicalNode, LogicalEdge>, source: NodeIndex, target
     usize::MAX // No path found
 }
 
-fn validate_linear_operator_list(operators: &[OperatorConfig]) {
-    for (i, op_config) in operators.iter().enumerate() {
-        match op_config {
-            OperatorConfig::ReduceConfig(_, _) => {
-                // Check if there's a KeyBy operator right before this reduce
-                if i == 0 {
-                    panic!("Reduce operator '{}' requires a KeyBy operator before it", op_config);
-                }
-                
-                let prev_config = &operators[i - 1];
-                match prev_config {
-                    OperatorConfig::KeyByConfig(_) => {
-                        // This is valid - reduce has keyby right before it
-                    }
-                    _ => {
-                        panic!("Reduce operator '{}' requires a KeyBy operator immediately before it", op_config);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
+fn chained_config_has_key_by(configs: &[OperatorConfig]) -> bool {
+    configs.iter().any(|config| matches!(config, OperatorConfig::KeyByConfig(_)))
 }
 
-/// Determines the appropriate partition type between two operators
-pub fn determine_partition_type(source_config: &OperatorConfig, target_config: &OperatorConfig) -> PartitionType {
+/// Determines the appropriate partition type between two operators.
+///
+/// Non-shuffle edges use Forward when parallelisms match (embarrassingly parallel
+/// 1:1), and RoundRobin (full mesh) when they differ.
+/// https://github.com/volga-project/volga/issues/142
+pub fn determine_partition_type(
+    source_config: &OperatorConfig,
+    target_config: &OperatorConfig,
+    source_parallelism: usize,
+    target_parallelism: usize,
+) -> PartitionType {
     match (source_config, target_config) {
-        // RequestRoute partitioning when target is a request sink
         (_, OperatorConfig::SinkConfig(SinkConfig::RequestSinkConfig)) => PartitionType::RequestRoute,
-        // Hash partitioning when source is KeyBy
         (OperatorConfig::KeyByConfig(_), _) => PartitionType::Hash,
-        // Hash partitioning when source is ChainedConfig and the last operator in the chain is KeyBy
-        (OperatorConfig::ChainedConfig(configs), _) => {
-            let mut has_key_by = false;
-            for config in configs {
-                match config {
-                    OperatorConfig::KeyByConfig(_) => {
-                        has_key_by = true;
-                        break;
-                    }
-                    _ => {}
-                }
-            }
-            if has_key_by {
-                PartitionType::Hash
-            } else {
-                // TODO: Use Forward 
-                PartitionType::RoundRobin
-            }
+        (OperatorConfig::ChainedConfig(configs), _) if chained_config_has_key_by(configs) => {
+            PartitionType::Hash
         }
-        // TODO: use Forward https://github.com/volga-project/volga/issues/142
+        _ if source_parallelism == target_parallelism => PartitionType::Forward,
         _ => PartitionType::RoundRobin,
     }
 }
@@ -571,9 +571,6 @@ mod tests {
     use super::*;
     use crate::orchestrator::orchestrator::mock_worker_nodes;
     use crate::orchestrator::task_assignment::{TaskWorkerAssignStrategy, OperatorPerWorkerStrategy};
-    use crate::test_utils::common::IdentityMapFunction;
-    use crate::runtime::functions::key_by::KeyByFunction;
-    use crate::runtime::operators::sink::sink_operator::SinkConfig;
     use crate::runtime::operators::source::source_operator::{SourceConfig, VectorSourceConfig};
     use crate::runtime::functions::map::{MapFunction, ProjectionFunction};
     use crate::runtime::functions::map::filter_function::FilterFunction;
@@ -655,17 +652,29 @@ mod tests {
         let vertices = execution_graph.get_vertices();
         assert_eq!(vertices.len(), 7); // 2 + 3 + 1 + 1 = 7 vertices total
 
-        // Verify execution edges
+        // Verify execution edges: unequal parallelism keeps a RoundRobin mesh;
+        // equal parallelism (projection p=1 → sink p=1) is Forward 1:1.
+        // 2*3 + 3*1 + 1 = 10
         let edges = execution_graph.get_edges();
-        assert_eq!(edges.len(), 10); // 2 source * 3 filter + 3 filter * 1 projection + 1 projection * 1 sink = 10 edges
+        assert_eq!(edges.len(), 10);
 
-        // Verify partition types
+        let mut round_robin = 0;
+        let mut forward = 0;
         for edge in edges.values() {
-            assert!(matches!(edge.partition_type, PartitionType::RoundRobin),
-                "Edge {} -> {} should use RoundRobin partitioning", edge.source_vertex_id, edge.target_vertex_id);
-            // Verify channels are not set initially
             assert!(edge.channel.is_none(), "Edge {} -> {} should not have channel set initially", edge.source_vertex_id, edge.target_vertex_id);
+            match &edge.partition_type {
+                PartitionType::RoundRobin => round_robin += 1,
+                PartitionType::Forward => {
+                    forward += 1;
+                    let src = vertices.get(&edge.source_vertex_id).unwrap();
+                    let tgt = vertices.get(&edge.target_vertex_id).unwrap();
+                    assert_eq!(src.task_index, tgt.task_index, "Forward edge should connect matching task indexes");
+                }
+                other => panic!("unexpected partition type {:?} on {} -> {}", other, edge.source_vertex_id, edge.target_vertex_id),
+            }
         }
+        assert_eq!(round_robin, 9, "source→filter mesh (6) + filter→projection mesh (3)");
+        assert_eq!(forward, 1, "projection→sink Forward 1:1");
     }
 
     #[test]
@@ -718,9 +727,9 @@ mod tests {
         let vertices = execution_graph.get_vertices();
         assert_eq!(vertices.len(), num_operators * parallelism); // 2 logical nodes * 2 parallelism
 
-        // Verify execution edges
+        // Verify execution edges: equal parallelism → Forward 1:1 (not a 2×2 mesh)
         let edges = execution_graph.get_edges();
-        assert_eq!(edges.len(), num_operators * num_operators); // 2 source * 2 target
+        assert_eq!(edges.len(), parallelism);
 
         // Verify that edges between different nodes use remote channels
         for edge in edges.values() {
@@ -748,112 +757,6 @@ mod tests {
                 }
             } else {
                panic!("Expected different nodes for edge {}", edge.edge_id);
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn test_linear_logical_to_execution_graph_chained() {
-        // Define operator list: source -> map1 -> keyby -> map2 -> sink
-        let operators = vec![
-            OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(VectorSourceConfig::new(vec![]))),
-            OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction)),
-            OperatorConfig::KeyByConfig(KeyByFunction::new_arrow_key_by(vec!["value".to_string()])),
-            OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction)),
-            OperatorConfig::SinkConfig(SinkConfig::in_memory_grpc("http://127.0.0.1:8080")),
-        ];
-
-        let logical_graph = LogicalGraph::from_linear_operators(operators, 2, true);
-        let graph = logical_graph.to_execution_graph();
-
-        // Verify vertices - KeyBy should break the chain
-        // source -> map1 -> keyby -> map2 -> sink becomes: chain_source->map1->keyby -> chain_map2->sink
-        assert_eq!(graph.get_vertices().len(), 4); // 2 groups * 2 parallelism
-        // Verify chained configs in vertices
-        let vertices = graph.get_vertices().values();
-        
-        // Count vertices with source->map->keyby chain
-        let source_chains = vertices.clone()
-            .filter(|v| {
-                if let OperatorConfig::ChainedConfig(chain) = &v.operator_config {
-                    chain.len() == 3 && 
-                    matches!(chain[0], OperatorConfig::SourceConfig(_)) &&
-                    matches!(chain[1], OperatorConfig::MapConfig(_)) &&
-                    matches!(chain[2], OperatorConfig::KeyByConfig(_))
-                } else {
-                    false
-                }
-            })
-            .count();
-        assert_eq!(source_chains, 2, "Should have 2 source->map->keyby chains");
-
-        // Count vertices with map->sink chain
-        let sink_chains = vertices
-            .filter(|v| {
-                if let OperatorConfig::ChainedConfig(chain) = &v.operator_config {
-                    chain.len() == 2 &&
-                    matches!(chain[0], OperatorConfig::MapConfig(_)) &&
-                    matches!(chain[1], OperatorConfig::SinkConfig(_))
-                } else {
-                    false
-                }
-            })
-            .count();
-        assert_eq!(sink_chains, 2, "Should have 2 map->sink chains");
-
-        // Verify edges between groups
-        assert_eq!(graph.get_edges().len(), 4); // 1 connection * 4 edges
-
-        // Verify partition types for edges
-        for edge in graph.get_edges().values() {
-            // chain_source->map1->keyby -> chain_map2->sink should use Hash partitioning
-            // because keyby is the last operator in the source chain
-            assert!(matches!(edge.partition_type, crate::runtime::partition::PartitionType::Hash),
-                "Edge {} -> {} should use Hash partitioning (keyby -> map2)", edge.source_vertex_id, edge.target_vertex_id);
-        }
-    }
-
-    #[tokio::test]
-    async fn test_linear_logical_to_execution_graph() {
-        // Define operator chain: source -> keyby -> map -> sink
-        let operators = vec![
-            OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(VectorSourceConfig::new(vec![]))),
-            OperatorConfig::KeyByConfig(KeyByFunction::new_arrow_key_by(vec!["value".to_string()])),
-            OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction)),
-            OperatorConfig::SinkConfig(SinkConfig::in_memory_grpc("http://127.0.0.1:8080")),
-        ];
-
-        let logical_graph = LogicalGraph::from_linear_operators(operators, 2, false);
-        let graph = logical_graph.to_execution_graph();
-
-        // Verify vertices
-        assert_eq!(graph.get_vertices().len(), 8); // 4 operators * 2 parallelism
-
-        // Verify edges - keyby should use hash partitioning
-        assert_eq!(graph.get_edges().len(), 12); // 2 source -> 2 keyby + 2 keyby -> 2 map + 2 map -> 2 sink
-
-        // Check partition types for all edges
-        for edge in graph.get_edges().values() {
-            let source_vertex = graph.get_vertex(&edge.source_vertex_id).unwrap();
-            let target_vertex = graph.get_vertex(&edge.target_vertex_id).unwrap();
-
-            match (&source_vertex.operator_config, &target_vertex.operator_config) {
-                (OperatorConfig::SourceConfig(_), OperatorConfig::KeyByConfig(_)) => {
-                    // source -> keyby should use RoundRobin
-                    assert!(matches!(edge.partition_type, crate::runtime::partition::PartitionType::RoundRobin),
-                        "Edge {} -> {} should use RoundRobin partitioning", edge.source_vertex_id, edge.target_vertex_id);
-                }
-                (OperatorConfig::KeyByConfig(_), OperatorConfig::MapConfig(_)) => {
-                    // keyby -> map should use Hash partitioning
-                    assert!(matches!(edge.partition_type, crate::runtime::partition::PartitionType::Hash),
-                        "Edge {} -> {} should use Hash partitioning", edge.source_vertex_id, edge.target_vertex_id);
-                }
-                (OperatorConfig::MapConfig(_), OperatorConfig::SinkConfig(_)) => {
-                    // map -> sink should use RoundRobin
-                    assert!(matches!(edge.partition_type, crate::runtime::partition::PartitionType::RoundRobin),
-                        "Edge {} -> {} should use RoundRobin partitioning", edge.source_vertex_id, edge.target_vertex_id);
-                }
-                _ => panic!("Unexpected edge: {} -> {}", edge.source_vertex_id, edge.target_vertex_id)
             }
         }
     }
