@@ -82,11 +82,14 @@ impl TaskTimeMetrics {
 
 /// Idle = time spent in `input.next()`, which is wait-for-mailbox (plus cheap
 /// preprocess). Operator compute after `next_input` returns is not included.
-fn idle_timing_stream(mut inner: MessageStream, metrics: Arc<TaskTimeMetrics>) -> MessageStream {
+fn input_with_idle_tracking(
+    mut input: MessageStream,
+    metrics: Arc<TaskTimeMetrics>,
+) -> MessageStream {
     Box::pin(stream! {
         loop {
             let start = Instant::now();
-            let item = inner.next().await;
+            let item = input.next().await;
             metrics.add_idle_ns(start.elapsed().as_nanos() as u64);
             match item {
                 Some(msg) => yield msg,
@@ -797,7 +800,7 @@ impl StreamTask {
                     execution_attempt_id,
                 );
 
-                operator.set_input(Some(idle_timing_stream(
+                operator.set_input(Some(input_with_idle_tracking(
                     preprocessed_stream,
                     task_time_metrics.clone(),
                 )))
