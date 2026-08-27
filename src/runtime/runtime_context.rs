@@ -70,6 +70,12 @@ impl RuntimeContext {
     pub fn parallelism(&self) -> i32 {
         self.parallelism
     }
+    pub fn max_parallelism(&self) -> usize {
+        self.execution_graph
+            .as_ref()
+            .map(|g| g.max_parallelism())
+            .unwrap_or(self.parallelism.max(1) as usize)
+    }
     pub fn job_config(&self) -> &HashMap<String, Value> {
         &self.job_config
     }

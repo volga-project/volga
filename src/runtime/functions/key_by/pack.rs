@@ -9,6 +9,7 @@ use arrow::datatypes::{Field, Schema};
 use arrow::record_batch::RecordBatch;
 use datafusion::physical_plan::PhysicalExpr;
 
+use crate::common::key_group::subtask_for_hash;
 use crate::common::message::{Message, TARGET_SUBTASK_EXTRA};
 use crate::common::Key;
 
@@ -36,7 +37,8 @@ fn global_partition_key() -> Key {
 pub(crate) fn pack_by_dest(
     message: &Message,
     hashes: &[u64],
-    num_partitions: usize,
+    parallelism: usize,
+    max_parallelism: usize,
 ) -> Vec<Message> {
     let batch = message.record_batch();
     assert_eq!(
@@ -44,10 +46,9 @@ pub(crate) fn pack_by_dest(
         batch.num_rows(),
         "one hash per row"
     );
-    let n = num_partitions.max(1);
-    let mut buckets: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut buckets: Vec<Vec<usize>> = vec![Vec::new(); parallelism];
     for (i, &hash) in hashes.iter().enumerate() {
-        buckets[(hash % n as u64) as usize].push(i);
+        buckets[subtask_for_hash(hash, parallelism, max_parallelism)].push(i);
     }
     let mut out = Vec::new();
     for (dest, idxs) in buckets.into_iter().enumerate() {
@@ -196,7 +197,7 @@ mod tests {
     #[test]
     fn pack_by_dest_skips_empty_buckets() {
         let message = Message::new(None, int_batch(vec![10, 20, 30]), None, None);
-        let packed = pack_by_dest(&message, &[0u64, 1, 0], 3);
+        let packed = pack_by_dest(&message, &[0u64, 1, 0], 3, 3);
         assert_eq!(packed.len(), 2, "dest 2 is empty and skipped");
 
         let mut dests = HashSet::new();

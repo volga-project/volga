@@ -149,14 +149,22 @@ pub fn compile_logical_graph(spec: &PipelineSpec, connector_overrides: Option<&C
         );
         spec_connector_configs
     };
-    compile_logical_graph_from_parts(
+    let mut graph = compile_logical_graph_from_parts(
         sql,
         spec.parallelism,
         spec.execution_mode,
         &spec.operator_overrides,
         &spec.event_time,
         &connector_configs_owned,
-    )
+    );
+    let max_p = spec.resolved_max_parallelism();
+    assert!(
+        max_p >= spec.parallelism.max(1),
+        "max_parallelism ({max_p}) must be >= parallelism ({})",
+        spec.parallelism
+    );
+    graph.set_max_parallelism(max_p);
+    graph
 }
 
 #[cfg(test)]
@@ -234,6 +242,7 @@ mod tests {
             .build();
 
         let mut graph1 = compile_logical_graph(&spec, Some(&connector_configs)).to_execution_graph();
+        assert_eq!(graph1.max_parallelism(), spec.resolved_max_parallelism());
         let mut graph2 = compile_logical_graph(&spec, Some(&connector_configs)).to_execution_graph();
 
         let mapping1 = build_mock_vertex_mapping(&graph1);

@@ -128,7 +128,6 @@ pub struct PlanningContext {
 
     // TODO figure out how to set parallelism per node
     pub parallelism: usize,
-
 }
 
 impl PlanningContext {
@@ -148,7 +147,7 @@ impl PlanningContext {
     }
 
     pub fn with_parallelism(mut self, parallelism: usize) -> Self {
-        self.parallelism = parallelism;
+        self.parallelism = parallelism.max(1);
         self
     }
 
@@ -162,8 +161,10 @@ impl PlanningContext {
 
 impl Planner {
     pub fn new(context: PlanningContext) -> Self {
+        let mut logical_graph = LogicalGraph::new();
+        logical_graph.set_max_parallelism(context.parallelism.max(1));
         Self {
-            logical_graph: LogicalGraph::new(),
+            logical_graph,
             node_stack: Vec::new(),
             context,
         }

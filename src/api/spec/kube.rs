@@ -20,6 +20,8 @@ pub struct KubePipelineSpec {
     pub execution_mode: ExecutionMode,
     #[serde(default = "default_parallelism")]
     pub parallelism: usize,
+    #[serde(default)]
+    pub max_parallelism: Option<usize>,
     #[serde(default = "default_worker_runtime_json")]
     pub worker_runtime: Value,
     #[serde(default)]
@@ -114,6 +116,7 @@ impl TryFrom<KubePipelineSpec> for PipelineSpec {
             execution_profile: spec.execution_profile,
             execution_mode: spec.execution_mode,
             parallelism: spec.parallelism,
+            max_parallelism: spec.max_parallelism,
             worker_runtime,
             state: spec.state,
             operator_overrides,

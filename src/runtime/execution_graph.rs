@@ -95,6 +95,8 @@ pub struct ExecutionGraph {
     edges: HashMap<String, ExecutionEdge>,
     // Optional pipeline execution mode. Used for runtime invariants (e.g. disabling watermark assigners in Batch).
     execution_mode: Option<String>,
+    /// Job-wide key-group space; >= every vertex's parallelism.
+    max_parallelism: usize,
 }
 
 impl ExecutionGraph {
@@ -103,6 +105,7 @@ impl ExecutionGraph {
             vertices: HashMap::new(),
             edges: HashMap::new(),
             execution_mode: None,
+            max_parallelism: 1,
         }
     }
 
@@ -112,6 +115,15 @@ impl ExecutionGraph {
 
     pub fn execution_mode(&self) -> Option<&str> {
         self.execution_mode.as_deref()
+    }
+
+    pub fn set_max_parallelism(&mut self, max_parallelism: usize) {
+        assert!(max_parallelism >= 1, "max_parallelism must be >= 1");
+        self.max_parallelism = max_parallelism;
+    }
+
+    pub fn max_parallelism(&self) -> usize {
+        self.max_parallelism
     }
 
     pub fn add_vertex(&mut self, vertex: ExecutionVertex) {

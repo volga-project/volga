@@ -62,6 +62,7 @@ pub struct LogicalGraph {
     watermarks_enabled: bool,
     event_time: EventTimeSpec,
     emit_interval: Duration,
+    max_parallelism: usize,
 }
 
 impl LogicalGraph {
@@ -73,6 +74,7 @@ impl LogicalGraph {
             watermarks_enabled: true,
             event_time: EventTimeSpec::default(),
             emit_interval: Duration::ZERO,
+            max_parallelism: 1,
         }
     }
 
@@ -107,6 +109,11 @@ impl LogicalGraph {
 
     pub fn event_time(&self) -> &EventTimeSpec {
         &self.event_time
+    }
+
+    pub fn set_max_parallelism(&mut self, max_parallelism: usize) {
+        assert!(max_parallelism >= 1, "max_parallelism must be >= 1");
+        self.max_parallelism = max_parallelism;
     }
 
     pub(crate) fn watermark_assign_config_for_column(&self, column_name: String) -> WatermarkAssignConfig {
@@ -222,7 +229,18 @@ impl LogicalGraph {
             );
         }
 
+        for node in self.graph.node_weights() {
+            assert!(
+                node.parallelism <= self.max_parallelism,
+                "operator {} parallelism {} exceeds max_parallelism {}",
+                node.operator_id,
+                node.parallelism,
+                self.max_parallelism,
+            );
+        }
+
         let mut execution_graph = ExecutionGraph::new();
+        execution_graph.set_max_parallelism(self.max_parallelism);
         let mut logical_to_execution_mapping: HashMap<NodeIndex, Vec<String>> = HashMap::new();
 
         // Create execution vertices for each logical node
@@ -238,14 +256,13 @@ impl LogicalGraph {
             for i in 0..parallelism {
                 let execution_vertex_id = format!("{}_{}", logical_node.operator_id, i);
 
-                let execution_vertex = ExecutionVertex::new(
+                let mut execution_vertex = ExecutionVertex::new(
                     execution_vertex_id.clone(),
                     logical_node.operator_id.clone(),
                     logical_node.operator_config.clone(),
                     parallelism as i32,
                     i as i32,
                 );
-                let mut execution_vertex = execution_vertex;
                 execution_vertex.watermark_assign = logical_node.watermark_assign.clone();
 
                 execution_graph.add_vertex(execution_vertex);
@@ -324,6 +341,7 @@ impl LogicalGraph {
 
         // Create a linear logical graph
         let mut logical_graph = LogicalGraph::new();
+        logical_graph.set_max_parallelism(parallelism);
         let mut node_indices = Vec::new();
         
         // Add nodes for each operator
@@ -658,6 +676,7 @@ mod tests {
         logical_graph.add_edge(projection_index, sink_index);
 
         // Convert to execution graph
+        logical_graph.set_max_parallelism(3);
         let execution_graph = logical_graph.to_execution_graph();
 
         // Verify execution vertices
@@ -693,6 +712,7 @@ mod tests {
     fn test_logical_to_execution_graph_with_cluster() {
         let mut logical_graph = LogicalGraph::new();
         let parallelism = 2;
+        logical_graph.set_max_parallelism(parallelism);
 
         // Create a simple logical graph: source -> filter
         let source_config = SourceConfig::VectorSourceConfig(VectorSourceConfig::new(vec![]));

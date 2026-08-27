@@ -36,6 +36,9 @@ pub struct PipelineSpec {
     pub execution_profile: Option<ExecutionProfile>,
     pub execution_mode: ExecutionMode,
     pub parallelism: usize,
+    /// Upper bound on parallelism for key-group assignment. Defaults to [`Self::parallelism`].
+    #[serde(default)]
+    pub max_parallelism: Option<usize>,
     #[serde(default)]
     pub worker_runtime: WorkerRuntimeSpec,
     #[serde(default)]
@@ -76,6 +79,7 @@ impl PipelineSpecBuilder {
                 execution_profile: None,
                 execution_mode: ExecutionMode::Streaming,
                 parallelism: 1,
+                max_parallelism: None,
                 worker_runtime: WorkerRuntimeSpec::default(),
                 state: StateSpec::default(),
                 operator_overrides: OperatorOverrides::default(),
@@ -123,6 +127,11 @@ impl PipelineSpecBuilder {
 
     pub fn with_parallelism(mut self, parallelism: usize) -> Self {
         self.spec.parallelism = parallelism;
+        self
+    }
+
+    pub fn with_max_parallelism(mut self, max_parallelism: usize) -> Self {
+        self.spec.max_parallelism = Some(max_parallelism.max(1));
         self
     }
 
@@ -267,6 +276,17 @@ impl PipelineSpec {
         if self.execution_profile.is_none() {
             return Err("execution profile must be set".to_string());
         }
+        if let Some(max_p) = self.max_parallelism {
+            if max_p == 0 {
+                return Err("max_parallelism must be >= 1".to_string());
+            }
+            if max_p < self.parallelism {
+                return Err(format!(
+                    "max_parallelism ({max_p}) must be >= parallelism ({})",
+                    self.parallelism
+                ));
+            }
+        }
         if self.execution_mode == ExecutionMode::Request && self.state.request_store.is_none() {
             return Err("request mode requires a request store".to_string());
         }
@@ -287,6 +307,11 @@ impl PipelineSpec {
             return Err("state.checkpoint.retention is required and must be >= 1".to_string());
         }
         Ok(())
+    }
+
+    /// Key-group space for this job. Defaults to [`Self::parallelism`].
+    pub fn resolved_max_parallelism(&self) -> usize {
+        self.max_parallelism.unwrap_or(self.parallelism.max(1)).max(1)
     }
 
     pub fn transport_overrides_queue_records(&self) -> HashMap<String, u32> {
