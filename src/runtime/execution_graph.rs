@@ -56,6 +56,8 @@ pub struct ExecutionVertex {
     pub input_edges: Vec<String>,
     pub output_edges: Vec<String>,
     pub parallelism: i32,
+    /// Key-group space for this job; >= [`Self::parallelism`].
+    pub max_parallelism: i32,
     pub task_index: i32,
     pub watermark_assign: Option<WatermarkAssignConfig>,
 }
@@ -75,6 +77,7 @@ impl ExecutionVertex {
             input_edges: Vec::new(),
             output_edges: Vec::new(),
             parallelism,
+            max_parallelism: parallelism,
             task_index,
             watermark_assign: None,
         }

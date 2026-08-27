@@ -126,6 +126,11 @@ impl Channel {
         }
     }
 
+    /// Task index from `{operator_id}_{task_index}`. `None` if the suffix is not a number.
+    pub fn target_task_index(&self) -> Option<usize> {
+        vertex_task_index(&self.get_target_vertex_id())
+    }
+
     pub fn get_queue_size_records(&self) -> u32 {
         match &self {
             Channel::Local { queue_size_records, .. } => *queue_size_records,
@@ -154,4 +159,11 @@ pub fn to_local_and_remote(channels: &Vec<Channel>) -> (Vec<Channel>, Vec<Channe
 
 fn gen_channel_id(source_vertex_id: String, target_vertex_id: String) -> String {
     format!("{}_to_{}", source_vertex_id, target_vertex_id)
+}
+
+/// Task index suffix of `{operator_id}_{task_index}` vertex ids.
+pub fn vertex_task_index(vertex_id: &str) -> Option<usize> {
+    vertex_id
+        .rsplit_once('_')
+        .and_then(|(_, idx)| idx.parse().ok())
 }

@@ -7,14 +7,16 @@ use crate::{common::Message, runtime::{functions::key_by::KeyByFunction, operato
 
 pub struct KeyByOperator {
     base: OperatorBase,
-    num_partitions: usize,
+    parallelism: usize,
+    max_parallelism: usize,
 }
 
 impl fmt::Debug for KeyByOperator {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("KeyByOperator")
             .field("base", &self.base)
-            .field("num_partitions", &self.num_partitions)
+            .field("parallelism", &self.parallelism)
+            .field("max_parallelism", &self.max_parallelism)
             .finish()
     }
 }
@@ -27,7 +29,8 @@ impl KeyByOperator {
         };
         Self {
             base: OperatorBase::new_with_function(key_by_function, config),
-            num_partitions: 1,
+            parallelism: 1,
+            max_parallelism: 1,
         }
     }
 }
@@ -35,10 +38,11 @@ impl KeyByOperator {
 #[async_trait]
 impl OperatorTrait for KeyByOperator {
     async fn open(&mut self, context: &RuntimeContext) -> Result<()> {
-        // dest = hash % p. Planner assigns the same p to KeyBy and its Hash
-        // downstream, so dest < collector.output_channels.len() ([#263](https://github.com/volga-project/volga/issues/263)).
-        // Uneven rescale is [#159](https://github.com/volga-project/volga/issues/159).
-        self.num_partitions = context.parallelism().max(1) as usize;
+        // dest = key_group → subtask. Planner assigns the same p to KeyBy and
+        // its Hash downstream, so dest < collector.output_channels.len() ([#263](https://github.com/volga-project/volga/issues/263)).
+        // Uneven rescale is [#121](https://github.com/volga-project/volga/issues/121).
+        self.parallelism = context.parallelism().max(1) as usize;
+        self.max_parallelism = context.max_parallelism().max(self.parallelism as i32) as usize;
         self.base.open(context).await
     }
 
@@ -61,7 +65,7 @@ impl OperatorTrait for KeyByOperator {
             Some(message) => {
                 let function = self.base.get_function_mut::<KeyByFunction>().unwrap();
                 let function = function.clone();
-                let messages = function.key_by(message, self.num_partitions);
+                let messages = function.key_by(message, self.parallelism, self.max_parallelism);
                 if messages.is_empty() {
                     panic!("KeyBy operator produced no messages");
                 }

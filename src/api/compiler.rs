@@ -78,6 +78,7 @@ fn merge_connector_configs(
 fn compile_logical_graph_from_parts(
     sql: &str,
     parallelism: usize,
+    max_parallelism: usize,
     execution_mode: ExecutionMode,
     operator_overrides: &OperatorOverrides,
     event_time: &EventTimeSpec,
@@ -87,6 +88,7 @@ fn compile_logical_graph_from_parts(
     let mut planner = Planner::new(
         PlanningContext::new(df_ctx)
             .with_parallelism(parallelism)
+            .with_max_parallelism(max_parallelism)
             .with_execution_mode(execution_mode),
     );
 
@@ -152,6 +154,7 @@ pub fn compile_logical_graph(spec: &PipelineSpec, connector_overrides: Option<&C
     compile_logical_graph_from_parts(
         sql,
         spec.parallelism,
+        spec.resolved_max_parallelism(),
         spec.execution_mode,
         &spec.operator_overrides,
         &spec.event_time,

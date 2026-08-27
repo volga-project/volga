@@ -9,6 +9,7 @@ use arrow::datatypes::{Field, Schema};
 use arrow::record_batch::RecordBatch;
 use datafusion::physical_plan::PhysicalExpr;
 
+use crate::common::key_group::subtask_for_hash;
 use crate::common::message::{Message, TARGET_SUBTASK_EXTRA};
 use crate::common::Key;
 
@@ -36,7 +37,8 @@ fn global_partition_key() -> Key {
 pub(crate) fn pack_by_dest(
     message: &Message,
     hashes: &[u64],
-    num_partitions: usize,
+    parallelism: usize,
+    max_parallelism: usize,
 ) -> Vec<Message> {
     let batch = message.record_batch();
     assert_eq!(
@@ -44,10 +46,11 @@ pub(crate) fn pack_by_dest(
         batch.num_rows(),
         "one hash per row"
     );
-    let n = num_partitions.max(1);
-    let mut buckets: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let p = parallelism.max(1);
+    let max_p = max_parallelism.max(p);
+    let mut buckets: Vec<Vec<usize>> = vec![Vec::new(); p];
     for (i, &hash) in hashes.iter().enumerate() {
-        buckets[(hash % n as u64) as usize].push(i);
+        buckets[subtask_for_hash(hash, p, max_p)].push(i);
     }
     let mut out = Vec::new();
     for (dest, idxs) in buckets.into_iter().enumerate() {
@@ -196,7 +199,7 @@ mod tests {
     #[test]
     fn pack_by_dest_skips_empty_buckets() {
         let message = Message::new(None, int_batch(vec![10, 20, 30]), None, None);
-        let packed = pack_by_dest(&message, &[0u64, 1, 0], 3);
+        let packed = pack_by_dest(&message, &[0u64, 1, 0], 3, 3);
         assert_eq!(packed.len(), 2, "dest 2 is empty and skipped");
 
         let mut dests = HashSet::new();
@@ -219,5 +222,51 @@ mod tests {
         let mut sizes: Vec<usize> = groups.iter().map(|(_, idxs)| idxs.len()).collect();
         sizes.sort();
         assert_eq!(sizes, vec![1, 2]);
+    }
+
+    #[test]
+    fn pack_by_dest_uses_key_groups_when_max_p_gt_p() {
+        let message = Message::new(None, int_batch(vec![10, 20]), None, None);
+        // hash 64 → kg 64 → subtask 64*2/128 = 1, not hash%2 = 0
+        let packed = pack_by_dest(&message, &[0u64, 64], 2, 128);
+        assert_eq!(packed.len(), 2);
+        let dests: HashSet<String> = packed
+            .iter()
+            .map(|m| m.get_extras().unwrap().get(TARGET_SUBTASK_EXTRA).unwrap().clone())
+            .collect();
+        assert_eq!(dests, HashSet::from(["0".to_string(), "1".to_string()]));
+        for m in &packed {
+            let dest: usize = m
+                .get_extras()
+                .unwrap()
+                .get(TARGET_SUBTASK_EXTRA)
+                .unwrap()
+                .parse()
+                .unwrap();
+            let rows = m.record_batch().num_rows();
+            assert_eq!(rows, 1);
+            if dest == 0 {
+                assert_eq!(
+                    m.record_batch()
+                        .column(0)
+                        .as_any()
+                        .downcast_ref::<Int32Array>()
+                        .unwrap()
+                        .value(0),
+                    10
+                );
+            } else {
+                assert_eq!(dest, 1);
+                assert_eq!(
+                    m.record_batch()
+                        .column(0)
+                        .as_any()
+                        .downcast_ref::<Int32Array>()
+                        .unwrap()
+                        .value(0),
+                    20
+                );
+            }
+        }
     }
 }

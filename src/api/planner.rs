@@ -128,7 +128,8 @@ pub struct PlanningContext {
 
     // TODO figure out how to set parallelism per node
     pub parallelism: usize,
-
+    /// Key-group space; defaults to [`Self::parallelism`].
+    pub max_parallelism: usize,
 }
 
 impl PlanningContext {
@@ -144,12 +145,25 @@ impl PlanningContext {
             df_planner: Arc::new(DefaultPhysicalPlanner::default()),
             execution_mode: ExecutionMode::Streaming,
             parallelism: 1, // Default parallelism
+            max_parallelism: 1,
         }
     }
 
     pub fn with_parallelism(mut self, parallelism: usize) -> Self {
-        self.parallelism = parallelism;
+        self.parallelism = parallelism.max(1);
+        if self.max_parallelism < self.parallelism {
+            self.max_parallelism = self.parallelism;
+        }
         self
+    }
+
+    pub fn with_max_parallelism(mut self, max_parallelism: usize) -> Self {
+        self.max_parallelism = max_parallelism.max(self.parallelism).max(1);
+        self
+    }
+
+    pub fn resolved_max_parallelism(&self) -> usize {
+        self.max_parallelism.max(self.parallelism).max(1)
     }
 
     pub fn with_execution_mode(mut self, execution_mode: ExecutionMode) -> Self {
@@ -162,8 +176,10 @@ impl PlanningContext {
 
 impl Planner {
     pub fn new(context: PlanningContext) -> Self {
+        let mut logical_graph = LogicalGraph::new();
+        logical_graph.set_max_parallelism(context.resolved_max_parallelism());
         Self {
-            logical_graph: LogicalGraph::new(),
+            logical_graph,
             node_stack: Vec::new(),
             context,
         }

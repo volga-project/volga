@@ -39,6 +39,15 @@
         "per_operator": {}
       }
     },
+    "max_parallelism": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint",
+      "minimum": 0,
+      "default": null
+    },
     "parallelism": {
       "type": "integer",
       "format": "uint",

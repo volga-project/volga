@@ -48,7 +48,7 @@ impl KeyByFunction {
         }
     }
 
-    pub fn key_by(&self, message: Message, num_partitions: usize) -> Vec<Message> {
+    pub fn key_by(&self, message: Message, parallelism: usize, max_parallelism: usize) -> Vec<Message> {
         let record_batch = message.record_batch();
         if record_batch.num_rows() == 0 {
             panic!("Can not key empty batch");
@@ -58,12 +58,12 @@ impl KeyByFunction {
             // No GROUP BY / PARTITION BY (DataFusion also drops `PARTITION BY 1`).
             // One global key: whole batch to dest 0.
             let hashes = vec![0u64; record_batch.num_rows()];
-            return pack_by_dest(&message, &hashes, num_partitions);
+            return pack_by_dest(&message, &hashes, parallelism, max_parallelism);
         }
         let group_arrays = evaluate_key_arrays(&group_exprs, record_batch);
         let hashes =
             Key::hash_arrays(&group_arrays, record_batch.num_rows()).expect("key hashes");
-        pack_by_dest(&message, &hashes, num_partitions)
+        pack_by_dest(&message, &hashes, parallelism, max_parallelism)
     }
 }
 
@@ -195,7 +195,7 @@ mod tests {
             "SELECT name, department, COUNT(*) as count FROM employees GROUP BY name, department";
         let logical_graph = planner.sql_to_graph(sql).unwrap();
         let key_by = key_by_from_graph(&logical_graph);
-        let packed = key_by.key_by(message, 2);
+        let packed = key_by.key_by(message, 2, 2);
         assert!(packed.len() >= 1 && packed.len() <= 2);
         assert_eq!(
             packed.iter().map(|m| m.record_batch().num_rows()).sum::<usize>(),
@@ -221,7 +221,7 @@ mod tests {
             .sql_to_graph("SELECT COUNT(*) as count FROM employees")
             .unwrap();
         let key_by = key_by_from_graph(&logical_graph);
-        let packed = key_by.key_by(message, 4);
+        let packed = key_by.key_by(message, 4, 4);
         assert_eq!(packed.len(), 1);
         assert_eq!(packed[0].record_batch().num_rows(), 6);
         let extras = packed[0].get_extras().unwrap();
