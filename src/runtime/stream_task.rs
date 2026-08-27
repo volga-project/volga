@@ -30,7 +30,7 @@ use crate::{
     transport::transport_client::TransportClientConfig,
 };
 use anyhow::Result;
-use futures::{FutureExt, StreamExt};
+use futures::{FutureExt, Stream, StreamExt};
 use async_stream::stream;
 use metrics::counter;
 use tokio::{task::JoinHandle, sync::Mutex, sync::watch, sync::mpsc};
@@ -38,31 +38,103 @@ use crate::transport::transport_client::DataReaderControl;
 use std::collections::HashSet;
 use crate::transport::transport_client::TransportClient;
 use crate::common::message::{Message, WatermarkMessage};
-use std::{collections::HashMap, sync::{atomic::{AtomicU8, AtomicU64, Ordering}, Arc}, time::{Duration, Instant, SystemTime, UNIX_EPOCH}};
+use std::{
+    collections::HashMap,
+    future::Future,
+    pin::Pin,
+    sync::{
+        atomic::{AtomicU8, AtomicU64, Ordering},
+        Arc,
+    },
+    task::{Context, Poll},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
 
 /// Accumulates Flink-style task time metrics within a report window.
 ///
-/// Idle = `poll_next` wait (source produce or input); backpressured = exclusive
+/// Idle = waiting on input (or source fetch `Pending` / empty poll), not operator
+/// compute such as Window `insert_batch` / `process_due`. Backpressured = exclusive
 /// tx-queue wait via [`BackpressureTracker`] (same write path as BP ratio
 /// gauges); busy = residual wall time so the three ms/s gauges sum to ~1000.
 #[derive(Debug, Default)]
 pub(crate) struct TaskTimeMetrics {
     idle_ns: AtomicU64,
+    idle_wait: std::sync::Mutex<IdleWaitState>,
     backpressure_tracker: Arc<crate::transport::batch_channel::BackpressureTracker>,
 }
 
+#[derive(Debug, Default)]
+struct IdleWaitState {
+    waiters: u32,
+    started: Option<Instant>,
+}
+
+struct IdleWaitGuard(Arc<TaskTimeMetrics>);
+
+impl Drop for IdleWaitGuard {
+    fn drop(&mut self) {
+        let mut g = self.0.idle_wait.lock().expect("idle wait");
+        g.waiters = g.waiters.saturating_sub(1);
+        if g.waiters == 0 {
+            if let Some(started) = g.started.take() {
+                self.0
+                    .idle_ns
+                    .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            }
+        }
+    }
+}
+
 impl TaskTimeMetrics {
-    fn add_idle_ns(&self, ns: u64) {
-        self.idle_ns.fetch_add(ns, Ordering::Relaxed);
+    fn begin_idle(self: &Arc<Self>) -> IdleWaitGuard {
+        {
+            let mut g = self.idle_wait.lock().expect("idle wait");
+            if g.waiters == 0 {
+                g.started = Some(Instant::now());
+            }
+            g.waiters = g.waiters.saturating_add(1);
+        }
+        IdleWaitGuard(Arc::clone(self))
+    }
+
+    /// Count time the future is `Pending` (waiting), not CPU work in `Ready` polls.
+    async fn while_pending<T>(self: &Arc<Self>, fut: impl Future<Output = T>) -> T {
+        tokio::pin!(fut);
+        let mut wait = None;
+        std::future::poll_fn(|cx| match fut.as_mut().poll(cx) {
+            Poll::Pending => {
+                if wait.is_none() {
+                    wait = Some(self.begin_idle());
+                }
+                Poll::Pending
+            }
+            Poll::Ready(v) => {
+                wait = None;
+                Poll::Ready(v)
+            }
+        })
+        .await
     }
 
     fn backpressure_tracker(&self) -> Arc<crate::transport::batch_channel::BackpressureTracker> {
         self.backpressure_tracker.clone()
     }
 
+    /// Take accumulated idle nanos (includes an in-flight wait slice).
+    fn take_idle_ns(&self) -> u64 {
+        let mut g = self.idle_wait.lock().expect("idle wait");
+        let mut total = self.idle_ns.swap(0, Ordering::Relaxed);
+        if g.waiters > 0 {
+            if let Some(started) = g.started.replace(Instant::now()) {
+                total = total.saturating_add(started.elapsed().as_nanos() as u64);
+            }
+        }
+        total
+    }
+
     /// Scale to ms-per-second and reset. Returns `(busy, idle, backpressured)`.
     fn take_ms_per_second(&self, window: Duration) -> (f64, f64, f64) {
-        let idle = self.idle_ns.swap(0, Ordering::Relaxed);
+        let idle = self.take_idle_ns();
         let bp = self.backpressure_tracker.take_ns();
         let window_ms = window.as_secs_f64() * 1000.0;
         if window_ms <= 0.0 {
@@ -76,6 +148,41 @@ impl TaskTimeMetrics {
         let busy_ms = (window_ms - idle_ms - bp_ms).max(0.0);
         let scale = 1000.0 / window_ms;
         (busy_ms * scale, idle_ms * scale, bp_ms * scale)
+    }
+}
+
+/// Records idle only while the input stream is `Pending` (waiting for a message).
+struct IdleTimingStream {
+    inner: MessageStream,
+    metrics: Arc<TaskTimeMetrics>,
+    wait: Option<IdleWaitGuard>,
+}
+
+fn idle_timing_stream(inner: MessageStream, metrics: Arc<TaskTimeMetrics>) -> MessageStream {
+    Box::pin(IdleTimingStream {
+        inner,
+        metrics,
+        wait: None,
+    })
+}
+
+impl Stream for IdleTimingStream {
+    type Item = Message;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Message>> {
+        let this = self.get_mut();
+        match Pin::new(&mut this.inner).poll_next(cx) {
+            Poll::Pending => {
+                if this.wait.is_none() {
+                    this.wait = Some(this.metrics.begin_idle());
+                }
+                Poll::Pending
+            }
+            Poll::Ready(item) => {
+                this.wait = None;
+                Poll::Ready(item)
+            }
+        }
     }
 }
 // serde imports removed; this module does not define serializable DTOs directly.
@@ -780,7 +887,10 @@ impl StreamTask {
                     execution_attempt_id,
                 );
 
-                operator.set_input(Some(preprocessed_stream))
+                operator.set_input(Some(idle_timing_stream(
+                    preprocessed_stream,
+                    task_time_metrics.clone(),
+                )))
             };
 
             while status.load(Ordering::SeqCst) == StreamTaskStatus::Running as u8 {
@@ -811,11 +921,14 @@ impl StreamTask {
 
                 let poll_res = if let Some(msg) = produced {
                     OperatorPollResult::Ready(msg)
+                } else if is_source {
+                    // Source has no input stream: idle = fetch Pending (Kafka wait,
+                    // rate-limit sleep), not CPU in a Ready poll (datagen produce).
+                    task_time_metrics
+                        .while_pending(operator.poll_next())
+                        .await
                 } else {
-                    let idle_start = Instant::now();
-                    let res = operator.poll_next().await;
-                    task_time_metrics.add_idle_ns(idle_start.elapsed().as_nanos() as u64);
-                    res
+                    operator.poll_next().await
                 };
 
                 match poll_res {
@@ -1118,5 +1231,115 @@ impl StreamTask {
                 Err(_) => continue,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod task_time_metrics_tests {
+    use super::*;
+    use async_stream::stream;
+    use futures::StreamExt;
+    use std::time::Duration;
+    use tokio::time::sleep;
+
+    fn wm(i: u64) -> Message {
+        Message::Watermark(WatermarkMessage::new("t".to_string(), i, Some(0)))
+    }
+
+    fn assert_ns_near(actual: u64, expected: Duration, lo_frac: f64, hi_frac: f64) {
+        let expected_ns = expected.as_nanos() as f64;
+        let lo = (expected_ns * lo_frac) as u64;
+        let hi = (expected_ns * hi_frac) as u64;
+        assert!(
+            actual >= lo && actual <= hi,
+            "idle_ns={actual} not in [{lo}, {hi}] for expected {expected:?}"
+        );
+    }
+
+    fn delayed_input(hold: Duration, msg: Message) -> MessageStream {
+        Box::pin(stream! {
+            sleep(hold).await;
+            yield msg;
+        })
+    }
+
+    #[tokio::test]
+    async fn ready_input_records_no_idle() {
+        let metrics = Arc::new(TaskTimeMetrics::default());
+        let mut input = idle_timing_stream(
+            Box::pin(futures::stream::iter(vec![wm(1)])),
+            metrics.clone(),
+        );
+        assert!(input.next().await.is_some());
+        assert_eq!(metrics.take_idle_ns(), 0);
+    }
+
+    #[tokio::test]
+    async fn input_wait_records_idle_near_hold_time() {
+        let metrics = Arc::new(TaskTimeMetrics::default());
+        let hold = Duration::from_millis(80);
+        let mut input = idle_timing_stream(delayed_input(hold, wm(1)), metrics.clone());
+        assert!(input.next().await.is_some());
+        assert_ns_near(metrics.take_idle_ns(), hold, 0.5, 2.5);
+    }
+
+    #[tokio::test]
+    async fn operator_compute_after_input_is_not_idle() {
+        // Reproduces #262: insert_batch / process_due sit after next_input.
+        let metrics = Arc::new(TaskTimeMetrics::default());
+        let wait = Duration::from_millis(80);
+        let compute = Duration::from_millis(50);
+        let mut input = idle_timing_stream(delayed_input(wait, wm(1)), metrics.clone());
+        assert!(input.next().await.is_some());
+        sleep(compute).await;
+        let idle = metrics.take_idle_ns();
+        assert_ns_near(idle, wait, 0.5, 2.5);
+        assert!(
+            idle < (wait + compute).as_nanos() as u64,
+            "compute after input was counted as idle: idle_ns={idle}"
+        );
+    }
+
+    #[tokio::test]
+    async fn source_pending_wait_is_idle() {
+        let metrics = Arc::new(TaskTimeMetrics::default());
+        let hold = Duration::from_millis(80);
+        metrics.while_pending(sleep(hold)).await;
+        assert_ns_near(metrics.take_idle_ns(), hold, 0.5, 2.5);
+    }
+
+    #[tokio::test]
+    async fn source_ready_poll_cpu_is_not_idle() {
+        let metrics = Arc::new(TaskTimeMetrics::default());
+        let hold = Duration::from_millis(50);
+        metrics
+            .while_pending(async {
+                let start = Instant::now();
+                while start.elapsed() < hold {}
+            })
+            .await;
+        assert!(
+            metrics.take_idle_ns() < Duration::from_millis(10).as_nanos() as u64,
+            "CPU work in a Ready poll should not count as idle"
+        );
+    }
+
+    #[tokio::test]
+    async fn busy_is_residual_of_idle_in_window() {
+        let metrics = Arc::new(TaskTimeMetrics::default());
+        let hold = Duration::from_millis(80);
+        let window = Duration::from_millis(200);
+        metrics.while_pending(sleep(hold)).await;
+        let (busy, idle, bp) = metrics.take_ms_per_second(window);
+        assert_eq!(bp, 0.0);
+        let expected_idle = hold.as_secs_f64() / window.as_secs_f64() * 1000.0;
+        assert!(
+            (idle - expected_idle).abs() < 150.0,
+            "idle={idle} expected≈{expected_idle}"
+        );
+        assert!(
+            (busy + idle + bp - 1000.0).abs() < 1e-6,
+            "busy={busy} idle={idle} bp={bp}"
+        );
     }
 }

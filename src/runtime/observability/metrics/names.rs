@@ -41,7 +41,8 @@ pub const METRIC_STREAM_TASK_CHECKPOINT_PAYLOAD_BYTES: &str =
 pub const METRIC_STREAM_TASK_CHECKPOINT_SUCCESS: &str = "volga_stream_task_checkpoint_success";
 pub const METRIC_STREAM_TASK_CHECKPOINT_FAILED: &str = "volga_stream_task_checkpoint_failed";
 /// Flink-style task time metrics (ms in the last second; busy+idle+bp ≈ 1000).
-/// Busy is residual wall time; idle is poll_next wait; bp is tx-queue block wait.
+/// Busy is residual wall time; idle is input/source wait (not operator compute);
+/// bp is tx-queue block wait.
 pub const METRIC_STREAM_TASK_BUSY_TIME_MS_PER_SECOND: &str =
     "volga_stream_task_busy_time_ms_per_second";
 pub const METRIC_STREAM_TASK_IDLE_TIME_MS_PER_SECOND: &str =
