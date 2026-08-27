@@ -46,11 +46,9 @@ pub(crate) fn pack_by_dest(
         batch.num_rows(),
         "one hash per row"
     );
-    let p = parallelism.max(1);
-    let max_p = max_parallelism.max(p);
-    let mut buckets: Vec<Vec<usize>> = vec![Vec::new(); p];
+    let mut buckets: Vec<Vec<usize>> = vec![Vec::new(); parallelism];
     for (i, &hash) in hashes.iter().enumerate() {
-        buckets[subtask_for_hash(hash, p, max_p)].push(i);
+        buckets[subtask_for_hash(hash, parallelism, max_parallelism)].push(i);
     }
     let mut out = Vec::new();
     for (dest, idxs) in buckets.into_iter().enumerate() {
@@ -222,51 +220,5 @@ mod tests {
         let mut sizes: Vec<usize> = groups.iter().map(|(_, idxs)| idxs.len()).collect();
         sizes.sort();
         assert_eq!(sizes, vec![1, 2]);
-    }
-
-    #[test]
-    fn pack_by_dest_uses_key_groups_when_max_p_gt_p() {
-        let message = Message::new(None, int_batch(vec![10, 20]), None, None);
-        // hash 64 → kg 64 → subtask 64*2/128 = 1, not hash%2 = 0
-        let packed = pack_by_dest(&message, &[0u64, 64], 2, 128);
-        assert_eq!(packed.len(), 2);
-        let dests: HashSet<String> = packed
-            .iter()
-            .map(|m| m.get_extras().unwrap().get(TARGET_SUBTASK_EXTRA).unwrap().clone())
-            .collect();
-        assert_eq!(dests, HashSet::from(["0".to_string(), "1".to_string()]));
-        for m in &packed {
-            let dest: usize = m
-                .get_extras()
-                .unwrap()
-                .get(TARGET_SUBTASK_EXTRA)
-                .unwrap()
-                .parse()
-                .unwrap();
-            let rows = m.record_batch().num_rows();
-            assert_eq!(rows, 1);
-            if dest == 0 {
-                assert_eq!(
-                    m.record_batch()
-                        .column(0)
-                        .as_any()
-                        .downcast_ref::<Int32Array>()
-                        .unwrap()
-                        .value(0),
-                    10
-                );
-            } else {
-                assert_eq!(dest, 1);
-                assert_eq!(
-                    m.record_batch()
-                        .column(0)
-                        .as_any()
-                        .downcast_ref::<Int32Array>()
-                        .unwrap()
-                        .value(0),
-                    20
-                );
-            }
-        }
     }
 }

@@ -10,4 +10,4 @@ pub use grpc::{GrpcConfig, GrpcServeHandle, GRPC_MAX_MESSAGE_BYTES};
 
 pub use message::*;
 pub use key::Key;
-pub use key_group::{key_group_of, key_group_range, subtask_for_hash, subtask_of, KeyGroupId};
+pub use key_group::{key_group_of, subtask_for_hash, subtask_of};

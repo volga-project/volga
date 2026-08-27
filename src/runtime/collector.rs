@@ -42,11 +42,8 @@ impl Collector {
         self.output_channels.push(channel);
         // Dest index is the target task_index (KeyBy / RequestRoute). Sort
         // numerically so dest 10 is task 10, not lex-sorted `_10` before `_2`.
-        self.output_channels.sort_by(|a, b| {
-            a.target_task_index()
-                .cmp(&b.target_task_index())
-                .then_with(|| a.get_channel_id().cmp(&b.get_channel_id()))
-        });
+        self.output_channels
+            .sort_by_key(target_task_index);
     }
 
     pub fn output_channels(&self) -> Vec<Channel> {
@@ -113,6 +110,15 @@ impl Collector {
         
         res
     }
+}
+
+/// Task index suffix of `{operator_id}_{task_index}`. Dest `i` must be task `i`.
+fn target_task_index(channel: &Channel) -> usize {
+    let vertex_id = channel.get_target_vertex_id();
+    vertex_id
+        .rsplit_once('_')
+        .and_then(|(_, idx)| idx.parse().ok())
+        .unwrap_or_else(|| panic!("vertex id {vertex_id} must end with _{{task_index}}"))
 }
 
 #[cfg(test)]

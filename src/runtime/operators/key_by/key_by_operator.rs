@@ -42,7 +42,7 @@ impl OperatorTrait for KeyByOperator {
         // its Hash downstream, so dest < collector.output_channels.len() ([#263](https://github.com/volga-project/volga/issues/263)).
         // Uneven rescale is [#121](https://github.com/volga-project/volga/issues/121).
         self.parallelism = context.parallelism().max(1) as usize;
-        self.max_parallelism = context.max_parallelism().max(self.parallelism as i32) as usize;
+        self.max_parallelism = context.max_parallelism();
         self.base.open(context).await
     }
 

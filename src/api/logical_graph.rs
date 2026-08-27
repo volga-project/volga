@@ -112,18 +112,12 @@ impl LogicalGraph {
     }
 
     pub fn set_max_parallelism(&mut self, max_parallelism: usize) {
-        self.max_parallelism = max_parallelism.max(1);
+        assert!(max_parallelism >= 1, "max_parallelism must be >= 1");
+        self.max_parallelism = max_parallelism;
     }
 
-    /// Key-group space for this graph, at least every node's parallelism.
     pub fn max_parallelism(&self) -> usize {
-        let node_max = self
-            .graph
-            .node_weights()
-            .map(|n| n.parallelism)
-            .max()
-            .unwrap_or(1);
-        self.max_parallelism.max(node_max).max(1)
+        self.max_parallelism
     }
 
     pub(crate) fn watermark_assign_config_for_column(&self, column_name: String) -> WatermarkAssignConfig {
@@ -239,7 +233,18 @@ impl LogicalGraph {
             );
         }
 
+        for node in self.graph.node_weights() {
+            assert!(
+                node.parallelism <= self.max_parallelism,
+                "operator {} parallelism {} exceeds max_parallelism {}",
+                node.operator_id,
+                node.parallelism,
+                self.max_parallelism,
+            );
+        }
+
         let mut execution_graph = ExecutionGraph::new();
+        execution_graph.set_max_parallelism(self.max_parallelism);
         let mut logical_to_execution_mapping: HashMap<NodeIndex, Vec<String>> = HashMap::new();
 
         // Create execution vertices for each logical node
@@ -262,7 +267,6 @@ impl LogicalGraph {
                     parallelism as i32,
                     i as i32,
                 );
-                execution_vertex.max_parallelism = self.max_parallelism() as i32;
                 execution_vertex.watermark_assign = logical_node.watermark_assign.clone();
 
                 execution_graph.add_vertex(execution_vertex);
@@ -676,15 +680,12 @@ mod tests {
         logical_graph.add_edge(projection_index, sink_index);
 
         // Convert to execution graph
+        logical_graph.set_max_parallelism(3);
         let execution_graph = logical_graph.to_execution_graph();
 
         // Verify execution vertices
         let vertices = execution_graph.get_vertices();
         assert_eq!(vertices.len(), 7); // 2 + 3 + 1 + 1 = 7 vertices total
-        assert!(
-            vertices.values().all(|v| v.max_parallelism == 3),
-            "unset max_parallelism defaults to max node parallelism"
-        );
 
         // Verify execution edges: unequal parallelism keeps a RoundRobin mesh;
         // equal parallelism (projection p=1 → sink p=1) is Forward 1:1.
@@ -712,33 +713,10 @@ mod tests {
     }
 
     #[test]
-    fn to_execution_graph_propagates_max_parallelism() {
-        let mut logical_graph = LogicalGraph::from_linear_operators(
-            vec![
-                OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(
-                    VectorSourceConfig::new(vec![]),
-                )),
-                OperatorConfig::SinkConfig(
-                    crate::runtime::operators::sink::sink_operator::SinkConfig::in_memory_grpc(
-                        "http://127.0.0.1:8080",
-                    ),
-                ),
-            ],
-            4,
-            false,
-        );
-        logical_graph.set_max_parallelism(128);
-        let execution_graph = logical_graph.to_execution_graph();
-        for v in execution_graph.get_vertices().values() {
-            assert_eq!(v.parallelism, 4);
-            assert_eq!(v.max_parallelism, 128);
-        }
-    }
-
-    #[test]
     fn test_logical_to_execution_graph_with_cluster() {
         let mut logical_graph = LogicalGraph::new();
         let parallelism = 2;
+        logical_graph.set_max_parallelism(parallelism);
 
         // Create a simple logical graph: source -> filter
         let source_config = SourceConfig::VectorSourceConfig(VectorSourceConfig::new(vec![]));

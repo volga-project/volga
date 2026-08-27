@@ -311,10 +311,7 @@ impl PipelineSpec {
 
     /// Key-group space for this job. Defaults to [`Self::parallelism`].
     pub fn resolved_max_parallelism(&self) -> usize {
-        self.max_parallelism
-            .unwrap_or(self.parallelism)
-            .max(self.parallelism)
-            .max(1)
+        self.max_parallelism.unwrap_or(self.parallelism.max(1)).max(1)
     }
 
     pub fn transport_overrides_queue_records(&self) -> HashMap<String, u32> {

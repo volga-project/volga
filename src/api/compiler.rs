@@ -237,6 +237,7 @@ mod tests {
             .build();
 
         let mut graph1 = compile_logical_graph(&spec, Some(&connector_configs)).to_execution_graph();
+        assert_eq!(graph1.max_parallelism(), spec.resolved_max_parallelism());
         let mut graph2 = compile_logical_graph(&spec, Some(&connector_configs)).to_execution_graph();
 
         let mapping1 = build_mock_vertex_mapping(&graph1);

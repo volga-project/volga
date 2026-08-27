@@ -17,7 +17,6 @@ pub struct RuntimeContext {
     vertex_id: VertexId,
     task_index: i32,
     parallelism: i32,
-    max_parallelism: i32,
     job_config: HashMap<String, Value>,
     state_registry: Option<Arc<StateRegistry>>,
     execution_graph: Option<ExecutionGraph>,
@@ -45,7 +44,6 @@ impl RuntimeContext {
             vertex_id,
             task_index,
             parallelism,
-            max_parallelism: parallelism,
             job_config: job_config.unwrap_or_default(),
             state_registry,
             execution_graph,
@@ -72,12 +70,11 @@ impl RuntimeContext {
     pub fn parallelism(&self) -> i32 {
         self.parallelism
     }
-    pub fn max_parallelism(&self) -> i32 {
-        self.max_parallelism.max(self.parallelism).max(1)
-    }
-    pub fn with_max_parallelism(mut self, max_parallelism: i32) -> Self {
-        self.max_parallelism = max_parallelism.max(self.parallelism).max(1);
-        self
+    pub fn max_parallelism(&self) -> usize {
+        self.execution_graph
+            .as_ref()
+            .map(|g| g.max_parallelism())
+            .unwrap_or(self.parallelism.max(1) as usize)
     }
     pub fn job_config(&self) -> &HashMap<String, Value> {
         &self.job_config

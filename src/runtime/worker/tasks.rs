@@ -231,7 +231,6 @@ impl WorkerInner {
                 Some(self.state_registry.clone()),
                 Some(config.graph.clone()),
             )
-            .with_max_parallelism(vertex.max_parallelism)
             .with_state_config(
                 config.operator_state_backend.clone(),
                 config.request_store.clone(),
