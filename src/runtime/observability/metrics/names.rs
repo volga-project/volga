@@ -96,8 +96,6 @@ pub struct MetricsLabels {
 }
 
 // Histogram bucket boundaries, milliseconds (Prometheus also emits a trailing +Inf bucket).
-// Tail goes to 5m so WO `process_due` soak outliers are not collapsed into +Inf
-// (p99 used to report 5000 whenever a sample was ≥5s).
 pub const LATENCY_BUCKET_BOUNDARIES: [f64; 18] = [
     1.0, 2.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0,
     10_000.0, 30_000.0, 60_000.0, 120_000.0, 180_000.0, 300_000.0,

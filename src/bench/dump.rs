@@ -65,10 +65,6 @@ impl PromQueryRange {
 }
 
 /// Named PromQL. Oracles require [`REQUIRED_PROM_QUERIES`]; extras are dump-only.
-///
-/// The `metrics` Prometheus exporter does **not** append `_total` to counters.
-/// Grafana already uses the bare names (`volga_stream_task_records_sent`, …).
-/// `container_*_total` is cAdvisor and does keep `_total`.
 pub type PromQuery = (&'static str, &'static str);
 
 pub const REQUIRED_PROM_QUERY_NAMES: &[&str] = &[
