@@ -5,20 +5,20 @@ use std::io::Cursor as IoCursor;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
-use arrow::array::RecordBatch;
+use arrow::array::{RecordBatch, UInt32Array};
+use arrow::compute::concat_batches;
 use arrow::ipc::reader::FileReader;
 use arrow::ipc::writer::FileWriter;
 use async_trait::async_trait;
+use dashmap::DashMap;
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
 
 use std::any::Any;
 
 use crate::runtime::metrics::MetricsLabels;
 use crate::runtime::operators::window::metrics;
-use crate::runtime::operators::window::model::{
-    Cursor, RawRun, TileRun, WindowTrigger,
-};
+use crate::runtime::operators::window::model::{Cursor, RawRun, TileRun, WindowTrigger};
 use crate::runtime::operators::window::state::WindowOperatorState;
 use crate::runtime::state::{OperatorStore, OperatorTaskState};
 
@@ -42,11 +42,109 @@ fn validate_checkpoint_size(snapshot: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// One cursor-ordered Arrow batch per key.
+#[derive(Debug, Clone, Default)]
+struct PackedRaw {
+    batch: Option<RecordBatch>,
+    index: BTreeMap<Cursor, u32>,
+}
+
+impl PackedRaw {
+    fn rebuild(batch: &RecordBatch, ts_column_index: usize) -> Result<Self> {
+        if batch.num_rows() == 0 {
+            return Ok(Self::default());
+        }
+        let mut by_cursor = BTreeMap::new();
+        for (i, cursor) in cursors_from_batch(batch, ts_column_index)?
+            .into_iter()
+            .enumerate()
+        {
+            by_cursor.insert(cursor, i as u32);
+        }
+        let indices: Vec<u32> = by_cursor.values().copied().collect();
+        let batch = arrow::compute::take_record_batch(batch, &UInt32Array::from(indices))?;
+        Ok(Self {
+            batch: Some(batch),
+            index: by_cursor
+                .into_keys()
+                .enumerate()
+                .map(|(i, cursor)| (cursor, i as u32))
+                .collect(),
+        })
+    }
+
+    fn insert(&mut self, events: &RecordBatch, ts_column_index: usize) -> Result<()> {
+        if events.num_rows() == 0 {
+            return Ok(());
+        }
+        *self = match &self.batch {
+            Some(existing) => Self::rebuild(
+                &concat_batches(&existing.schema(), [existing, events])?,
+                ts_column_index,
+            )?,
+            None => Self::rebuild(events, ts_column_index)?,
+        };
+        Ok(())
+    }
+
+    fn select(&self, runs: &[RawRun]) -> Vec<RecordBatch> {
+        let Some(batch) = &self.batch else {
+            return Vec::new();
+        };
+        let mut rows: Vec<u32> = runs
+            .iter()
+            .flat_map(|run| self.index.range(run.from..run.to).map(|(_, row)| *row))
+            .collect();
+        rows.sort_unstable();
+        rows.dedup();
+        if rows.is_empty() {
+            return Vec::new();
+        }
+        if rows.windows(2).all(|pair| pair[1] == pair[0] + 1) {
+            return vec![batch.slice(rows[0] as usize, rows.len())];
+        }
+        vec![
+            arrow::compute::take_record_batch(batch, &UInt32Array::from(rows))
+                .expect("take raw rows"),
+        ]
+    }
+
+    fn prune_before(&mut self, floor: i64) -> u64 {
+        let before = self.index.len();
+        self.index.retain(|cursor, _| cursor.ts >= floor);
+        let pruned = (before - self.index.len()) as u64;
+        if pruned == 0 {
+            return 0;
+        }
+        if self.index.is_empty() {
+            self.batch = None;
+            return pruned;
+        }
+        let indices: Vec<u32> = self.index.values().copied().collect();
+        self.batch = Some(
+            arrow::compute::take_record_batch(
+                self.batch.as_ref().unwrap(),
+                &UInt32Array::from(indices),
+            )
+            .expect("take remaining raw rows"),
+        );
+        self.index = self
+            .index
+            .keys()
+            .copied()
+            .enumerate()
+            .map(|(i, cursor)| (cursor, i as u32))
+            .collect();
+        pruned
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 struct PartitionState {
     meta: KeyState,
-    raw: BTreeMap<Cursor, RecordBatch>,
+    raw: PackedRaw,
     tiles: TileMap,
+    ts_column_index: usize,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -59,22 +157,22 @@ struct InMemCheckpoint {
 #[derive(Debug, Serialize, Deserialize)]
 struct PartitionCheckpoint {
     meta: KeyState,
-    raw: BTreeMap<Cursor, Vec<u8>>,
+    raw: Option<Vec<u8>>,
+    ts_column_index: usize,
     tiles: TileMap,
 }
 
-#[derive(Debug, Default)]
-struct InMemState {
-    partitions: HashMap<PartitionKey, PartitionState>,
-    triggers: BTreeSet<WindowTrigger>,
-}
-
 /// Development/test reference backend with inline checkpoints limited to 8 MiB.
-/// One read lock is the WRO snapshot boundary. Physical prune runs via
-/// [`OperatorStore::maintain`], not the WO watermark hot path.
+///
+/// One packed Arrow batch per key. Each partition is an `Arc<RwLock<_>>` in a
+/// DashMap so shard guards are dropped before Arrow concat/take. WRO
+/// `load_window_data` is one partition read (raw + tiles). Checkpoint clones
+/// partitions then triggers with no freeze and can interleave with
+/// [`OperatorStore::maintain`]; that is accepted for this process-local backend.
 #[derive(Debug, Clone, Default)]
 pub struct InMemWindowStore {
-    state: Arc<RwLock<InMemState>>,
+    partitions: Arc<DashMap<PartitionKey, Arc<RwLock<PartitionState>>>>,
+    triggers: Arc<RwLock<BTreeSet<WindowTrigger>>>,
     metrics_labels: Option<MetricsLabels>,
 }
 
@@ -88,9 +186,32 @@ impl InMemWindowStore {
         self
     }
 
-    /// Scan namespace store footprint and write gauges into the metrics registry.
+    fn read_part<R>(
+        &self,
+        partition: &PartitionKey,
+        f: impl FnOnce(&PartitionState) -> R,
+    ) -> Option<R> {
+        let slot = self.partitions.get(partition).map(|entry| entry.clone())?;
+        let state = slot.read();
+        Some(f(&state))
+    }
+
+    fn write_part<R>(
+        &self,
+        partition: &PartitionKey,
+        f: impl FnOnce(&mut PartitionState) -> R,
+    ) -> R {
+        let slot = self
+            .partitions
+            .entry(partition.clone())
+            .or_insert_with(|| Arc::new(RwLock::new(PartitionState::default())))
+            .clone();
+        let mut state = slot.write();
+        f(&mut state)
+    }
+
     fn report_metrics(
-        state: &InMemState,
+        &self,
         namespace: &[u8],
         task_id: &str,
         labels: &crate::runtime::metrics::MetricsLabels,
@@ -107,28 +228,36 @@ impl InMemWindowStore {
         let mut raw_bytes = 0u64;
         let mut tiles_count = 0u64;
         let mut tiles_bytes = 0u64;
-        let mut triggers_count = 0u64;
-        let mut triggers_bytes = 0u64;
         let mut key_states_count = 0u64;
         let mut key_states_bytes = 0u64;
-        for (partition, part) in &state.partitions {
-            if partition.namespace.as_slice() != namespace {
-                continue;
-            }
+        let slots: Vec<_> = self
+            .partitions
+            .iter()
+            .filter(|entry| entry.key().namespace.as_slice() == namespace)
+            .map(|entry| entry.value().clone())
+            .collect();
+        for slot in slots {
+            let part = slot.read();
             key_states_count += 1;
-            key_states_bytes = key_states_bytes
-                .saturating_add(bincode::serialized_size(&part.meta).unwrap_or(0));
-            for batch in part.raw.values() {
-                raw_count += 1;
-                raw_bytes = raw_bytes.saturating_add(batch.get_array_memory_size() as u64);
-            }
+            key_states_bytes =
+                key_states_bytes.saturating_add(bincode::serialized_size(&part.meta).unwrap_or(0));
+            raw_count = raw_count.saturating_add(part.raw.index.len() as u64);
+            raw_bytes = raw_bytes.saturating_add(
+                part.raw
+                    .batch
+                    .as_ref()
+                    .map(|batch| batch.get_array_memory_size() as u64)
+                    .unwrap_or(0),
+            );
             for tiles in part.tiles.values() {
                 tiles_count += 1;
                 tiles_bytes =
                     tiles_bytes.saturating_add(bincode::serialized_size(tiles).unwrap_or(0));
             }
         }
-        for trigger in &state.triggers {
+        let mut triggers_count = 0u64;
+        let mut triggers_bytes = 0u64;
+        for trigger in self.triggers.read().iter() {
             if trigger.partition.namespace.as_slice() != namespace {
                 continue;
             }
@@ -151,45 +280,13 @@ impl InMemWindowStore {
         }
     }
 
-    /// Returns number of raw rows pruned.
-    fn prune_namespace(state: &mut InMemState, namespace: &[u8], watermark: i64, floor: i64) -> u64 {
-        state.triggers.retain(|trigger| {
-            trigger.partition.namespace.as_slice() != namespace || trigger.fire_at.ts > watermark
-        });
-        let mut pruned_rows = 0u64;
-        for (partition, part) in state.partitions.iter_mut() {
-            if partition.namespace.as_slice() != namespace {
-                continue;
-            }
-            let before = part.raw.len();
-            part.raw.retain(|cursor, _| cursor.ts >= floor);
-            pruned_rows += (before - part.raw.len()) as u64;
-            part.tiles.retain(|&(granularity, start_ts), _| {
-                start_ts + granularity.to_millis() > floor
-            });
-        }
-        pruned_rows
-    }
-
-    fn select_raw(state: &PartitionState, runs: &[RawRun]) -> Vec<RecordBatch> {
-        let mut out = BTreeMap::new();
-        for run in runs {
-            for (&cursor, batch) in state.raw.range(run.from..run.to) {
-                out.insert(cursor, batch.clone());
-            }
-        }
-        out.into_values().collect()
-    }
-
     fn select_tiles(state: &PartitionState, runs: &[TileRun]) -> TileMap {
         let mut out = TileMap::new();
         for run in runs {
-            let start = (run.granularity, run.start_ts);
-            let end = (run.granularity, run.end_ts_exclusive);
             out.extend(
                 state
                     .tiles
-                    .range(start..end)
+                    .range((run.granularity, run.start_ts)..(run.granularity, run.end_ts_exclusive))
                     .map(|(key, value)| (*key, value.clone())),
             );
         }
@@ -217,11 +314,8 @@ impl InMemWindowStore {
 #[async_trait]
 impl WindowOperatorStore for InMemWindowStore {
     async fn load_key_state(&self, partition: &PartitionKey) -> Result<KeyState> {
-        let state = self.state.read().await;
-        Ok(state
-            .partitions
-            .get(partition)
-            .map(|state| state.meta.clone())
+        Ok(self
+            .read_part(partition, |state| state.meta.clone())
             .unwrap_or_default())
     }
 
@@ -230,20 +324,14 @@ impl WindowOperatorStore for InMemWindowStore {
         partition: &PartitionKey,
         runs: &[RawRun],
     ) -> Result<Vec<RecordBatch>> {
-        let state = self.state.read().await;
-        Ok(state
-            .partitions
-            .get(partition)
-            .map(|state| Self::select_raw(state, runs))
+        Ok(self
+            .read_part(partition, |state| state.raw.select(runs))
             .unwrap_or_default())
     }
 
     async fn load_tiles(&self, partition: &PartitionKey, runs: &[TileRun]) -> Result<TileMap> {
-        let state = self.state.read().await;
-        Ok(state
-            .partitions
-            .get(partition)
-            .map(|state| Self::select_tiles(state, runs))
+        Ok(self
+            .read_part(partition, |state| Self::select_tiles(state, runs))
             .unwrap_or_default())
     }
 
@@ -256,21 +344,24 @@ impl WindowOperatorStore for InMemWindowStore {
         meta: &KeyState,
         triggers: &[WindowTrigger],
     ) -> Result<()> {
-        let cursors = cursors_from_batch(events, ts_column_index)?;
         anyhow::ensure!(
-            triggers.iter().all(|trigger| &trigger.partition == partition),
+            triggers
+                .iter()
+                .all(|trigger| &trigger.partition == partition),
             "window trigger partition does not match committed partition"
         );
-        let mut store = self.state.write().await;
-        let state = store.partitions.entry(partition.clone()).or_default();
-        for (row, cursor) in cursors.into_iter().enumerate() {
-            state.raw.insert(cursor, events.slice(row, 1));
+        self.write_part(partition, |state| -> Result<()> {
+            state.ts_column_index = ts_column_index;
+            state.raw.insert(events, ts_column_index)?;
+            for (key, value) in tiles {
+                state.tiles.insert(*key, value.clone());
+            }
+            state.meta = meta.clone();
+            Ok(())
+        })?;
+        if !triggers.is_empty() {
+            self.triggers.write().extend(triggers.iter().cloned());
         }
-        for (key, value) in tiles {
-            state.tiles.insert(*key, value.clone());
-        }
-        state.meta = meta.clone();
-        store.triggers.extend(triggers.iter().cloned());
         Ok(())
     }
 
@@ -289,9 +380,9 @@ impl WindowOperatorStore for InMemWindowStore {
             move |(store, resume_after)| {
                 let namespace = namespace.clone();
                 async move {
-                    let state = store.state.read().await;
-                    let selected = state
+                    let selected = store
                         .triggers
+                        .read()
                         .iter()
                         .filter(|trigger| trigger.partition.namespace == namespace)
                         .filter(|trigger| after.map_or(true, |after| trigger.fire_at > after))
@@ -318,16 +409,13 @@ impl WindowOperatorStore for InMemWindowStore {
                     let work = grouped
                         .into_iter()
                         .map(|(partition, triggers)| DueWindowWork {
-                            key_state: state
-                                .partitions
-                                .get(&partition)
-                                .map(|partition_state| partition_state.meta.clone())
+                            key_state: store
+                                .read_part(&partition, |state| state.meta.clone())
                                 .unwrap_or_default(),
                             partition,
                             triggers,
                         })
                         .collect();
-                    drop(state);
                     Ok(Some((work, (store, Some(next)))))
                 }
             },
@@ -335,30 +423,36 @@ impl WindowOperatorStore for InMemWindowStore {
     }
 
     async fn store_key_state(&self, partition: &PartitionKey, meta: &KeyState) -> Result<()> {
-        let mut store = self.state.write().await;
-        let state = store.partitions.entry(partition.clone()).or_default();
-        state.meta = meta.clone();
+        self.write_part(partition, |state| state.meta = meta.clone());
         Ok(())
     }
 
     async fn checkpoint(&self, namespace: &StateNamespace) -> Result<WindowBackendSnapshot> {
-        let store = self.state.read().await;
-        let snapshot = store
+        let slots: Vec<_> = self
             .partitions
             .iter()
-            .filter(|(partition, _)| partition.namespace.as_slice() == namespace.bytes.as_slice())
+            .filter(|entry| entry.key().namespace.as_slice() == namespace.bytes.as_slice())
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .collect();
+        let partitions = slots
+            .into_iter()
+            .map(|(partition, slot)| (partition, slot.read().clone()))
+            .collect::<HashMap<_, _>>();
+        let snapshot = partitions
+            .into_iter()
             .map(|(partition, state)| {
-                let raw = state
-                    .raw
-                    .iter()
-                    .map(|(cursor, batch)| Ok((*cursor, Self::encode_batch(batch)?)))
-                    .collect::<Result<_>>()?;
                 Ok((
-                    partition.clone(),
+                    partition,
                     PartitionCheckpoint {
-                        meta: state.meta.clone(),
-                        raw,
-                        tiles: state.tiles.clone(),
+                        meta: state.meta,
+                        raw: state
+                            .raw
+                            .batch
+                            .as_ref()
+                            .map(Self::encode_batch)
+                            .transpose()?,
+                        ts_column_index: state.ts_column_index,
+                        tiles: state.tiles,
                     },
                 ))
             })
@@ -366,8 +460,9 @@ impl WindowOperatorStore for InMemWindowStore {
         let checkpoint = InMemCheckpoint {
             namespace: namespace.bytes.clone(),
             partitions: snapshot,
-            triggers: store
+            triggers: self
                 .triggers
+                .read()
                 .iter()
                 .filter(|trigger| trigger.partition.namespace == namespace.bytes)
                 .cloned()
@@ -405,30 +500,33 @@ impl WindowOperatorStore for InMemWindowStore {
             .partitions
             .into_iter()
             .map(|(partition, state)| {
-                let raw = state
-                    .raw
-                    .into_iter()
-                    .map(|(cursor, bytes)| Ok((cursor, Self::decode_batch(&bytes)?)))
-                    .collect::<Result<_>>()?;
+                let raw = match state.raw {
+                    Some(bytes) => {
+                        PackedRaw::rebuild(&Self::decode_batch(&bytes)?, state.ts_column_index)?
+                    }
+                    None => PackedRaw::default(),
+                };
                 Ok((
                     partition,
                     PartitionState {
                         meta: state.meta,
                         raw,
                         tiles: state.tiles,
+                        ts_column_index: state.ts_column_index,
                     },
                 ))
             })
-            .collect::<Result<HashMap<_, _>>>()?;
-        let mut store = self.state.write().await;
-        store
-            .partitions
+            .collect::<Result<Vec<_>>>()?;
+        self.partitions
             .retain(|partition, _| partition.namespace.as_slice() != namespace.bytes.as_slice());
-        store.partitions.extend(restored);
-        store
-            .triggers
+        for (partition, state) in restored {
+            self.partitions
+                .insert(partition, Arc::new(RwLock::new(state)));
+        }
+        let mut triggers = self.triggers.write();
+        triggers
             .retain(|trigger| trigger.partition.namespace.as_slice() != namespace.bytes.as_slice());
-        store.triggers.extend(checkpoint.triggers);
+        triggers.extend(checkpoint.triggers);
         Ok(())
     }
 }
@@ -441,14 +539,14 @@ impl WindowRequestStore for InMemWindowStore {
         raw_runs: &[RawRun],
         tile_runs: &[TileRun],
     ) -> Result<WindowData> {
-        let store = self.state.read().await;
-        let Some(state) = store.partitions.get(partition) else {
-            return Ok(WindowData::new(Vec::new(), TileMap::new()));
-        };
-        Ok(WindowData::new(
-            Self::select_raw(state, raw_runs),
-            Self::select_tiles(state, tile_runs),
-        ))
+        Ok(self
+            .read_part(partition, |state| {
+                WindowData::new(
+                    state.raw.select(raw_runs),
+                    Self::select_tiles(state, tile_runs),
+                )
+            })
+            .unwrap_or_else(|| WindowData::new(Vec::new(), TileMap::new())))
     }
 }
 
@@ -469,13 +567,26 @@ impl OperatorStore for InMemWindowStore {
         let Some((watermark, floor)) = wo.retention_cutoff() else {
             return Ok(());
         };
-        let task_id = state.task_id();
-        let mut store = self.state.write().await;
-        let pruned_rows = Self::prune_namespace(&mut store, ns.bytes.as_slice(), watermark, floor);
+        self.triggers.write().retain(|trigger| {
+            trigger.partition.namespace.as_slice() != ns.bytes.as_slice()
+                || trigger.fire_at.ts > watermark
+        });
+        let slots: Vec<_> = self
+            .partitions
+            .iter()
+            .filter(|entry| entry.key().namespace.as_slice() == ns.bytes.as_slice())
+            .map(|entry| entry.value().clone())
+            .collect();
+        let mut pruned_rows = 0u64;
+        for slot in slots {
+            let mut part = slot.write();
+            pruned_rows += part.raw.prune_before(floor);
+            part.tiles
+                .retain(|&(granularity, start_ts), _| start_ts + granularity.to_millis() > floor);
+        }
         if let Some(labels) = self.metrics_labels.as_ref() {
-            Self::report_metrics(&store, ns.bytes.as_slice(), task_id, labels);
-            drop(store);
-            metrics::add_pruned(task_id, labels, pruned_rows);
+            self.report_metrics(ns.bytes.as_slice(), state.task_id(), labels);
+            metrics::add_pruned(state.task_id(), labels, pruned_rows);
         }
         Ok(())
     }
@@ -542,6 +653,11 @@ mod tests {
         assert_eq!(actual, expected);
     }
 
+    fn assert_packed(batches: &[RecordBatch], rows: usize) {
+        assert_eq!(batches.len(), 1, "expected one packed batch, got {}", batches.len());
+        assert_eq!(batches[0].num_rows(), rows);
+    }
+
     #[tokio::test]
     async fn missing_partition_and_empty_runs_return_defaults() {
         let store = InMemWindowStore::new();
@@ -604,6 +720,17 @@ mod tests {
             )
             .await
             .unwrap();
+        store
+            .commit_events(
+                &partition,
+                0,
+                &batch(&[(50, 5)]),
+                &TileMap::new(),
+                &KeyState::default(),
+                &[],
+            )
+            .await
+            .unwrap();
 
         let loaded = store
             .load_raw(
@@ -613,6 +740,7 @@ mod tests {
             .await
             .unwrap();
 
+        assert_packed(&loaded, 4);
         assert_eq!(
             raw_cursors(&loaded),
             vec![
@@ -936,13 +1064,13 @@ mod tests {
         assert_eq!(work[0].triggers, vec![triggers[2].clone()]);
         assert!(due.try_next().await.unwrap().is_none());
 
+        let loaded = store
+            .load_raw(&partition, &[raw_run((0, 0), (20_000, 0))])
+            .await
+            .unwrap();
+        assert_packed(&loaded, 2);
         assert_eq!(
-            raw_cursors(
-                &store
-                    .load_raw(&partition, &[raw_run((0, 0), (20_000, 0))])
-                    .await
-                    .unwrap()
-            ),
+            raw_cursors(&loaded),
             vec![Cursor::new(5_000, 2), Cursor::new(10_000, 3)]
         );
         assert_eq!(
@@ -1021,13 +1149,13 @@ mod tests {
         let work = due.try_next().await.unwrap().unwrap();
         assert_eq!(work.len(), 1);
         assert_eq!(work[0].triggers, vec![triggers[1].clone()]);
+        let loaded = restored
+            .load_raw(&partition, &[raw_run((0, 0), (3_000, 0))])
+            .await
+            .unwrap();
+        assert_packed(&loaded, 2);
         assert_eq!(
-            raw_cursors(
-                &restored
-                    .load_raw(&partition, &[raw_run((0, 0), (3_000, 0))])
-                    .await
-                    .unwrap()
-            ),
+            raw_cursors(&loaded),
             vec![Cursor::new(1_000, 1), Cursor::new(2_000, 2)]
         );
         assert_eq!(

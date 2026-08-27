@@ -9,7 +9,7 @@ use arrow::array::RecordBatch;
 use arrow::compute::concat_batches;
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
-use futures::{future, stream, StreamExt, TryStreamExt};
+use futures::{stream, StreamExt, TryStreamExt};
 
 use crate::common::key::Key;
 use crate::common::message::Message;
@@ -188,6 +188,7 @@ impl WindowOperator {
     }
 
     async fn process_due(&self, through: Cursor) -> RecordBatch {
+        const PROCESS_DUE_CONCURRENCY: usize = 8;
         let state = self.state_ref();
         let after = state
             .watermark_frontier()
@@ -201,22 +202,22 @@ impl WindowOperator {
             .await
             .expect("stream due window triggers")
         {
-            let futures = work.into_iter().map(|work| {
-                advance_key(
-                    state.store(),
-                    work,
-                    self.window_configs.as_ref(),
-                    self.ts_column_index,
-                    &self.output_schema,
-                    &self.input_schema,
-                )
-            });
-            batches.extend(
-                // TODO add concurrency limit
-                future::try_join_all(futures)
-                    .await
-                    .expect("advance due window triggers"),
-            );
+            let page = stream::iter(work)
+                .map(|work| {
+                    advance_key(
+                        state.store(),
+                        work,
+                        self.window_configs.as_ref(),
+                        self.ts_column_index,
+                        &self.output_schema,
+                        &self.input_schema,
+                    )
+                })
+                .buffered(PROCESS_DUE_CONCURRENCY)
+                .try_collect::<Vec<_>>()
+                .await
+                .expect("advance due window triggers");
+            batches.extend(page);
         }
         if batches.is_empty() {
             return RecordBatch::new_empty(self.output_schema.clone());
