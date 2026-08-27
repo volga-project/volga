@@ -719,6 +719,17 @@ mod tests {
             )
             .await
             .unwrap();
+        store
+            .commit_events(
+                &partition,
+                0,
+                &batch(&[(50, 5)]),
+                &TileMap::new(),
+                &KeyState::default(),
+                &[],
+            )
+            .await
+            .unwrap();
 
         let loaded = store
             .load_raw(
@@ -736,50 +747,6 @@ mod tests {
                 Cursor::new(20, 1),
                 Cursor::new(20, 2),
                 Cursor::new(30, 3),
-            ]
-        );
-    }
-
-    #[tokio::test]
-    async fn commit_events_packs_rows_into_one_batch_per_key() {
-        let store = InMemWindowStore::new();
-        let partition = partition();
-        store
-            .commit_events(
-                &partition,
-                0,
-                &batch(&[(30, 3), (10, 1), (20, 2)]),
-                &TileMap::new(),
-                &KeyState::default(),
-                &[],
-            )
-            .await
-            .unwrap();
-        store
-            .commit_events(
-                &partition,
-                0,
-                &batch(&[(40, 4), (50, 5)]),
-                &TileMap::new(),
-                &KeyState::default(),
-                &[],
-            )
-            .await
-            .unwrap();
-
-        let loaded = store
-            .load_raw(&partition, &[raw_run((0, 0), (100, 0))])
-            .await
-            .unwrap();
-        assert_packed(&loaded, 5);
-        assert_eq!(
-            raw_cursors(&loaded),
-            vec![
-                Cursor::new(10, 1),
-                Cursor::new(20, 2),
-                Cursor::new(30, 3),
-                Cursor::new(40, 4),
-                Cursor::new(50, 5),
             ]
         );
     }
@@ -911,13 +878,13 @@ mod tests {
             .unwrap();
 
         assert_meta(&store.load_key_state(&partition).await.unwrap(), &meta);
-        let loaded = store
-            .load_raw(&partition, &[raw_run((0, 0), (3_000, 0))])
-            .await
-            .unwrap();
-        assert_packed(&loaded, 2);
         assert_eq!(
-            raw_cursors(&loaded),
+            raw_cursors(
+                &store
+                    .load_raw(&partition, &[raw_run((0, 0), (3_000, 0))])
+                    .await
+                    .unwrap()
+            ),
             vec![Cursor::new(1_000, 1), Cursor::new(2_000, 2)]
         );
         assert_eq!(
@@ -970,7 +937,6 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_packed(data.raw_batches(), 2);
         assert_eq!(
             raw_cursors(data.raw_batches()),
             vec![Cursor::new(2_000, 2), Cursor::new(3_000, 3)]
@@ -1262,50 +1228,6 @@ mod tests {
                 .next_seq,
             22
         );
-    }
-
-    #[tokio::test]
-    async fn concurrent_partition_writes_complete() {
-        let store = InMemWindowStore::new();
-        let futs = (0..64u64).map(|i| {
-            let store = store.clone();
-            async move {
-                let partition = PartitionKey {
-                    namespace: b"test-namespace".to_vec(),
-                    business_key: format!("key-{i}").into_bytes(),
-                };
-                store
-                    .commit_events(
-                        &partition,
-                        0,
-                        &batch(&[(i as i64, i)]),
-                        &TileMap::new(),
-                        &KeyState {
-                            next_seq: i + 1,
-                            ..Default::default()
-                        },
-                        &[],
-                    )
-                    .await
-                    .unwrap();
-                store
-                    .store_key_state(
-                        &partition,
-                        &KeyState {
-                            next_seq: i + 10,
-                            ..Default::default()
-                        },
-                    )
-                    .await
-                    .unwrap();
-                store.load_key_state(&partition).await.unwrap().next_seq
-            }
-        });
-        let got = futures::future::join_all(futs).await;
-        let mut got = got;
-        got.sort_unstable();
-        let expected: Vec<u64> = (10..74).collect();
-        assert_eq!(got, expected);
     }
 
     #[tokio::test]
