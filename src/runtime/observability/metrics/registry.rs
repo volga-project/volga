@@ -236,7 +236,7 @@ mod tests {
     fn cumulative_histogram_buckets_and_overflow() {
         let hist = CumulativeHistogram::new();
         hist.record(10.0);
-        hist.record(10_000.0);
+        hist.record(LATENCY_BUCKET_BOUNDARIES.last().unwrap() * 2.0);
         let buckets = hist.snapshot_buckets();
         assert_eq!(buckets.len(), LATENCY_HISTOGRAM_LEN);
         assert_eq!(*buckets.last().unwrap(), 2);

@@ -78,7 +78,7 @@ pub const REQUIRED_PROM_QUERIES: &[PromQuery] = &[
     (
         "checkpoint_completed",
         concat!(
-            "increase(volga_checkpoint_completed_total",
+            "increase(volga_checkpoint_completed",
             r#"{pipeline_id=~".*"}"#,
             "[5m])"
         ),
@@ -86,7 +86,7 @@ pub const REQUIRED_PROM_QUERIES: &[PromQuery] = &[
     (
         "checkpoint_failed",
         concat!(
-            "increase(volga_checkpoint_failed_total",
+            "increase(volga_checkpoint_failed",
             r#"{pipeline_id=~".*"}"#,
             "[5m])"
         ),
@@ -94,8 +94,8 @@ pub const REQUIRED_PROM_QUERIES: &[PromQuery] = &[
     (
         "records_sent_rate",
         concat!(
-            "sum(rate(volga_stream_task_records_sent_total",
-            r#"{pipeline_id=~".*"}"#,
+            "sum(rate(volga_stream_task_records_sent",
+            r#"{pipeline_id=~".*",task_id=~"Source.*"}"#,
             "[1m]))"
         ),
     ),
@@ -153,9 +153,33 @@ pub const EXTRA_PROM_QUERIES: &[PromQuery] = &[
     (
         "sink_records_rate",
         concat!(
-            "sum(rate(volga_sink_records_written_total",
+            "sum(rate(volga_sink_records_written",
             r#"{pipeline_id=~".*"}"#,
             "[1m]))"
+        ),
+    ),
+    (
+        "window_recv_rate",
+        concat!(
+            "sum(rate(volga_stream_task_records_recv",
+            r#"{pipeline_id=~".*",task_id=~"Window.*"}"#,
+            "[1m]))"
+        ),
+    ),
+    (
+        "window_sent_rate",
+        concat!(
+            "sum(rate(volga_stream_task_records_sent",
+            r#"{pipeline_id=~".*",task_id=~"Window.*"}"#,
+            "[1m]))"
+        ),
+    ),
+    (
+        "records_sent_rate_by_operator",
+        concat!(
+            r#"sum by (operator) (label_replace(rate(volga_stream_task_records_sent"#,
+            r#"{pipeline_id=~".*"}"#,
+            r#"[1m]), "operator", "$1", "task_id", "^(.*)_[0-9]+$"))"#
         ),
     ),
     (
@@ -175,9 +199,17 @@ pub const EXTRA_PROM_QUERIES: &[PromQuery] = &[
         ),
     ),
     (
+        "wo_wm_process_rate",
+        concat!(
+            "sum(rate(volga_wo_wm_process_ms_count",
+            r#"{pipeline_id=~".*"}"#,
+            "[1m]))"
+        ),
+    ),
+    (
         "wo_late_dropped_rate",
         concat!(
-            "sum(rate(volga_wo_late_dropped_rows_total",
+            "sum(rate(volga_wo_late_dropped_rows",
             r#"{pipeline_id=~".*"}"#,
             "[1m]))"
         ),
@@ -185,7 +217,7 @@ pub const EXTRA_PROM_QUERIES: &[PromQuery] = &[
     (
         "wo_maintain_pruned_rate",
         concat!(
-            "sum(rate(volga_wo_maintain_pruned_rows_total",
+            "sum(rate(volga_wo_maintain_pruned_rows",
             r#"{pipeline_id=~".*"}"#,
             "[1m]))"
         ),
@@ -269,7 +301,7 @@ pub const EXTRA_PROM_QUERIES: &[PromQuery] = &[
     (
         "transport_disconnects",
         concat!(
-            "increase(volga_stream_task_transport_disconnects_total",
+            "increase(volga_stream_task_transport_disconnects",
             r#"{pipeline_id=~".*"}"#,
             "[5m])"
         ),
