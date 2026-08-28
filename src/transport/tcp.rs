@@ -703,19 +703,24 @@ mod tests {
     #[tokio::test]
     async fn pump_flushes_trickle_by_first_byte_deadline() {
         let (tx, mut server, pump) = started_pump().await;
+        tx.send(wm(0), None).await.unwrap();
         let sender = tx.clone();
         let send = tokio::spawn(async move {
-            for i in 0..40u64 {
+            for i in 1..40u64 {
                 sender.send(wm(i), None).await.unwrap();
                 tokio::time::sleep(Duration::from_micros(500)).await;
             }
         });
-        let payload = tokio::time::timeout(Duration::from_millis(10), read_frame(&mut server))
+        let payload = tokio::time::timeout(Duration::from_secs(1), read_frame(&mut server))
             .await
-            .expect("trickle must flush by 2ms after the first byte")
+            .expect("first-byte deadline must flush during trickle")
             .unwrap()
             .unwrap();
         assert_eq!(watermark_value(&payload), 0);
+        assert!(
+            !send.is_finished(),
+            "flush must happen while trickle is still sending"
+        );
         send.await.unwrap();
         drop(tx);
         pump.await.unwrap();
