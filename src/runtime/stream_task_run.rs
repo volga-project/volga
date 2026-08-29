@@ -54,7 +54,7 @@ pub(crate) struct RunParams {
     pub master_addr: Option<String>,
     pub restore_data: Option<SerializedRestore>,
     pub execution_attempt_id: u64,
-    pub worker_health: WorkerHealth,
+    pub worker_health: Arc<WorkerHealth>,
     pub upstream_watermarks: Arc<Mutex<HashMap<String, u64>>>,
     pub current_watermark: Arc<AtomicU64>,
     pub upstream_vertices: Vec<String>,

@@ -8,7 +8,7 @@ use crate::runtime::checkpoint::{SerializedCheckpoint, SerializedRestore};
 use crate::runtime::functions::source::{
     create_source_function, datagen_source::DatagenSourceConfig, kafka::KafkaSourceConfig,
     parquet::ParquetSourceConfig, word_count_source::BatchingMode, FetchResult,
-    RequestSourceConfig, SourceFunction,
+    RequestSourceConfig, SourceFunction, SourceFunctionTrait,
 };
 use crate::runtime::operators::operator::{
     operator_config_requires_checkpoint, OperatorBase, OperatorConfig, OperatorTrait, OperatorType,
