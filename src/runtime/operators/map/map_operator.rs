@@ -34,16 +34,16 @@ impl OperatorTrait for MapOperator {
         self.base.open(context).await
     }
 
+    async fn close(&mut self) -> Result<()> {
+        self.base.close().await
+    }
+
     fn operator_config(&self) -> &OperatorConfig {
         self.base.operator_config()
     }
 
     fn operator_type(&self) -> OperatorType {
         self.base.operator_type()
-    }
-
-    async fn close(&mut self) -> Result<()> {
-        self.base.close().await
     }
 }
 

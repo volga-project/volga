@@ -23,8 +23,8 @@ use super::checkpoint::CheckpointAligner;
 use super::ctx::TaskCtx;
 use super::mailbox::MailboxFront;
 use super::metrics::TaskTimeMetrics;
-use super::processor::{processor_loop, ProcessorLoopParams};
-use super::source::{source_loop, SourceLoopParams};
+use super::processor::processor_loop;
+use super::source::source_loop;
 use super::task::{timestamp, StreamTask};
 use super::watermark::WatermarkManager;
 
@@ -173,6 +173,18 @@ pub(super) async fn run(params: RunParams) -> Result<()> {
         );
     }
 
+    let ctx = TaskCtx {
+        vertex_id: vertex_id.clone(),
+        runtime_context: &runtime_context,
+        status: status.clone(),
+        execution_attempt_id,
+        collectors: &mut collectors_per_target_operator,
+        master_client: &mut master_client,
+        metrics_labels: metrics_labels.as_ref(),
+        task_time_metrics: task_time_metrics.clone(),
+        current_watermark: current_watermark.clone(),
+    };
+
     if let Operator::Source(ref mut source) = operator {
         let mut source_watermark_manager = WatermarkManager::new(
             watermark_assign,
@@ -182,21 +194,9 @@ pub(super) async fn run(params: RunParams) -> Result<()> {
         );
         source_loop(
             source,
-            SourceLoopParams {
-                ctx: TaskCtx {
-                    vertex_id: vertex_id.clone(),
-                    runtime_context: &runtime_context,
-                    status: status.clone(),
-                    execution_attempt_id,
-                    collectors: &mut collectors_per_target_operator,
-                    master_client: &mut master_client,
-                    metrics_labels: metrics_labels.as_ref(),
-                    task_time_metrics: task_time_metrics.clone(),
-                    current_watermark: current_watermark.clone(),
-                },
-                checkpoint_receiver: &mut checkpoint_receiver,
-                source_watermark_manager: &mut source_watermark_manager,
-            },
+            ctx,
+            &mut checkpoint_receiver,
+            &mut source_watermark_manager,
         )
         .await?;
     } else {
@@ -217,25 +217,12 @@ pub(super) async fn run(params: RunParams) -> Result<()> {
             metrics_labels.clone(),
             execution_attempt_id,
         );
-
         processor_loop(
-            &mut operator,
-            ProcessorLoopParams {
-                ctx: TaskCtx {
-                    vertex_id: vertex_id.clone(),
-                    runtime_context: &runtime_context,
-                    status: status.clone(),
-                    execution_attempt_id,
-                    collectors: &mut collectors_per_target_operator,
-                    master_client: &mut master_client,
-                    metrics_labels: metrics_labels.as_ref(),
-                    task_time_metrics: task_time_metrics.clone(),
-                    current_watermark: current_watermark.clone(),
-                },
-                mailbox: input_stream,
-                front,
-                reader_control,
-            },
+            operator.as_stream_mut(),
+            ctx,
+            input_stream,
+            front,
+            reader_control,
         )
         .await?;
     }

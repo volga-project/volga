@@ -3,10 +3,10 @@ use std::time::Instant;
 use anyhow::Result;
 use futures::StreamExt;
 
-use crate::common::message::{CheckpointBarrierMessage, Message};
+use crate::common::message::{CheckpointBarrierMessage, Message, WatermarkMessage};
 use crate::runtime::observability::StreamTaskStatus;
 use crate::runtime::operators::operator::{
-    drain_ready_after, Operator, StreamOperator, INGEST_MAX_RECORDS,
+    drain_ready_after, MessageStream, StreamOperator, INGEST_MAX_RECORDS,
 };
 use crate::transport::transport_client::DataReaderControl;
 
@@ -15,24 +15,13 @@ use super::ctx::TaskCtx;
 use super::mailbox::{sleep_until_deadline, MailboxFront};
 use super::task::{timestamp, StreamTask};
 
-pub(super) struct ProcessorLoopParams<'a> {
-    pub ctx: TaskCtx<'a>,
-    pub mailbox: crate::runtime::operators::operator::MessageStream,
-    pub front: MailboxFront,
-    pub reader_control: DataReaderControl,
-}
-
 pub(super) async fn processor_loop(
-    operator: &mut Operator,
-    params: ProcessorLoopParams<'_>,
+    operator: &mut dyn StreamOperator,
+    mut ctx: TaskCtx<'_>,
+    mailbox: MessageStream,
+    mut front: MailboxFront,
+    reader_control: DataReaderControl,
 ) -> Result<()> {
-    let ProcessorLoopParams {
-        mut ctx,
-        mailbox,
-        mut front,
-        reader_control,
-    } = params;
-
     let mut mailbox = mailbox.peekable();
     let mut metrics_window_start = Instant::now();
 
@@ -66,7 +55,7 @@ pub(super) async fn processor_loop(
                         record_recv(&ctx, &Message::CheckpointBarrier(barrier.clone()));
                         match front.on_aligned_barrier(&barrier).await {
                             Ok(None) => {}
-                            Ok(Some((checkpoint_id, inject_stamp, _, wms))) => {
+                            Ok(Some((checkpoint_id, inject_stamp, wms))) => {
                                 emit_watermarks(operator, &mut ctx, wms).await?;
                                 let aligned = CheckpointBarrierMessage::new(
                                     ctx.vertex_id.as_ref().to_string(),
@@ -76,13 +65,9 @@ pub(super) async fn processor_loop(
                                 );
                                 on_checkpoint_barrier(
                                     operator,
-                                    ctx.master_client,
+                                    &mut ctx,
                                     &aligned,
                                     false,
-                                    &ctx.vertex_id,
-                                    ctx.runtime_context.task_index(),
-                                    ctx.execution_attempt_id,
-                                    ctx.metrics_labels,
                                     Some(&reader_control),
                                 )
                                 .await?;
@@ -144,9 +129,9 @@ fn record_recv(ctx: &TaskCtx<'_>, message: &Message) {
 }
 
 async fn emit_watermarks(
-    operator: &mut Operator,
+    operator: &mut dyn StreamOperator,
     ctx: &mut TaskCtx<'_>,
-    wms: Vec<crate::common::message::WatermarkMessage>,
+    wms: Vec<WatermarkMessage>,
 ) -> Result<()> {
     if wms.is_empty() {
         return Ok(());

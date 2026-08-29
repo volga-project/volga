@@ -6,14 +6,14 @@ use anyhow::Result;
 use crate::common::message::CheckpointBarrierMessage;
 use crate::runtime::master::server::master_service::master_service_client::MasterServiceClient;
 use crate::runtime::metrics::{
-    increment_task_counter, MetricsLabels, METRIC_STREAM_TASK_CHECKPOINT_DURATION_MS,
+    increment_task_counter, METRIC_STREAM_TASK_CHECKPOINT_DURATION_MS,
     METRIC_STREAM_TASK_CHECKPOINT_FAILED, METRIC_STREAM_TASK_CHECKPOINT_PAYLOAD_BYTES,
     METRIC_STREAM_TASK_CHECKPOINT_SUCCESS,
 };
 use crate::runtime::operators::operator::{operator_config_requires_checkpoint, OperatorTrait};
-use crate::runtime::VertexId;
 use crate::transport::transport_client::DataReaderControl;
 
+use super::ctx::TaskCtx;
 use super::task::StreamTask;
 
 #[derive(Debug)]
@@ -133,23 +133,23 @@ impl StreamTask {
 
 pub(super) async fn on_checkpoint_barrier(
     operator: &mut dyn OperatorTrait,
-    master_client: &mut Option<MasterServiceClient<tonic::transport::Channel>>,
+    ctx: &mut TaskCtx<'_>,
     barrier: &CheckpointBarrierMessage,
     is_source: bool,
-    vertex_id: &VertexId,
-    task_index: i32,
-    execution_attempt_id: u64,
-    metrics_labels: Option<&MetricsLabels>,
     data_reader_control: Option<&DataReaderControl>,
 ) -> Result<()> {
     let checkpoint_id = barrier.checkpoint_id;
+    let vertex_id = ctx.vertex_id.clone();
+    let task_index = ctx.runtime_context.task_index();
+    let execution_attempt_id = ctx.execution_attempt_id;
+    let metrics_labels = ctx.metrics_labels;
     let propagation_phase = if is_source {
         crate::runtime::master::server::master_service::CheckpointPropagationPhase::BarrierInjected
     } else {
         crate::runtime::master::server::master_service::CheckpointPropagationPhase::Aligned
     };
     StreamTask::report_checkpoint_propagation(
-        master_client,
+        ctx.master_client,
         checkpoint_id,
         vertex_id.as_ref(),
         task_index,
@@ -169,7 +169,8 @@ pub(super) async fn on_checkpoint_barrier(
             let checkpoint_data = checkpoint.into_bytes();
             let payload_len = checkpoint_data.len() as u64;
 
-            let report_resp = master_client
+            let report_resp = ctx
+                .master_client
                 .as_mut()
                 .expect("Master client not initialized")
                 .report_checkpoint(tonic::Request::new(
@@ -199,13 +200,13 @@ pub(super) async fn on_checkpoint_barrier(
                 StreamTask::record_histogram(
                     METRIC_STREAM_TASK_CHECKPOINT_DURATION_MS,
                     duration_ms,
-                    vertex_id,
+                    &vertex_id,
                     metrics_labels,
                 );
                 StreamTask::record_histogram(
                     METRIC_STREAM_TASK_CHECKPOINT_PAYLOAD_BYTES,
                     payload_len as f64,
-                    vertex_id,
+                    &vertex_id,
                     metrics_labels,
                 );
                 increment_task_counter(

@@ -336,7 +336,7 @@ async fn mailbox_front_flushes_held_watermark_before_aligned_barrier() {
     assert!(front.assign_on_data(&ts_up("u0", 180)).is_none());
 
     let barrier = CheckpointBarrierMessage::new("u0".to_string(), 1, 0, None);
-    let (_, _, _, wms) = front
+    let (_, _, wms) = front
         .on_aligned_barrier(&barrier)
         .await
         .unwrap()

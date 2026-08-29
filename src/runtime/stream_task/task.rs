@@ -215,35 +215,27 @@ impl StreamTask {
         let _ = sender.send(checkpoint_id);
     }
 
-    pub(super) async fn wait_for_run(mut receiver: oneshot::Receiver<()>, status: Arc<AtomicU8>) {
+    pub(super) async fn wait_for_run(receiver: oneshot::Receiver<()>, status: Arc<AtomicU8>) {
+        let current_status = status.load(Ordering::SeqCst);
+        if current_status == StreamTaskStatus::Finished as u8
+            || current_status == StreamTaskStatus::Closed as u8
+        {
+            println!(
+                "{:?} Task status is {:?}, stopping wait for run signal",
+                timestamp(),
+                StreamTaskStatus::from(current_status)
+            );
+            return;
+        }
+
         let timeout = Duration::from_millis(50000);
-        let start_time = std::time::Instant::now();
-
-        loop {
-            let current_status = status.load(Ordering::SeqCst);
-            if current_status == StreamTaskStatus::Finished as u8
-                || current_status == StreamTaskStatus::Closed as u8
-            {
-                println!(
-                    "{:?} Task status is {:?}, stopping wait for run signal",
-                    timestamp(),
-                    StreamTaskStatus::from(current_status)
-                );
-                return;
-            }
-
-            if start_time.elapsed() > timeout {
-                panic!(
-                    "Timeout waiting for run signal after {:?}, current status is {:?}",
-                    timeout,
-                    StreamTaskStatus::from(status.load(Ordering::SeqCst))
-                );
-            }
-
-            match tokio::time::timeout(Duration::from_millis(50), &mut receiver).await {
-                Ok(_) => return,
-                Err(_) => continue,
-            }
+        match tokio::time::timeout(timeout, receiver).await {
+            Ok(_) => {}
+            Err(_) => panic!(
+                "Timeout waiting for run signal after {:?}, current status is {:?}",
+                timeout,
+                StreamTaskStatus::from(status.load(Ordering::SeqCst))
+            ),
         }
     }
 

@@ -220,7 +220,7 @@ impl OperatorTrait for AggregateOperator {
     async fn close(&mut self) -> AnyhowResult<()> {
         self.base.close().await
     }
-    
+
     fn operator_type(&self) -> OperatorType {
         self.base.operator_type()
     }

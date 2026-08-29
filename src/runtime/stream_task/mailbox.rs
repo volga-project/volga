@@ -68,12 +68,33 @@ impl MailboxFront {
         wm: WatermarkMessage,
     ) -> Option<WatermarkMessage> {
         let new_watermark = self.manager.merge_watermark(wm).await?;
-        StreamTask::set_watermark_lag_gauge(&self.vertex_id, new_watermark, self.labels.as_ref());
-        Some(WatermarkMessage::new(
+        Some(self.stamped_watermark(new_watermark, StreamTask::now_ms()))
+    }
+
+    fn stamped_watermark(&self, watermark_value: u64, ingest_timestamp: u64) -> WatermarkMessage {
+        StreamTask::set_watermark_lag_gauge(
+            &self.vertex_id,
+            watermark_value,
+            self.labels.as_ref(),
+        );
+        WatermarkMessage::new(
             self.vertex_id.as_ref().to_string(),
-            new_watermark,
-            Some(StreamTask::now_ms()),
-        ))
+            watermark_value,
+            Some(ingest_timestamp),
+        )
+    }
+
+    async fn merge_emits(
+        &mut self,
+        wms: Vec<WatermarkMessage>,
+    ) -> Vec<WatermarkMessage> {
+        let mut out = Vec::new();
+        for wm in wms {
+            if let Some(merged) = self.merge_assigned(wm).await {
+                out.push(merged);
+            }
+        }
+        out
     }
 
     pub(super) fn assign_on_data(&mut self, message: &Message) -> Option<WatermarkMessage> {
@@ -103,15 +124,11 @@ impl MailboxFront {
             return out;
         }
         if let Some(new_watermark) = self.manager.merge_watermark(watermark.clone()).await {
-            StreamTask::set_watermark_lag_gauge(
-                &self.vertex_id,
-                new_watermark,
-                self.labels.as_ref(),
-            );
-            let mut wm = watermark;
-            wm.watermark_value = new_watermark;
-            wm.metadata.upstream_vertex_id = Some(self.vertex_id.as_ref().to_string());
-            out.push(wm);
+            let stamp = watermark
+                .metadata
+                .ingest_timestamp
+                .unwrap_or_else(StreamTask::now_ms);
+            out.push(self.stamped_watermark(new_watermark, stamp));
         }
         out
     }
@@ -119,7 +136,7 @@ impl MailboxFront {
     pub(super) async fn on_aligned_barrier(
         &mut self,
         barrier: &CheckpointBarrierMessage,
-    ) -> Result<Option<(u64, Option<u64>, f64, Vec<WatermarkMessage>)>, String> {
+    ) -> Result<Option<(u64, Option<u64>, Vec<WatermarkMessage>)>, String> {
         let Some((checkpoint_id, inject_stamp, align_wait_ms)) =
             self.aligner.on_barrier(barrier, self.execution_attempt_id)?
         else {
@@ -132,27 +149,17 @@ impl MailboxFront {
             self.labels.as_ref(),
         );
         let wms = self.flush_pending().await;
-        Ok(Some((checkpoint_id, inject_stamp, align_wait_ms, wms)))
+        Ok(Some((checkpoint_id, inject_stamp, wms)))
     }
 
     pub(super) async fn on_timer(&mut self) -> Vec<WatermarkMessage> {
-        let mut out = Vec::new();
-        for wm in self.manager.try_emit_due() {
-            if let Some(merged) = self.merge_assigned(wm).await {
-                out.push(merged);
-            }
-        }
-        out
+        let due = self.manager.try_emit_due();
+        self.merge_emits(due).await
     }
 
     pub(super) async fn flush_pending(&mut self) -> Vec<WatermarkMessage> {
-        let mut out = Vec::new();
-        for wm in self.manager.flush_pending() {
-            if let Some(merged) = self.merge_assigned(wm).await {
-                out.push(merged);
-            }
-        }
-        out
+        let pending = self.manager.flush_pending();
+        self.merge_emits(pending).await
     }
 }
 

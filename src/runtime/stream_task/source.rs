@@ -18,22 +18,12 @@ use super::mailbox::sleep_until_deadline;
 use super::task::StreamTask;
 use super::watermark::WatermarkManager;
 
-pub(super) struct SourceLoopParams<'a> {
-    pub ctx: TaskCtx<'a>,
-    pub checkpoint_receiver: &'a mut mpsc::UnboundedReceiver<u64>,
-    pub source_watermark_manager: &'a mut WatermarkManager,
-}
-
 pub(super) async fn source_loop(
     source: &mut SourceOperator,
-    params: SourceLoopParams<'_>,
+    mut ctx: TaskCtx<'_>,
+    checkpoint_receiver: &mut mpsc::UnboundedReceiver<u64>,
+    source_watermark_manager: &mut WatermarkManager,
 ) -> Result<()> {
-    let SourceLoopParams {
-        mut ctx,
-        checkpoint_receiver,
-        source_watermark_manager,
-    } = params;
-
     let mut metrics_window_start = Instant::now();
     let checkpointable = operator_config_requires_checkpoint(source.operator_config());
 
@@ -45,11 +35,7 @@ pub(super) async fn source_loop(
                         "[CHECKPOINT] {} received trigger for checkpoint_id={}",
                         ctx.vertex_id, checkpoint_id
                     );
-                    emit_assigned(
-                        &mut ctx,
-                        source_watermark_manager.flush_pending(),
-                    )
-                    .await?;
+                    emit_assigned(&mut ctx, source_watermark_manager.flush_pending()).await?;
                     Some(CheckpointBarrierMessage::new(
                         ctx.vertex_id.as_ref().to_string(),
                         checkpoint_id,
@@ -65,18 +51,7 @@ pub(super) async fn source_loop(
         };
 
         if let Some(barrier) = injected_barrier {
-            on_checkpoint_barrier(
-                source,
-                ctx.master_client,
-                &barrier,
-                true,
-                &ctx.vertex_id,
-                ctx.runtime_context.task_index(),
-                ctx.execution_attempt_id,
-                ctx.metrics_labels,
-                None,
-            )
-            .await?;
+            on_checkpoint_barrier(source, &mut ctx, &barrier, true, None).await?;
             let mut out = ctx.output(true);
             out.emit(Message::CheckpointBarrier(barrier)).await?;
         } else {
@@ -119,11 +94,6 @@ pub(super) async fn source_loop(
                         {
                             watermark.watermark_value = new_watermark;
                         }
-                        StreamTask::set_watermark_lag_gauge(
-                            &ctx.vertex_id,
-                            watermark.watermark_value,
-                            ctx.metrics_labels,
-                        );
                     }
                     {
                         let mut out = ctx.output(true);
@@ -158,10 +128,7 @@ pub(super) async fn source_loop(
     Ok(())
 }
 
-async fn emit_assigned(
-    ctx: &mut TaskCtx<'_>,
-    wms: Vec<WatermarkMessage>,
-) -> Result<()> {
+async fn emit_assigned(ctx: &mut TaskCtx<'_>, wms: Vec<WatermarkMessage>) -> Result<()> {
     if wms.is_empty() {
         return Ok(());
     }

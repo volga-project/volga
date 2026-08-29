@@ -142,7 +142,7 @@ pub enum Operator {
 }
 
 impl Operator {
-    fn as_stream_mut(&mut self) -> &mut dyn StreamOperator {
+    pub(crate) fn as_stream_mut(&mut self) -> &mut dyn StreamOperator {
         match self {
             Operator::Map(op) => op,
             Operator::Join(op) => op,
@@ -154,6 +154,32 @@ impl Operator {
             Operator::Source(_) => {
                 panic!("Source operators do not implement StreamOperator; use fetch_next")
             }
+        }
+    }
+
+    fn as_trait_mut(&mut self) -> &mut dyn OperatorTrait {
+        match self {
+            Operator::Map(op) => op,
+            Operator::Join(op) => op,
+            Operator::Sink(op) => op,
+            Operator::Source(op) => op,
+            Operator::KeyBy(op) => op,
+            Operator::Aggregate(op) => op,
+            Operator::Window(op) => op,
+            Operator::WindowRequest(op) => op,
+        }
+    }
+
+    fn as_trait(&self) -> &dyn OperatorTrait {
+        match self {
+            Operator::Map(op) => op,
+            Operator::Join(op) => op,
+            Operator::Sink(op) => op,
+            Operator::Source(op) => op,
+            Operator::KeyBy(op) => op,
+            Operator::Aggregate(op) => op,
+            Operator::Window(op) => op,
+            Operator::WindowRequest(op) => op,
         }
     }
 }
@@ -188,100 +214,27 @@ impl fmt::Display for OperatorConfig {
 #[async_trait]
 impl OperatorTrait for Operator {
     async fn open(&mut self, context: &RuntimeContext) -> Result<()> {
-        match self {
-            Operator::Map(op) => op.open(context).await,
-            Operator::Join(op) => op.open(context).await,
-            Operator::Sink(op) => op.open(context).await,
-            Operator::Source(op) => op.open(context).await,
-            Operator::KeyBy(op) => op.open(context).await,
-            Operator::Aggregate(op) => op.open(context).await,
-            Operator::Window(op) => op.open(context).await,
-            Operator::WindowRequest(op) => op.open(context).await,
-        }
+        self.as_trait_mut().open(context).await
     }
 
     async fn close(&mut self) -> Result<()> {
-        match self {
-            Operator::Map(op) => op.close().await,
-            Operator::Join(op) => op.close().await,
-            Operator::Sink(op) => op.close().await,
-            Operator::Source(op) => op.close().await,
-            Operator::KeyBy(op) => op.close().await,
-            Operator::Aggregate(op) => op.close().await,
-            Operator::Window(op) => op.close().await,
-            Operator::WindowRequest(op) => op.close().await,
-        }
+        self.as_trait_mut().close().await
     }
 
     fn operator_type(&self) -> OperatorType {
-        match self {
-            Operator::Map(op) => op.operator_type(),
-            Operator::Join(op) => op.operator_type(),
-            Operator::Sink(op) => op.operator_type(),
-            Operator::Source(op) => op.operator_type(),
-            Operator::KeyBy(op) => op.operator_type(),
-            Operator::Aggregate(op) => op.operator_type(),
-            Operator::Window(op) => op.operator_type(),
-            Operator::WindowRequest(op) => op.operator_type(),
-        }
+        self.as_trait().operator_type()
     }
 
     fn operator_config(&self) -> &OperatorConfig {
-        match self {
-            Operator::Map(op) => op.operator_config(),
-            Operator::Join(op) => op.operator_config(),
-            Operator::Sink(op) => op.operator_config(),
-            Operator::Source(op) => op.operator_config(),
-            Operator::KeyBy(op) => op.operator_config(),
-            Operator::Aggregate(op) => op.operator_config(),
-            Operator::Window(op) => op.operator_config(),
-            Operator::WindowRequest(op) => op.operator_config(),
-        }
+        self.as_trait().operator_config()
     }
 
     async fn checkpoint(&mut self, checkpoint_id: u64) -> Result<SerializedCheckpoint> {
-        match self {
-            Operator::Map(op) => op.checkpoint(checkpoint_id).await,
-            Operator::Join(op) => op.checkpoint(checkpoint_id).await,
-            Operator::Sink(op) => op.checkpoint(checkpoint_id).await,
-            Operator::Source(op) => op.checkpoint(checkpoint_id).await,
-            Operator::KeyBy(op) => op.checkpoint(checkpoint_id).await,
-            Operator::Aggregate(op) => op.checkpoint(checkpoint_id).await,
-            Operator::Window(op) => op.checkpoint(checkpoint_id).await,
-            Operator::WindowRequest(op) => op.checkpoint(checkpoint_id).await,
-        }
+        self.as_trait_mut().checkpoint(checkpoint_id).await
     }
 
     async fn restore(&mut self, restore: SerializedRestore) -> Result<()> {
-        match self {
-            Operator::Map(op) => op.restore(restore).await,
-            Operator::Join(op) => op.restore(restore).await,
-            Operator::Sink(op) => op.restore(restore).await,
-            Operator::Source(op) => op.restore(restore).await,
-            Operator::KeyBy(op) => op.restore(restore).await,
-            Operator::Aggregate(op) => op.restore(restore).await,
-            Operator::Window(op) => op.restore(restore).await,
-            Operator::WindowRequest(op) => op.restore(restore).await,
-        }
-    }
-}
-
-#[async_trait]
-impl StreamOperator for Operator {
-    async fn process_data(&mut self, data: Vec<Message>, out: &mut dyn Output) -> Result<()> {
-        self.as_stream_mut().process_data(data, out).await
-    }
-
-    async fn handle_watermark(&mut self, wm: WatermarkMessage, out: &mut dyn Output) -> Result<()> {
-        self.as_stream_mut().handle_watermark(wm, out).await
-    }
-
-    async fn handle_barrier(
-        &mut self,
-        barrier: CheckpointBarrierMessage,
-        out: &mut dyn Output,
-    ) -> Result<()> {
-        self.as_stream_mut().handle_barrier(barrier, out).await
+        self.as_trait_mut().restore(restore).await
     }
 }
 
@@ -339,8 +292,8 @@ impl OperatorTrait for OperatorBase {
     }
 
     fn operator_type(&self) -> OperatorType {
-        get_operator_type_from_config(&self.operator_config)
-    }   
+        self.operator_config.role()
+    } 
 
     fn operator_config(&self) -> &OperatorConfig {
         &self.operator_config
@@ -360,19 +313,6 @@ pub fn create_operator(operator_config: OperatorConfig) -> Operator {
         OperatorConfig::WindowRequestConfig(_) => {
             Operator::WindowRequest(WindowRequestOperator::new(operator_config))
         }
-    }
-}
-
-pub fn get_operator_type_from_config(operator_config: &OperatorConfig) -> OperatorType {
-    match operator_config {
-        OperatorConfig::SourceConfig(_) => OperatorType::Source,
-        OperatorConfig::SinkConfig(_) => OperatorType::Sink,
-        OperatorConfig::MapConfig(_) |
-        OperatorConfig::JoinConfig(_) |
-        OperatorConfig::KeyByConfig(_) |
-        OperatorConfig::AggregateConfig(_) |
-        OperatorConfig::WindowConfig(_) |
-        OperatorConfig::WindowRequestConfig(_) => OperatorType::Processor,
     }
 }
 

@@ -1,5 +1,3 @@
-use std::fmt;
-
 use crate::{
     common::Message,
     runtime::{
@@ -12,16 +10,9 @@ use crate::{
 use anyhow::Result;
 use async_trait::async_trait;
 
+#[derive(Debug)]
 pub struct JoinOperator {
     base: OperatorBase,
-}
-
-impl fmt::Debug for JoinOperator {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("JoinOperator")
-            .field("base", &self.base)
-            .finish()
-    }
 }
 
 impl JoinOperator {
