@@ -9,7 +9,7 @@ use tokio::sync::Mutex;
 
 use crate::common::message::{Message, WatermarkMessage};
 
-use super::confg::{TimeHint, WatermarkAssignConfig};
+use crate::runtime::watermark::{TimeHint, WatermarkAssignConfig};
 
 #[derive(Debug, Default, Clone)]
 struct UpstreamWatermarkProgress {

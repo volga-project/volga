@@ -6,8 +6,7 @@ use crate::runtime::functions::map::MapFunction;
 use crate::runtime::health::WorkerHealth;
 use crate::runtime::operators::operator::OperatorConfig;
 use crate::runtime::runtime_context::RuntimeContext;
-use crate::runtime::stream_task::StreamTask;
-use crate::runtime::stream_task_actor::{StreamTaskActor, StreamTaskMessage};
+use super::{StreamTask, StreamTaskActor, StreamTaskMessage};
 use crate::transport::channel::Channel;
 use crate::transport::transport_backend_actor::{
     TransportBackendActor, TransportBackendActorMessage,

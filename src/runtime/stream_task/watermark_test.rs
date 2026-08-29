@@ -1,5 +1,3 @@
-use super::*;
-
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicU8};
 use std::sync::Arc;
@@ -14,9 +12,12 @@ use tokio::sync::Mutex;
 
 use crate::common::message::Message;
 use crate::runtime::observability::snapshot_types::StreamTaskStatus;
-use crate::runtime::stream_task::CheckpointAligner;
-use crate::runtime::stream_task_preprocess::create_preprocessed_input_stream;
+use crate::runtime::watermark::WatermarkAssignConfig;
 use crate::transport::transport_client::DataReaderControl;
+
+use super::{
+    create_preprocessed_input_stream, CheckpointAligner, WatermarkAssignerState,
+};
 
 #[test]
 fn assigner_tracks_per_upstream_independently() {

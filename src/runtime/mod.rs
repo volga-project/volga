@@ -4,9 +4,6 @@ pub mod consts;
 pub mod execution_graph;
 pub mod operators;
 pub mod stream_task;
-pub mod stream_task_preprocess;
-pub mod stream_task_run;
-pub mod stream_task_actor;
 pub mod worker;
 pub mod worker_config_utils;
 pub mod worker_server;
@@ -29,5 +26,3 @@ pub type TaskId = VertexId;
 
 pub mod partition;
 pub mod collector;
-#[cfg(test)]
-mod stream_task_actor_test;

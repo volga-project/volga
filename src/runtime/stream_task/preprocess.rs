@@ -11,11 +11,14 @@ use crate::common::message::{Message, WatermarkMessage};
 use crate::common::MAX_WATERMARK_VALUE;
 use crate::runtime::metrics::{MetricsLabels, METRIC_STREAM_TASK_CHECKPOINT_ALIGN_WAIT_MS};
 use crate::runtime::operators::operator::MessageStream;
-use crate::runtime::stream_task::{CheckpointAligner, StreamTask};
-use crate::runtime::watermark::{WatermarkAssignConfig, WatermarkManager};
+use crate::runtime::watermark::WatermarkAssignConfig;
+
+use super::checkpoint::CheckpointAligner;
+use super::task::StreamTask;
+use super::watermark::WatermarkManager;
 use crate::runtime::VertexId;
 
-pub(crate) async fn sleep_until_deadline(deadline: Option<Instant>) {
+pub(super) async fn sleep_until_deadline(deadline: Option<Instant>) {
     match deadline {
         Some(when) => {
             tokio::time::sleep_until(tokio::time::Instant::from_std(when)).await;
