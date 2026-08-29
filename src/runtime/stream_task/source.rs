@@ -24,6 +24,20 @@ pub(super) async fn source_loop(
     let checkpointable = operator_config_requires_checkpoint(source.operator_config());
 
     while ctx.is_running() {
+        if checkpointable {
+            if let Ok(checkpoint_id) = checkpoint_receiver.try_recv() {
+                inject_source_barrier(
+                    source,
+                    &mut ctx,
+                    source_watermark_manager,
+                    checkpoint_id,
+                )
+                .await?;
+                ctx.report_time_metrics(&mut metrics_window_start);
+                continue;
+            }
+        }
+
         let deadline = if source_watermark_manager.assigner_enabled() {
             source_watermark_manager.next_emit_deadline()
         } else {
@@ -32,35 +46,10 @@ pub(super) async fn source_loop(
 
         tokio::select! {
             biased;
-            checkpoint_id = checkpoint_receiver.recv(), if checkpointable => {
-                let Some(checkpoint_id) = checkpoint_id else {
-                    continue;
-                };
-                inject_source_barrier(
-                    source,
-                    &mut ctx,
-                    source_watermark_manager,
-                    checkpoint_id,
-                )
-                .await?;
-            }
             res = source.fetch_next() => {
                 match res {
                     FetchResult::Interrupted => {
-                        if source.is_stopped() {
-                            continue;
-                        }
-                        if checkpointable {
-                            if let Some(checkpoint_id) = checkpoint_receiver.recv().await {
-                                inject_source_barrier(
-                                    source,
-                                    &mut ctx,
-                                    source_watermark_manager,
-                                    checkpoint_id,
-                                )
-                                .await?;
-                            }
-                        }
+                        continue;
                     }
                     FetchResult::Data(mut message) => {
                         if let Message::Watermark(wm) = message {
