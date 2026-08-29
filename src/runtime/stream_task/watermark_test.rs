@@ -342,12 +342,13 @@ async fn input_progress_timer_emits_held_watermark() {
 
     let first = progress.assign_and_merge(&ts_up("u0", 100)).await.unwrap();
     assert_eq!(first.watermark_value, 100);
-    assert!(progress.assign_on_data(&ts_up("u0", 150)).is_none());
+    // Event time moved by less than `interval`, so only the wall timer should emit.
+    assert!(progress.assign_on_data(&ts_up("u0", 120)).is_none());
 
     tokio::time::sleep(interval + Duration::from_millis(10)).await;
     let due = progress.on_timer().await;
     assert_eq!(due.len(), 1);
-    assert_eq!(due[0].watermark_value, 150);
+    assert_eq!(due[0].watermark_value, 120);
 }
 
 #[tokio::test]
