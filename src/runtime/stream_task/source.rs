@@ -14,7 +14,7 @@ use crate::runtime::master::server::master_service::master_service_client::Maste
 use crate::runtime::metrics::MetricsLabels;
 use crate::runtime::observability::StreamTaskStatus;
 use crate::runtime::operators::operator::{
-    operator_config_requires_checkpoint, Output, SourceOperator as SourceFetch,
+    operator_config_requires_checkpoint, OperatorTrait, Output, SourceOperator as SourceFetch,
 };
 use crate::runtime::operators::source::source_operator::SourceOperator;
 use crate::runtime::runtime_context::RuntimeContext;
@@ -24,7 +24,7 @@ use super::checkpoint::on_checkpoint_barrier;
 use super::metrics::TaskTimeMetrics;
 use super::output::TransportOutput;
 use super::preprocess::sleep_until_deadline;
-use super::task::{timestamp, StreamTask};
+use super::task::StreamTask;
 use super::watermark::WatermarkManager;
 
 pub(super) struct SourceLoopParams<'a> {

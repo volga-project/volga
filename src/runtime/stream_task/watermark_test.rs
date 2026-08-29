@@ -15,9 +15,9 @@ use crate::runtime::observability::snapshot_types::StreamTaskStatus;
 use crate::runtime::watermark::WatermarkAssignConfig;
 use crate::transport::transport_client::DataReaderControl;
 
-use super::{
-    create_preprocessed_input_stream, CheckpointAligner, WatermarkAssignerState,
-};
+use super::checkpoint::CheckpointAligner;
+use super::preprocess::create_preprocessed_input_stream;
+use super::watermark::WatermarkAssignerState;
 
 #[test]
 fn assigner_tracks_per_upstream_independently() {
