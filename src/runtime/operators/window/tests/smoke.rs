@@ -6,12 +6,12 @@ use crate::common::message::Message;
 use crate::common::MAX_WATERMARK_VALUE;
 use crate::runtime::operators::operator::{StreamOperator, VecOutput};
 use crate::runtime::operators::window::operator::WindowOperatorConfig;
+use crate::runtime::operators::window::{
+    TileConfig, TimeGranularity, TASK_METADATA_ROWS_ACCEPTED, TASK_METADATA_ROWS_DROPPED_LATE,
+};
 use crate::test_utils::window::harness::{
     assert_window_values, batch, keyed_message, run_wo, watermark_message, window_exec_from_sql,
     Harness, WoWroHarness,
-};
-use crate::runtime::operators::window::{
-    TileConfig, TimeGranularity, TASK_METADATA_ROWS_ACCEPTED, TASK_METADATA_ROWS_DROPPED_LATE,
 };
 
 #[tokio::test]
@@ -187,5 +187,75 @@ WINDOW w AS (
             vec![ScalarValue::Float64(Some(3.0))],
         ],
         "both data messages ingested before the watermark",
+    );
+}
+
+#[tokio::test]
+async fn process_due_emits_pages_before_watermark() {
+    let sql = r#"SELECT timestamp, value, partition_key, SUM(value) OVER w as sum_val
+FROM test_table
+WINDOW w AS (
+  PARTITION BY partition_key
+  ORDER BY timestamp
+  RANGE BETWEEN INTERVAL '5000' MILLISECOND PRECEDING AND CURRENT ROW
+)"#;
+    let n = 300i64;
+    let ts: Vec<i64> = (1..=n).map(|i| i * 10).collect();
+    let vals: Vec<f64> = (1..=n).map(|i| i as f64).collect();
+    let keys: Vec<&str> = vec!["A"; n as usize];
+    let exec = window_exec_from_sql(sql).await;
+    let mut h = Harness::new(WindowOperatorConfig::new(exec)).await;
+    h.ingest(batch(ts, vals, keys), "A").await;
+    assert_eq!(
+        h.task_metadata.get(TASK_METADATA_ROWS_ACCEPTED).as_deref(),
+        Some("300")
+    );
+
+    let mut out = VecOutput::default();
+    h.op.handle_watermark(
+        match watermark_message(3_000) {
+            Message::Watermark(w) => w,
+            other => panic!("expected watermark, got {other:?}"),
+        },
+        &mut out,
+    )
+    .await
+    .expect("watermark");
+
+    let mut pages = 0usize;
+    let mut rows = 0usize;
+    let mut saw_wm = false;
+    for msg in &out.messages {
+        match msg {
+            Message::Regular(base) => {
+                assert!(!saw_wm, "due pages must emit before the watermark");
+                pages += 1;
+                rows += base.record_batch.num_rows();
+            }
+            Message::Watermark(w) => {
+                assert_eq!(w.watermark_value, 3_000);
+                saw_wm = true;
+            }
+            other => panic!("expected due page or watermark, got {other:?}"),
+        }
+    }
+    assert!(saw_wm);
+    assert!(
+        pages >= 2,
+        "300 triggers should span more than one due page"
+    );
+    assert_eq!(rows, 300);
+
+    let mut extra = VecOutput::default();
+    h.op.process_data(
+        vec![keyed_message(batch(vec![4_000], vec![1.0], vec!["A"]), "A")],
+        &mut extra,
+    )
+    .await
+    .expect("ingest after watermark");
+    assert!(extra.messages.is_empty());
+    assert_eq!(
+        h.task_metadata.get(TASK_METADATA_ROWS_ACCEPTED).as_deref(),
+        Some("301")
     );
 }

@@ -2,28 +2,30 @@ use async_trait::async_trait;
 use futures::stream::Peekable;
 use futures::{FutureExt, Stream, StreamExt};
 
+use crate::common::message::{CheckpointBarrierMessage, Message, WatermarkMessage};
 use crate::runtime::checkpoint::{SerializedCheckpoint, SerializedRestore};
 use crate::runtime::functions::join::join_function::JoinFunction;
-use crate::runtime::operators::aggregate::aggregate_operator::{AggregateConfig, AggregateOperator};
+use crate::runtime::functions::source::FetchResult;
+use crate::runtime::functions::{
+    function_trait::FunctionTrait, key_by::KeyByFunction, map::MapFunction,
+};
+use crate::runtime::operators::aggregate::aggregate_operator::{
+    AggregateConfig, AggregateOperator,
+};
 use crate::runtime::operators::join::join_operator::JoinOperator;
 use crate::runtime::operators::key_by::key_by_operator::KeyByOperator;
 use crate::runtime::operators::map::map_operator::MapOperator;
 use crate::runtime::operators::sink::sink_operator::{SinkConfig, SinkOperator};
-use crate::runtime::operators::source::source_operator::{SourceConfig, SourceOperator as SourceOp};
+use crate::runtime::operators::source::source_operator::{
+    SourceConfig, SourceOperator as SourceOp,
+};
 use crate::runtime::operators::window::operator::{WindowOperator, WindowOperatorConfig};
 use crate::runtime::operators::window::request::WindowRequestOperatorConfig;
 use crate::runtime::operators::window::WindowRequestOperator;
 use crate::runtime::runtime_context::RuntimeContext;
-use crate::runtime::functions::source::FetchResult;
-use crate::common::message::{CheckpointBarrierMessage, Message, WatermarkMessage};
 use anyhow::Result;
 use std::fmt;
 use std::pin::Pin;
-use crate::runtime::functions::{
-    function_trait::FunctionTrait,
-    map::MapFunction,
-    key_by::{KeyByFunction},
-};
 
 pub type MessageStream = Pin<Box<dyn Stream<Item = Message> + Send + Sync>>;
 
@@ -37,9 +39,6 @@ pub enum OperatorType {
     Sink,
     Processor,
 }
-
-/// Cap for one processor ingest (`drain_ready_after`).
-pub(crate) const INGEST_MAX_RECORDS: usize = 64 * 1024;
 
 #[async_trait]
 pub trait Output: Send {
@@ -239,7 +238,10 @@ impl OperatorBase {
         }
     }
 
-    pub fn new_with_function<F: FunctionTrait + 'static>(function: F, operator_config: OperatorConfig) -> Self {
+    pub fn new_with_function<F: FunctionTrait + 'static>(
+        function: F,
+        operator_config: OperatorConfig,
+    ) -> Self {
         Self {
             runtime_context: None,
             function: Some(Box::new(function)),
@@ -248,7 +250,8 @@ impl OperatorBase {
     }
 
     pub fn get_function_mut<T: 'static>(&mut self) -> Option<&mut T> {
-        self.function.as_mut()
+        self.function
+            .as_mut()
             .and_then(|f| f.as_any_mut().downcast_mut::<T>())
     }
 
@@ -264,7 +267,7 @@ impl OperatorTrait for OperatorBase {
         if let Some(function) = &mut self.function {
             function.open(context).await?;
         }
-        
+
         Ok(())
     }
 
@@ -272,26 +275,27 @@ impl OperatorTrait for OperatorBase {
         if let Some(function) = &mut self.function {
             function.close().await?;
         }
-        
+
         Ok(())
     }
 
     fn operator_type(&self) -> OperatorType {
         self.operator_config.role()
-    } 
+    }
 
     fn operator_config(&self) -> &OperatorConfig {
         &self.operator_config
     }
 }
 
-
 pub fn create_operator(operator_config: OperatorConfig) -> Operator {
     match operator_config {
         OperatorConfig::SourceConfig(_) => {
             Operator::Source(Box::new(SourceOp::new(operator_config)))
         }
-        OperatorConfig::MapConfig(_) => Operator::Stream(Box::new(MapOperator::new(operator_config))),
+        OperatorConfig::MapConfig(_) => {
+            Operator::Stream(Box::new(MapOperator::new(operator_config)))
+        }
         OperatorConfig::JoinConfig(_) => {
             Operator::Stream(Box::new(JoinOperator::new(operator_config)))
         }

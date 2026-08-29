@@ -47,14 +47,24 @@ impl WatermarkAssignerState {
             .saturating_sub(out_of_orderness_ms)
     }
 
-    fn is_due(progress: &UpstreamWatermarkProgress, interval: Duration, now: Instant) -> bool {
+    /// Emit when event time moved by `interval` since last emit, or wall clock
+    /// moved by the same interval (quiet source with an unpublished candidate).
+    fn is_due(
+        progress: &UpstreamWatermarkProgress,
+        interval: Duration,
+        now: Instant,
+        candidate: u64,
+    ) -> bool {
         if interval.is_zero() {
             return true;
         }
-        match progress.last_emit_at {
-            None => true,
-            Some(t) => now.saturating_duration_since(t) >= interval,
-        }
+        let Some(last_emit_at) = progress.last_emit_at else {
+            return true;
+        };
+        let interval_ms = interval.as_millis() as u64;
+        let event_due = candidate.saturating_sub(progress.last_emitted_wm_ms) >= interval_ms;
+        let wall_due = now.saturating_duration_since(last_emit_at) >= interval;
+        event_due || wall_due
     }
 
     fn emit(
@@ -81,7 +91,8 @@ impl WatermarkAssignerState {
         force: bool,
     ) -> Option<WatermarkMessage> {
         let candidate = Self::candidate(progress, out_of_orderness_ms);
-        if candidate > progress.last_emitted_wm_ms && (force || Self::is_due(progress, interval, now))
+        if candidate > progress.last_emitted_wm_ms
+            && (force || Self::is_due(progress, interval, now, candidate))
         {
             Some(Self::emit(progress, upstream_vertex_id, candidate, now))
         } else {
@@ -102,13 +113,16 @@ impl WatermarkAssignerState {
     }
 
     fn resolve_ts_column_index(&self, batch: &RecordBatch) -> usize {
-        batch.schema().index_of(&self.ts_column_name).unwrap_or_else(|_| {
-            panic!(
-                "WatermarkAssign failed: missing column '{}' in schema {:?}",
-                self.ts_column_name,
-                batch.schema()
-            )
-        })
+        batch
+            .schema()
+            .index_of(&self.ts_column_name)
+            .unwrap_or_else(|_| {
+                panic!(
+                    "WatermarkAssign failed: missing column '{}' in schema {:?}",
+                    self.ts_column_name,
+                    batch.schema()
+                )
+            })
     }
 
     fn batch_max_ts_ms(&self, batch: &RecordBatch, ts_column_index: usize) -> Option<u64> {
@@ -229,7 +243,9 @@ impl WatermarkManager {
         upstream_watermarks: Arc<Mutex<HashMap<String, u64>>>,
         current_watermark: Arc<AtomicU64>,
     ) -> Self {
-        let idle_timeout_ms = watermark_assign.as_ref().and_then(|cfg| cfg.idle_timeout_ms);
+        let idle_timeout_ms = watermark_assign
+            .as_ref()
+            .and_then(|cfg| cfg.idle_timeout_ms);
         let assigner = watermark_assign.map(WatermarkAssignerState::new);
         let last_seen_processing_time = upstream_vertices
             .iter()
@@ -249,7 +265,11 @@ impl WatermarkManager {
         self.assigner.is_some()
     }
 
-    pub fn on_data_message(&mut self, upstream_vertex_id: &str, message: &Message) -> Option<WatermarkMessage> {
+    pub fn on_data_message(
+        &mut self,
+        upstream_vertex_id: &str,
+        message: &Message,
+    ) -> Option<WatermarkMessage> {
         let now = Instant::now();
         self.last_seen_processing_time
             .insert(upstream_vertex_id.to_string(), now);
@@ -337,7 +357,12 @@ pub async fn advance_watermark_min(
         .metadata
         .upstream_vertex_id
         .clone()
-        .unwrap_or_else(|| panic!("Watermark must have upstream_vertex_id set: {:?}", watermark));
+        .unwrap_or_else(|| {
+            panic!(
+                "Watermark must have upstream_vertex_id set: {:?}",
+                watermark
+            )
+        });
 
     let mut upstream_wms = upstream_watermarks.lock().await;
     if let Some(&prev) = upstream_wms.get(&upstream_id) {
@@ -372,4 +397,3 @@ pub async fn advance_watermark_min(
         None
     }
 }
-

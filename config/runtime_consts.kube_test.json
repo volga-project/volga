@@ -22,5 +22,9 @@
   "worker.register_connect_timeout": "3s",
   "worker.register_rpc_timeout": "3s",
   "transport.tcp_connect_max_retries": 10,
-  "transport.tcp_connect_retry_delay": "1s"
+  "transport.tcp_connect_retry_delay": "1s",
+  "window.ingest_max_records": 65536,
+  "window.partition_io_concurrency": 32,
+  "window.due_page_size": 256,
+  "window.process_due_concurrency": 16
 }

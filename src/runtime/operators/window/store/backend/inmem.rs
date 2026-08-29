@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use std::any::Any;
 
+use crate::runtime::consts::{runtime_consts, WINDOW_DUE_PAGE_SIZE};
 use crate::runtime::metrics::MetricsLabels;
 use crate::runtime::operators::window::metrics;
 use crate::runtime::operators::window::model::{Cursor, RawRun, TileRun, WindowTrigger};
@@ -371,7 +372,7 @@ impl WindowOperatorStore for InMemWindowStore {
         after: Option<Cursor>,
         through: Cursor,
     ) -> DueWorkStream<'a> {
-        const PAGE_SIZE: usize = 256;
+        let page_size = runtime_consts().u64(WINDOW_DUE_PAGE_SIZE).max(1) as usize;
 
         let store = self.clone();
         let namespace = namespace.bytes.clone();
@@ -392,7 +393,7 @@ impl WindowOperatorStore for InMemWindowStore {
                                 .as_ref()
                                 .map_or(true, |resume_after| *trigger > resume_after)
                         })
-                        .take(PAGE_SIZE)
+                        .take(page_size)
                         .cloned()
                         .collect::<Vec<_>>();
                     let Some(next) = selected.last().cloned() else {
@@ -595,15 +596,16 @@ impl OperatorStore for InMemWindowStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::consts::{runtime_consts, WINDOW_DUE_PAGE_SIZE};
     use futures::TryStreamExt;
 
-    use crate::test_utils::window_aggs as test_utils;
     use crate::runtime::operators::window::model::{
         KeyEvaluationState, TileRun, TimeGranularity, WindowTiles, WindowTriggerKind,
     };
     use crate::runtime::operators::window::state::WindowOperatorState;
     use crate::runtime::operators::window::store::{data::RowIdx, StateVersion};
     use crate::runtime::state::OperatorStore;
+    use crate::test_utils::window_aggs as test_utils;
 
     fn partition() -> PartitionKey {
         PartitionKey {
@@ -654,7 +656,12 @@ mod tests {
     }
 
     fn assert_packed(batches: &[RecordBatch], rows: usize) {
-        assert_eq!(batches.len(), 1, "expected one packed batch, got {}", batches.len());
+        assert_eq!(
+            batches.len(),
+            1,
+            "expected one packed batch, got {}",
+            batches.len()
+        );
         assert_eq!(batches[0].num_rows(), rows);
     }
 
@@ -998,7 +1005,10 @@ mod tests {
             Cursor::new(299, u64::MAX),
         );
         let first = due.try_next().await.unwrap().unwrap();
-        assert_eq!(first[0].triggers.len(), 256);
+        assert_eq!(
+            first[0].triggers.len(),
+            runtime_consts().u64(WINDOW_DUE_PAGE_SIZE) as usize
+        );
         let second = due.try_next().await.unwrap().unwrap();
         assert_eq!(second[0].triggers.len(), 34);
         assert!(due.try_next().await.unwrap().is_none());
@@ -1101,10 +1111,7 @@ mod tests {
         let partition = partition();
         let namespace = StateNamespace::new(&partition.namespace);
         let mut accumulators = BTreeMap::new();
-        accumulators.insert(
-            7,
-            vec![datafusion::scalar::ScalarValue::Float64(Some(3.0))],
-        );
+        accumulators.insert(7, vec![datafusion::scalar::ScalarValue::Float64(Some(3.0))]);
         let meta = KeyState {
             next_seq: 3,
             evaluation: Some(KeyEvaluationState {

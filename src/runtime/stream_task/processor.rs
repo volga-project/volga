@@ -4,9 +4,8 @@ use anyhow::Result;
 use futures::StreamExt;
 
 use crate::common::message::Message;
-use crate::runtime::operators::operator::{
-    drain_ready_after, MessageStream, StreamOperator, INGEST_MAX_RECORDS,
-};
+use crate::runtime::consts::{runtime_consts, WINDOW_INGEST_MAX_RECORDS};
+use crate::runtime::operators::operator::{drain_ready_after, MessageStream, StreamOperator};
 use crate::transport::transport_client::DataReaderControl;
 
 use super::checkpoint::on_checkpoint_barrier;
@@ -93,7 +92,12 @@ pub(super) async fn processor_loop(
                             assigned.push(wm);
                         }
                         let batch =
-                            drain_ready_after(first, &mut mailbox, INGEST_MAX_RECORDS).await;
+                            drain_ready_after(
+                                first,
+                                &mut mailbox,
+                                runtime_consts().u64(WINDOW_INGEST_MAX_RECORDS).max(1) as usize,
+                            )
+                            .await;
                         for extra in &batch[1..] {
                             ctx.record_recv(extra);
                             if let Some(wm) = progress.assign_and_merge(extra).await {

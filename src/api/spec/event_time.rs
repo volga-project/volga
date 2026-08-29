@@ -22,9 +22,8 @@ pub struct WatermarkSpec {
     /// `None` keeps the runtime assigner default (`WatermarkAssignConfig::DEFAULT_IDLE_TIMEOUT_MS`).
     #[serde(default)]
     pub idle_timeout_ms: Option<u64>,
-    /// Processing-time interval for coalescing watermark emits (ms).
-    /// Unset uses the runtime default (200ms). Batch does not assign watermarks
-    /// (EOF flush only).
+    /// Event-time emit period and wall-clock cap (ms). Unset uses the runtime
+    /// default (200ms). Batch does not assign watermarks (EOF flush only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub emit_interval_ms: Option<u64>,
 }

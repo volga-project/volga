@@ -5,7 +5,8 @@ pub struct WatermarkAssignConfig {
     pub out_of_orderness_ms: u64,
     pub time_hint: TimeHint,
     pub idle_timeout_ms: Option<u64>,
-    /// Processing-time coalesce. `Duration::ZERO` emits on every advance (tests only).
+    /// Event-time period and wall-clock cap. `Duration::ZERO` emits on every
+    /// candidate advance (tests only).
     pub emit_interval: Duration,
 }
 

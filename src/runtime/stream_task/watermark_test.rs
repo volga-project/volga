@@ -115,11 +115,7 @@ fn coalesce_holds_until_interval() {
         .unwrap();
     assert_eq!(first.watermark_value, 100);
 
-    let held = assigner.on_data_message_at(
-        "u",
-        &ts_message(150),
-        t0 + Duration::from_millis(10),
-    );
+    let held = assigner.on_data_message_at("u", &ts_message(150), t0 + Duration::from_millis(10));
     assert!(held.is_none());
     assert!(assigner
         .try_emit_due(t0 + Duration::from_millis(10))
@@ -172,6 +168,22 @@ fn data_path_emits_when_interval_elapsed() {
         .on_data_message_at("u", &ts_message(300), t0 + Duration::from_millis(200))
         .unwrap();
     assert_eq!(late.watermark_value, 300);
+}
+
+#[test]
+fn event_time_interval_emits_without_waiting_for_wall() {
+    let mut assigner = assigner_with_interval(Duration::from_millis(200));
+    let t0 = Instant::now();
+    assigner
+        .on_data_message_at("u", &ts_message(100), t0)
+        .unwrap();
+    assert!(assigner
+        .on_data_message_at("u", &ts_message(299), t0 + Duration::from_millis(1))
+        .is_none());
+    let crossed = assigner
+        .on_data_message_at("u", &ts_message(300), t0 + Duration::from_millis(1))
+        .unwrap();
+    assert_eq!(crossed.watermark_value, 300);
 }
 
 #[tokio::test]
@@ -249,10 +261,7 @@ async fn input_progress_is_per_upstream_and_min_merged() {
 async fn input_progress_preserves_upstream_watermark_extras() {
     let mut progress = InputProgress::for_test(None, &["u0"]);
     let mut wm = WatermarkMessage::new("u0".to_string(), 100, Some(1));
-    wm.metadata.extras = Some(HashMap::from([(
-        "trace".to_string(),
-        "u0".to_string(),
-    )]));
+    wm.metadata.extras = Some(HashMap::from([("trace".to_string(), "u0".to_string())]));
     let out = progress.on_upstream_watermark(wm).await;
     assert_eq!(out.len(), 1);
     assert_eq!(out[0].watermark_value, 100);

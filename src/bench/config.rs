@@ -21,7 +21,7 @@ use crate::runtime::operators::window::tile::TileConfig;
 use crate::test_utils::harness::{PipelineLaunchSpec, RuntimeEnv};
 
 use super::dump::extra_prom_queries;
-use super::spec::{OracleConfig, Scenario, BenchSpec};
+use super::spec::{BenchSpec, OracleConfig, Scenario};
 
 const DEFAULT_PARALLELISM: usize = 4;
 const DEFAULT_SLOTS_PER_NODE: usize = 2;
@@ -96,7 +96,7 @@ pub struct DatagenFile {
 pub struct WatermarkFile {
     pub out_of_orderness_ms: Option<u64>,
     pub idle_timeout_ms: Option<u64>,
-    /// Processing-time coalesce. Omit → planner default (200ms).
+    /// Event-time emit period and wall-clock cap. Omit → planner default (200ms).
     pub emit_interval_ms: Option<u64>,
 }
 
@@ -195,9 +195,16 @@ pub fn apply_file(file: &BenchFile) -> Result<BenchSpec> {
 
 fn compile_launch(launch: Option<&LaunchFile>) -> Result<PipelineLaunchSpec> {
     let launch = launch.cloned().unwrap_or_default();
-    let parallelism = nonzero_usize(launch.parallelism, DEFAULT_PARALLELISM, "launch.parallelism")?;
-    let slots_per_node =
-        nonzero_usize(launch.slots_per_node, DEFAULT_SLOTS_PER_NODE, "launch.slots_per_node")?;
+    let parallelism = nonzero_usize(
+        launch.parallelism,
+        DEFAULT_PARALLELISM,
+        "launch.parallelism",
+    )?;
+    let slots_per_node = nonzero_usize(
+        launch.slots_per_node,
+        DEFAULT_SLOTS_PER_NODE,
+        "launch.slots_per_node",
+    )?;
     if parallelism % slots_per_node != 0 {
         bail!(
             "launch.parallelism {parallelism} is not divisible by slots_per_node {slots_per_node}"
@@ -259,10 +266,8 @@ fn compile_launch(launch: Option<&LaunchFile>) -> Result<PipelineLaunchSpec> {
         .with_checkpoint(Some(interval_ms), Some(timeout_ms), Some(retention))
         .build();
 
-    Ok(
-        PipelineLaunchSpec::new(pipeline, worker_count, None)
-            .with_runtime_consts_profile(RuntimeConstsProfile::Prod),
-    )
+    Ok(PipelineLaunchSpec::new(pipeline, worker_count, None)
+        .with_runtime_consts_profile(RuntimeConstsProfile::Prod))
 }
 
 fn checkpoint_from_file(file: Option<&CheckpointFile>) -> Result<(u64, u64, u64)> {
@@ -329,10 +334,7 @@ fn datagen_from_file(file: Option<&DatagenFile>, parallelism: usize) -> Result<D
             step_ms: step_ms.max(1),
         },
     );
-    fields.insert(
-        "key".to_string(),
-        FieldGenerator::Key { num_unique },
-    );
+    fields.insert("key".to_string(), FieldGenerator::Key { num_unique });
     fields.insert(
         "value".to_string(),
         FieldGenerator::Values {
@@ -564,22 +566,25 @@ extra_prom_queries:
         );
         assert_eq!(spec.launch.worker_count, 4);
         assert_eq!(spec.launch.pipeline.parallelism, 8);
-        assert_eq!(spec.launch.pipeline.state.checkpoint.interval_ms, Some(30_000));
+        assert_eq!(
+            spec.launch.pipeline.state.checkpoint.interval_ms,
+            Some(30_000)
+        );
         assert!(matches!(spec.launch.pipeline.sink, Some(SinkSpec::Count)));
         assert_eq!(
             spec.launch.pipeline.sql.as_deref(),
             Some("SELECT timestamp, key, value FROM datagen_source")
         );
         assert_eq!(
+            spec.launch.pipeline.event_time.watermark.emit_interval_ms,
+            Some(200)
+        );
+        assert_eq!(
             spec.launch
                 .pipeline
                 .event_time
                 .watermark
-                .emit_interval_ms,
-            Some(200)
-        );
-        assert_eq!(
-            spec.launch.pipeline.event_time.watermark.out_of_orderness_ms,
+                .out_of_orderness_ms,
             0
         );
         assert_eq!(spec.oracles.lag_p99, Duration::from_secs(15));
