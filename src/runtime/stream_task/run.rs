@@ -25,6 +25,7 @@ use super::checkpoint::CheckpointAligner;
 use super::ctx::TaskCtx;
 use super::metrics::TaskTimeMetrics;
 use super::processor::processor_loop;
+use super::progress::InputProgress;
 use super::source::source_loop;
 use super::task::{timestamp, StreamTask};
 use super::watermark::WatermarkManager;
@@ -224,18 +225,21 @@ pub(super) async fn run(params: RunParams) -> Result<()> {
             let _rx_queue_ticker = reader.spawn_rx_queue_ticker(metrics_labels.clone());
             let (input_stream, reader_control) = reader.message_stream_with_control();
             let aligner = CheckpointAligner::new(&upstream_vertices, reader_control.clone());
-            let manager = WatermarkManager::new(
+            let progress = InputProgress::new(
+                vertex_id.clone(),
                 watermark_assign,
                 upstream_vertices.clone(),
                 upstream_watermarks.clone(),
                 current_watermark.clone(),
+                aligner,
+                metrics_labels.clone(),
+                execution_attempt_id,
             );
             processor_loop(
                 stream.as_mut(),
                 ctx,
                 input_stream,
-                manager,
-                aligner,
+                progress,
                 reader_control,
             )
             .await?;

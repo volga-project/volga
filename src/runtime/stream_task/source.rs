@@ -11,7 +11,7 @@ use crate::runtime::operators::operator::{
 
 use super::checkpoint::on_checkpoint_barrier;
 use super::ctx::TaskCtx;
-use super::mailbox::sleep_until_deadline;
+use super::progress::sleep_until_deadline;
 use super::task::StreamTask;
 use super::watermark::WatermarkManager;
 

@@ -1,23 +1,16 @@
 use std::collections::HashMap;
-use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use arrow::array::{ArrayRef, Int64Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
-use tokio::sync::Mutex;
 
 use crate::common::message::{CheckpointBarrierMessage, Message, WatermarkMessage};
 use crate::runtime::watermark::{TimeHint, WatermarkAssignConfig};
-use crate::runtime::VertexId;
 
-use super::checkpoint::CheckpointAligner;
-use super::mailbox::{
-    assign_and_merge, assign_on_data, empty_aligner, on_aligned_barrier, on_timer,
-    on_upstream_watermark,
-};
-use super::watermark::{WatermarkAssignerState, WatermarkManager};
+use super::progress::InputProgress;
+use super::watermark::WatermarkAssignerState;
 
 #[test]
 fn assigner_tracks_per_upstream_independently() {
@@ -97,62 +90,6 @@ fn column_assign(idle_timeout_ms: Option<u64>) -> WatermarkAssignConfig {
     );
     cfg.idle_timeout_ms = idle_timeout_ms;
     cfg
-}
-
-struct TestMailbox {
-    vertex_id: VertexId,
-    manager: WatermarkManager,
-    aligner: CheckpointAligner,
-}
-
-impl TestMailbox {
-    fn new(assign: Option<WatermarkAssignConfig>, upstreams: &[&str]) -> Self {
-        let ups: Vec<String> = upstreams.iter().map(|s| s.to_string()).collect();
-        Self {
-            vertex_id: Arc::<str>::from("v0"),
-            manager: WatermarkManager::new(
-                assign,
-                ups.clone(),
-                Arc::new(Mutex::new(HashMap::new())),
-                Arc::new(AtomicU64::new(0)),
-            ),
-            aligner: empty_aligner(&ups),
-        }
-    }
-
-    async fn assign_and_merge(&mut self, message: &Message) -> Option<WatermarkMessage> {
-        assign_and_merge(&mut self.manager, self.vertex_id.as_ref(), message).await
-    }
-
-    fn assign_on_data(&mut self, message: &Message) -> Option<WatermarkMessage> {
-        assign_on_data(&mut self.manager, self.vertex_id.as_ref(), message)
-    }
-
-    async fn on_upstream_watermark(
-        &mut self,
-        watermark: WatermarkMessage,
-    ) -> Vec<WatermarkMessage> {
-        on_upstream_watermark(&mut self.manager, self.vertex_id.as_ref(), watermark).await
-    }
-
-    async fn on_timer(&mut self) -> Vec<WatermarkMessage> {
-        on_timer(&mut self.manager, self.vertex_id.as_ref()).await
-    }
-
-    async fn on_aligned_barrier(
-        &mut self,
-        barrier: &CheckpointBarrierMessage,
-    ) -> Result<Option<(u64, Option<u64>, Vec<WatermarkMessage>)>, String> {
-        on_aligned_barrier(
-            &mut self.aligner,
-            &mut self.manager,
-            &self.vertex_id,
-            None,
-            0,
-            barrier,
-        )
-        .await
-    }
 }
 
 #[test]
@@ -238,7 +175,7 @@ fn data_path_emits_when_interval_elapsed() {
 }
 
 #[tokio::test]
-async fn mailbox_front_assigns_watermarks_after_data() {
+async fn input_progress_assigns_watermarks_after_data() {
     let schema = Arc::new(Schema::new(vec![
         Field::new("k", DataType::Utf8, false),
         Field::new("ts_ms", DataType::Int64, false),
@@ -260,12 +197,12 @@ async fn mailbox_front_assigns_watermarks_after_data() {
     )
     .unwrap();
 
-    let mut front = TestMailbox::new(Some(column_assign(None)), &["u0"]);
-    let wm1 = front
+    let mut progress = InputProgress::for_test(Some(column_assign(None)), &["u0"]);
+    let wm1 = progress
         .assign_and_merge(&Message::new(Some("u0".to_string()), b1, None, None))
         .await
         .unwrap();
-    let wm2 = front
+    let wm2 = progress
         .assign_and_merge(&Message::new(Some("u0".to_string()), b2, None, None))
         .await
         .unwrap();
@@ -274,7 +211,7 @@ async fn mailbox_front_assigns_watermarks_after_data() {
 }
 
 #[tokio::test]
-async fn mailbox_front_is_per_upstream_and_min_merged() {
+async fn input_progress_is_per_upstream_and_min_merged() {
     let schema = Arc::new(Schema::new(vec![
         Field::new("k", DataType::Utf8, false),
         Field::new("ts_ms", DataType::Int64, false),
@@ -296,12 +233,12 @@ async fn mailbox_front_is_per_upstream_and_min_merged() {
     )
     .unwrap();
 
-    let mut front = TestMailbox::new(Some(column_assign(None)), &["u0", "u1"]);
-    assert!(front
+    let mut progress = InputProgress::for_test(Some(column_assign(None)), &["u0", "u1"]);
+    assert!(progress
         .assign_and_merge(&Message::new(Some("u0".to_string()), b_u0, None, None))
         .await
         .is_none());
-    let wm = front
+    let wm = progress
         .assign_and_merge(&Message::new(Some("u1".to_string()), b_u1, None, None))
         .await
         .unwrap();
@@ -309,14 +246,14 @@ async fn mailbox_front_is_per_upstream_and_min_merged() {
 }
 
 #[tokio::test]
-async fn mailbox_front_preserves_upstream_watermark_extras() {
-    let mut front = TestMailbox::new(None, &["u0"]);
+async fn input_progress_preserves_upstream_watermark_extras() {
+    let mut progress = InputProgress::for_test(None, &["u0"]);
     let mut wm = WatermarkMessage::new("u0".to_string(), 100, Some(1));
     wm.metadata.extras = Some(HashMap::from([(
         "trace".to_string(),
         "u0".to_string(),
     )]));
-    let out = front.on_upstream_watermark(wm).await;
+    let out = progress.on_upstream_watermark(wm).await;
     assert_eq!(out.len(), 1);
     assert_eq!(out[0].watermark_value, 100);
     assert_eq!(out[0].metadata.upstream_vertex_id.as_deref(), Some("v0"));
@@ -346,9 +283,9 @@ async fn idle_upstream_is_excluded_from_min_merge() {
     )
     .unwrap();
 
-    let mut front = TestMailbox::new(Some(column_assign(Some(1))), &["u0", "u1"]);
+    let mut progress = InputProgress::for_test(Some(column_assign(Some(1))), &["u0", "u1"]);
     tokio::time::sleep(Duration::from_millis(5)).await;
-    let wm = front
+    let wm = progress
         .assign_and_merge(&Message::new(Some("u0".to_string()), batch, None, None))
         .await
         .unwrap();
@@ -370,15 +307,15 @@ async fn idle_timeout_disabled_blocks_min_merge() {
     )
     .unwrap();
 
-    let mut front = TestMailbox::new(Some(column_assign(None)), &["u0", "u1"]);
+    let mut progress = InputProgress::for_test(Some(column_assign(None)), &["u0", "u1"]);
     tokio::time::sleep(Duration::from_millis(5)).await;
-    assert!(front
+    assert!(progress
         .assign_and_merge(&Message::new(Some("u0".to_string()), batch, None, None))
         .await
         .is_none());
 }
 
-fn interval_front(interval: Duration) -> TestMailbox {
+fn interval_progress(interval: Duration) -> InputProgress {
     let cfg = WatermarkAssignConfig::new(
         0,
         TimeHint::ColumnName {
@@ -386,34 +323,34 @@ fn interval_front(interval: Duration) -> TestMailbox {
         },
     )
     .with_emit_interval(interval);
-    TestMailbox::new(Some(cfg), &["u0"])
+    InputProgress::for_test(Some(cfg), &["u0"])
 }
 
 #[tokio::test]
-async fn mailbox_front_timer_emits_held_watermark() {
+async fn input_progress_timer_emits_held_watermark() {
     let interval = Duration::from_millis(50);
-    let mut front = interval_front(interval);
+    let mut progress = interval_progress(interval);
 
-    let first = front.assign_and_merge(&ts_up("u0", 100)).await.unwrap();
+    let first = progress.assign_and_merge(&ts_up("u0", 100)).await.unwrap();
     assert_eq!(first.watermark_value, 100);
-    assert!(front.assign_on_data(&ts_up("u0", 150)).is_none());
+    assert!(progress.assign_on_data(&ts_up("u0", 150)).is_none());
 
     tokio::time::sleep(interval + Duration::from_millis(10)).await;
-    let due = front.on_timer().await;
+    let due = progress.on_timer().await;
     assert_eq!(due.len(), 1);
     assert_eq!(due[0].watermark_value, 150);
 }
 
 #[tokio::test]
-async fn mailbox_front_flushes_held_watermark_before_aligned_barrier() {
-    let mut front = interval_front(Duration::from_secs(30));
+async fn input_progress_flushes_held_watermark_before_aligned_barrier() {
+    let mut progress = interval_progress(Duration::from_secs(30));
 
-    let first = front.assign_and_merge(&ts_up("u0", 100)).await.unwrap();
+    let first = progress.assign_and_merge(&ts_up("u0", 100)).await.unwrap();
     assert_eq!(first.watermark_value, 100);
-    assert!(front.assign_on_data(&ts_up("u0", 180)).is_none());
+    assert!(progress.assign_on_data(&ts_up("u0", 180)).is_none());
 
     let barrier = CheckpointBarrierMessage::new("u0".to_string(), 1, 0, None);
-    let (_, _, wms) = front
+    let (_, _, wms) = progress
         .on_aligned_barrier(&barrier)
         .await
         .unwrap()

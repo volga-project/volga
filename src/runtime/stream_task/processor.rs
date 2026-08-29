@@ -10,21 +10,16 @@ use crate::runtime::operators::operator::{
 };
 use crate::transport::transport_client::DataReaderControl;
 
-use super::checkpoint::{on_checkpoint_barrier, CheckpointAligner};
+use super::checkpoint::on_checkpoint_barrier;
 use super::ctx::TaskCtx;
-use super::mailbox::{
-    assign_and_merge, flush_pending, on_aligned_barrier, on_timer, on_upstream_watermark,
-    sleep_until_deadline,
-};
+use super::progress::{sleep_until_deadline, InputProgress};
 use super::task::{timestamp, StreamTask};
-use super::watermark::WatermarkManager;
 
 pub(super) async fn processor_loop(
     operator: &mut dyn StreamOperator,
     mut ctx: TaskCtx<'_>,
     mailbox: MessageStream,
-    mut manager: WatermarkManager,
-    mut aligner: CheckpointAligner,
+    mut progress: InputProgress,
     reader_control: DataReaderControl,
 ) -> Result<()> {
     let mut mailbox = mailbox.peekable();
@@ -39,12 +34,8 @@ pub(super) async fn processor_loop(
                     .add_idle_ns(idle_start.elapsed().as_nanos() as u64);
                 match message {
                     None => {
-                        ctx.emit_watermarks(
-                            flush_pending(&mut manager, ctx.vertex_id.as_ref()).await,
-                            false,
-                            Some(operator),
-                        )
-                        .await?;
+                        ctx.emit_watermarks(progress.flush_pending().await, false, Some(operator))
+                            .await?;
                         println!(
                             "{:?} StreamTask {}: upstream ended without terminal watermark; finishing",
                             timestamp(),
@@ -64,7 +55,7 @@ pub(super) async fn processor_loop(
                             unreachable!()
                         };
                         ctx.emit_watermarks(
-                            on_upstream_watermark(&mut manager, ctx.vertex_id.as_ref(), wm).await,
+                            progress.on_upstream_watermark(wm).await,
                             false,
                             Some(operator),
                         )
@@ -80,16 +71,7 @@ pub(super) async fn processor_loop(
                         let Message::CheckpointBarrier(barrier) = msg else {
                             unreachable!()
                         };
-                        match on_aligned_barrier(
-                            &mut aligner,
-                            &mut manager,
-                            &ctx.vertex_id,
-                            ctx.metrics_labels,
-                            ctx.execution_attempt_id,
-                            &barrier,
-                        )
-                        .await
-                        {
+                        match progress.on_aligned_barrier(&barrier).await {
                             Ok(None) => {}
                             Ok(Some((checkpoint_id, inject_stamp, wms))) => {
                                 ctx.emit_watermarks(wms, false, Some(operator)).await?;
@@ -122,18 +104,14 @@ pub(super) async fn processor_loop(
                     Some(first) => {
                         record_recv(&ctx, &first);
                         let mut assigned = Vec::new();
-                        if let Some(wm) =
-                            assign_and_merge(&mut manager, ctx.vertex_id.as_ref(), &first).await
-                        {
+                        if let Some(wm) = progress.assign_and_merge(&first).await {
                             assigned.push(wm);
                         }
                         let batch =
                             drain_ready_after(first, &mut mailbox, INGEST_MAX_RECORDS).await;
                         for extra in &batch[1..] {
                             record_recv(&ctx, extra);
-                            if let Some(wm) =
-                                assign_and_merge(&mut manager, ctx.vertex_id.as_ref(), extra).await
-                            {
+                            if let Some(wm) = progress.assign_and_merge(extra).await {
                                 assigned.push(wm);
                             }
                         }
@@ -145,15 +123,11 @@ pub(super) async fn processor_loop(
                     }
                 }
             }
-            _ = sleep_until_deadline(manager.next_emit_deadline()) => {
+            _ = sleep_until_deadline(progress.next_emit_deadline()) => {
                 ctx.task_time_metrics
                     .add_idle_ns(idle_start.elapsed().as_nanos() as u64);
-                ctx.emit_watermarks(
-                    on_timer(&mut manager, ctx.vertex_id.as_ref()).await,
-                    false,
-                    Some(operator),
-                )
-                .await?;
+                ctx.emit_watermarks(progress.on_timer().await, false, Some(operator))
+                    .await?;
             }
         }
 

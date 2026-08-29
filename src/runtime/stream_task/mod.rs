@@ -1,7 +1,7 @@
 mod actor;
 mod checkpoint;
 mod ctx;
-mod mailbox;
+mod progress;
 mod metrics;
 mod output;
 mod processor;
