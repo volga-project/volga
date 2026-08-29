@@ -7,7 +7,6 @@ pub mod operator;
 #[cfg(test)]
 mod operator_test;
 pub mod kind;
-pub mod chained;
 pub mod aggregate;
 pub mod window;
 

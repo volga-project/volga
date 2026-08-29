@@ -95,7 +95,7 @@ impl Worker {
         for (vertex_id, task_runtime) in &inner.task_runtimes {
             let vertex_id = vertex_id.clone();
             let vertex_type = config.graph.get_vertex_type(vertex_id.as_ref());
-            if vertex_type != OperatorType::Source && vertex_type != OperatorType::ChainedSourceSink {
+            if vertex_type != OperatorType::Source {
                 continue;
             }
 

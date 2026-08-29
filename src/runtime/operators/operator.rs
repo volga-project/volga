@@ -5,7 +5,6 @@ use futures::{FutureExt, Stream, StreamExt};
 use crate::runtime::checkpoint::{SerializedCheckpoint, SerializedRestore};
 use crate::runtime::functions::join::join_function::JoinFunction;
 use crate::runtime::operators::aggregate::aggregate_operator::{AggregateConfig, AggregateOperator};
-use crate::runtime::operators::chained::chained_operator::ChainedOperator;
 use crate::runtime::operators::join::join_operator::JoinOperator;
 use crate::runtime::operators::key_by::key_by_operator::KeyByOperator;
 use crate::runtime::operators::map::map_operator::MapOperator;
@@ -65,7 +64,6 @@ pub enum OperatorType {
     Source,
     Sink,
     Processor,
-    ChainedSourceSink,
 }
 
 #[async_trait]
@@ -103,7 +101,6 @@ pub fn operator_config_requires_checkpoint(operator_config: &OperatorConfig) -> 
                 _ => false,
             }
         }
-        OperatorConfig::ChainedConfig(configs) => configs.iter().any(operator_config_requires_checkpoint),
         _ => false,
     }
 }
@@ -118,7 +115,6 @@ pub enum Operator {
     Aggregate(AggregateOperator),
     Window(WindowOperator),
     WindowRequest(WindowRequestOperator),
-    Chained(ChainedOperator),
 }
 
 #[derive(Clone, Debug)]
@@ -131,7 +127,6 @@ pub enum OperatorConfig {
     AggregateConfig(AggregateConfig),
     WindowConfig(WindowOperatorConfig),
     WindowRequestConfig(WindowRequestOperatorConfig),
-    ChainedConfig(Vec<OperatorConfig>),
 }
 
 impl fmt::Display for OperatorConfig {
@@ -145,7 +140,6 @@ impl fmt::Display for OperatorConfig {
             OperatorConfig::AggregateConfig(_) => write!(f, "Aggregate"),
             OperatorConfig::WindowConfig(_) => write!(f, "Window"),
             OperatorConfig::WindowRequestConfig(_) => write!(f, "WindowRequest"),
-            OperatorConfig::ChainedConfig(configs) => write!(f, "Chained({} ops)", configs.len()),
         }
     }
 }
@@ -162,7 +156,6 @@ impl OperatorTrait for Operator {
             Operator::Aggregate(op) => op.open(context).await,
             Operator::Window(op) => op.open(context).await,
             Operator::WindowRequest(op) => op.open(context).await,
-            Operator::Chained(op) => op.open(context).await
         }
     }
 
@@ -176,7 +169,6 @@ impl OperatorTrait for Operator {
             Operator::Aggregate(op) => op.close().await,
             Operator::Window(op) => op.close().await,
             Operator::WindowRequest(op) => op.close().await,
-            Operator::Chained(op) => op.close().await
         }
     }
 
@@ -190,7 +182,6 @@ impl OperatorTrait for Operator {
             Operator::Aggregate(op) => op.operator_type(),
             Operator::Window(op) => op.operator_type(),
             Operator::WindowRequest(op) => op.operator_type(),
-            Operator::Chained(op) => op.operator_type(),
         }
     }
 
@@ -204,7 +195,6 @@ impl OperatorTrait for Operator {
             Operator::Aggregate(op) => op.operator_config(),
             Operator::Window(op) => op.operator_config(),
             Operator::WindowRequest(op) => op.operator_config(),
-            Operator::Chained(op) => op.operator_config(),
         }
     }
     
@@ -218,7 +208,6 @@ impl OperatorTrait for Operator {
             Operator::Aggregate(op) => op.set_input(input),
             Operator::Window(op) => op.set_input(input),
             Operator::WindowRequest(op) => op.set_input(input),
-            Operator::Chained(op) => op.set_input(input),
         }
     }
     
@@ -232,7 +221,6 @@ impl OperatorTrait for Operator {
             Operator::Aggregate(op) => op.poll_next().await,
             Operator::Window(op) => op.poll_next().await,
             Operator::WindowRequest(op) => op.poll_next().await,
-            Operator::Chained(op) => op.poll_next().await,
         }
     }
 
@@ -246,7 +234,6 @@ impl OperatorTrait for Operator {
             Operator::Aggregate(op) => op.checkpoint(checkpoint_id).await,
             Operator::Window(op) => op.checkpoint(checkpoint_id).await,
             Operator::WindowRequest(op) => op.checkpoint(checkpoint_id).await,
-            Operator::Chained(op) => op.checkpoint(checkpoint_id).await,
         }
     }
 
@@ -260,7 +247,6 @@ impl OperatorTrait for Operator {
             Operator::Aggregate(op) => op.restore(restore).await,
             Operator::Window(op) => op.restore(restore).await,
             Operator::WindowRequest(op) => op.restore(restore).await,
-            Operator::Chained(op) => op.restore(restore).await,
         }
     }
 }
@@ -391,7 +377,6 @@ pub fn create_operator(
         OperatorConfig::AggregateConfig(_) => Operator::Aggregate(AggregateOperator::new(operator_config)),
         OperatorConfig::WindowConfig(_) => Operator::Window(WindowOperator::new(operator_config)),
         OperatorConfig::WindowRequestConfig(_) => Operator::WindowRequest(WindowRequestOperator::new(operator_config)),
-        OperatorConfig::ChainedConfig(_) => Operator::Chained(ChainedOperator::new(operator_config)),
     };
     operator
 }
@@ -400,39 +385,12 @@ pub fn get_operator_type_from_config(operator_config: &OperatorConfig) -> Operat
     match operator_config {
         OperatorConfig::SourceConfig(_) => OperatorType::Source,
         OperatorConfig::SinkConfig(_) => OperatorType::Sink,
-        OperatorConfig::ChainedConfig(configs   ) => {
-            let mut has_source = false;
-            let mut has_sink = false;
-            for config in configs {
-                match config {
-                    OperatorConfig::SourceConfig(_) => {
-                        has_source = true;
-                    },
-                    OperatorConfig::SinkConfig(_) => {
-                        has_sink = true;
-                    },
-                    _ => {}
-                }
-            }
-
-            if has_source && has_sink {
-                OperatorType::ChainedSourceSink
-            } else if has_source {
-                OperatorType::Source
-            } else if has_sink {
-                OperatorType::Sink
-            } else {
-                OperatorType::Processor
-            }
-        },
-        OperatorConfig::MapConfig(_) | 
-        OperatorConfig::JoinConfig(_) | 
-        OperatorConfig::KeyByConfig(_) | 
+        OperatorConfig::MapConfig(_) |
+        OperatorConfig::JoinConfig(_) |
+        OperatorConfig::KeyByConfig(_) |
         OperatorConfig::AggregateConfig(_) |
         OperatorConfig::WindowConfig(_) |
-        OperatorConfig::WindowRequestConfig(_) => {
-            OperatorType::Processor
-        }
+        OperatorConfig::WindowRequestConfig(_) => OperatorType::Processor,
     }
 }
 

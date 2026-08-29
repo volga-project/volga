@@ -778,6 +778,26 @@ mod tests {
             (OperatorKind::Aggregate, OperatorKind::Projection, PartitionType::Forward, 1),
         ]);
     }
+
+    #[test]
+    fn group_operators_for_chaining_splits_at_key_by_hash() {
+        let mut planner = create_planner();
+        let graph = planner
+            .sql_to_graph("SELECT name, COUNT(*) as count FROM test_table GROUP BY name")
+            .unwrap();
+        let nodes: Vec<_> = graph.get_nodes().collect();
+        // get_nodes is sink-to-source; linearize source → … → projection.
+        let ops = vec![
+            nodes[3].operator_config.clone(),
+            nodes[2].operator_config.clone(),
+            nodes[1].operator_config.clone(),
+            nodes[0].operator_config.clone(),
+        ];
+        let groups = crate::api::logical_graph::group_operators_for_chaining(&ops);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].len(), 2, "source + key_by (Forward)");
+        assert_eq!(groups[1].len(), 2, "aggregate + projection (Forward after Hash)");
+    }
     
     #[tokio::test]
     async fn test_group_by_multiple_clauses() {

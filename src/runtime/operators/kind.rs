@@ -1,7 +1,7 @@
 //! Operator kind (logical type) vs role (topology).
 //!
 //! - [`OperatorKind`]: discriminant of [`super::operator::OperatorConfig`] (Window, Join, …).
-//! - [`super::operator::OperatorType`]: execution role (Source / Sink / Processor / …).
+//! - [`super::operator::OperatorType`]: execution role (Source / Sink / Processor).
 
 use crate::runtime::functions::map::MapFunction;
 use crate::runtime::operators::operator::{OperatorConfig, OperatorType};
@@ -18,17 +18,15 @@ pub enum OperatorKind {
     Join,
     Window,
     WindowRequest,
-    Chained,
     Map,
 }
 
 impl OperatorKind {
-    /// Topology role for this kind. Prefer [`OperatorConfig::role`] for chained configs.
+    /// Topology role for this kind.
     pub fn role(self) -> OperatorType {
         match self {
             Self::Source => OperatorType::Source,
             Self::Sink => OperatorType::Sink,
-            Self::Chained => OperatorType::Processor,
             _ => OperatorType::Processor,
         }
     }
@@ -52,11 +50,10 @@ impl OperatorConfig {
             Self::JoinConfig(_) => OperatorKind::Join,
             Self::WindowConfig(_) => OperatorKind::Window,
             Self::WindowRequestConfig(_) => OperatorKind::WindowRequest,
-            Self::ChainedConfig(_) => OperatorKind::Chained,
         }
     }
 
-    /// Execution role (today’s [`OperatorType`]). Chained inspects nested configs.
+    /// Execution role (today’s [`OperatorType`]).
     pub fn role(&self) -> OperatorType {
         super::operator::get_operator_type_from_config(self)
     }
