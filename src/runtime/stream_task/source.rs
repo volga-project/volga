@@ -63,10 +63,10 @@ pub(super) async fn source_loop(
                         }
                     }
                     FetchResult::Data(mut message) => {
-                        if matches!(message, Message::Watermark(_)) {
-                            panic!(
-                                "source fetch_next must not return watermarks; assign them in the task"
-                            );
+                        if let Message::Watermark(wm) = message {
+                            // VectorSource (tests) may yield watermarks; do not min-merge.
+                            ctx.emit_watermarks(vec![wm], true, None).await?;
+                            continue;
                         }
                         let injected_wm = if matches!(message, Message::Regular(_)) {
                             source_watermark_manager
