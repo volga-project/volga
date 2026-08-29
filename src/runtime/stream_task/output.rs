@@ -5,7 +5,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::common::message::{Message, WatermarkMessage};
+use crate::common::message::Message;
 use crate::common::MAX_WATERMARK_VALUE;
 use crate::runtime::collector::Collector;
 use crate::runtime::metrics::MetricsLabels;
@@ -34,9 +34,10 @@ impl Output for TransportOutput<'_> {
                 self.status
                     .store(StreamTaskStatus::Finished as u8, Ordering::SeqCst);
             }
-            println!(
-                "StreamTask {:?} produced watermark {:?}",
-                self.vertex_id, watermark.watermark_value
+            StreamTask::set_watermark_lag_gauge(
+                &self.vertex_id,
+                watermark.watermark_value,
+                self.labels,
             );
         }
         if MESSAGE_TRACE_ENABLED.load(Ordering::Relaxed) {
@@ -50,39 +51,6 @@ impl Output for TransportOutput<'_> {
 }
 
 impl StreamTask {
-    pub(super) async fn send_source_assigned_watermark(
-        collectors_per_target_operator: &mut HashMap<String, Collector>,
-        vertex_id: &VertexId,
-        labels: Option<&MetricsLabels>,
-        wm: WatermarkMessage,
-    ) {
-        let mut injected = Message::Watermark(wm);
-        injected.set_upstream_vertex_id(vertex_id.as_ref().to_string());
-        injected.set_ingest_timestamp(Self::now_ms());
-        if let Message::Watermark(ref w) = injected {
-            Self::set_watermark_lag_gauge(vertex_id, w.watermark_value, labels);
-        }
-        Self::record_metrics(vertex_id.clone(), &injected, false, labels);
-        Self::send_to_collectors_if_needed(collectors_per_target_operator, injected).await;
-    }
-
-    pub(super) async fn send_source_assigned_watermarks(
-        collectors_per_target_operator: &mut HashMap<String, Collector>,
-        vertex_id: &VertexId,
-        labels: Option<&MetricsLabels>,
-        wms: Vec<WatermarkMessage>,
-    ) {
-        for wm in wms {
-            Self::send_source_assigned_watermark(
-                collectors_per_target_operator,
-                vertex_id,
-                labels,
-                wm,
-            )
-            .await;
-        }
-    }
-
     pub(super) async fn send_to_collectors_if_needed(
         collectors_per_target_operator: &mut HashMap<String, Collector>,
         message: Message,

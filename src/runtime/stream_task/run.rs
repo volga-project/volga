@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 
 use anyhow::Result;
-use tokio::sync::{mpsc, watch, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex};
 
 use crate::common::grpc::master::master_client as connect_master_client;
 use crate::common::grpc::GrpcConfig;
@@ -14,14 +14,15 @@ use crate::runtime::health::WorkerHealth;
 use crate::runtime::master::server::master_service::master_service_client::MasterServiceClient;
 use crate::runtime::metrics::MetricsLabels;
 use crate::runtime::observability::StreamTaskStatus;
-use crate::runtime::operators::operator::{create_operator, Operator, OperatorTrait, OperatorType};
+use crate::runtime::operators::operator::{create_operator, Operator, OperatorTrait};
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::VertexId;
 use crate::transport::transport_client::{TransportClient, TransportClientConfig};
 
 use super::checkpoint::CheckpointAligner;
-use super::metrics::{input_with_idle_tracking, TaskTimeMetrics};
-use super::preprocess::create_preprocessed_input_stream;
+use super::ctx::TaskCtx;
+use super::mailbox::MailboxFront;
+use super::metrics::TaskTimeMetrics;
 use super::processor::{processor_loop, ProcessorLoopParams};
 use super::source::{source_loop, SourceLoopParams};
 use super::task::{timestamp, StreamTask};
@@ -42,8 +43,8 @@ pub(super) struct RunParams {
     pub upstream_vertices: Vec<String>,
     pub transport_client_config: TransportClientConfig,
     pub metrics_labels: Option<MetricsLabels>,
-    pub run_receiver: watch::Receiver<bool>,
-    pub close_receiver: watch::Receiver<bool>,
+    pub run_receiver: oneshot::Receiver<()>,
+    pub close_receiver: oneshot::Receiver<()>,
     pub checkpoint_receiver: mpsc::UnboundedReceiver<u64>,
 }
 
@@ -141,7 +142,7 @@ pub(super) async fn run(params: RunParams) -> Result<()> {
         timestamp(),
         vertex_id
     );
-    StreamTask::wait_for_signal(run_receiver, status.clone(), true).await;
+    StreamTask::wait_for_run(run_receiver, status.clone()).await;
     println!(
         "{:?} Task {:?} received run signal, starting processing",
         timestamp(),
@@ -154,7 +155,6 @@ pub(super) async fn run(params: RunParams) -> Result<()> {
         status.store(StreamTaskStatus::Running as u8, Ordering::SeqCst);
     }
 
-    let is_source = operator.operator_type() == OperatorType::Source;
     let vertex_meta = execution_graph
         .get_vertex(&vertex_id)
         .expect("vertex should exist in execution graph");
@@ -173,10 +173,7 @@ pub(super) async fn run(params: RunParams) -> Result<()> {
         );
     }
 
-    if is_source {
-        let Operator::Source(ref mut source) = operator else {
-            unreachable!("source operator_type with non-Source variant");
-        };
+    if let Operator::Source(ref mut source) = operator {
         let mut source_watermark_manager = WatermarkManager::new(
             watermark_assign,
             upstream_vertices.clone(),
@@ -186,15 +183,17 @@ pub(super) async fn run(params: RunParams) -> Result<()> {
         source_loop(
             source,
             SourceLoopParams {
-                vertex_id: vertex_id.clone(),
-                runtime_context: &runtime_context,
-                status: status.clone(),
-                execution_attempt_id,
-                collectors: &mut collectors_per_target_operator,
-                master_client: &mut master_client,
-                metrics_labels: metrics_labels.as_ref(),
-                task_time_metrics: task_time_metrics.clone(),
-                current_watermark: current_watermark.clone(),
+                ctx: TaskCtx {
+                    vertex_id: vertex_id.clone(),
+                    runtime_context: &runtime_context,
+                    status: status.clone(),
+                    execution_attempt_id,
+                    collectors: &mut collectors_per_target_operator,
+                    master_client: &mut master_client,
+                    metrics_labels: metrics_labels.as_ref(),
+                    task_time_metrics: task_time_metrics.clone(),
+                    current_watermark: current_watermark.clone(),
+                },
                 checkpoint_receiver: &mut checkpoint_receiver,
                 source_watermark_manager: &mut source_watermark_manager,
             },
@@ -208,15 +207,12 @@ pub(super) async fn run(params: RunParams) -> Result<()> {
         let _rx_queue_ticker = reader.spawn_rx_queue_ticker(metrics_labels.clone());
         let (input_stream, reader_control) = reader.message_stream_with_control();
         let checkpoint_aligner = CheckpointAligner::new(&upstream_vertices, reader_control.clone());
-
-        let preprocessed_stream = create_preprocessed_input_stream(
-            input_stream,
+        let front = MailboxFront::new(
             vertex_id.clone(),
             watermark_assign,
             upstream_vertices.clone(),
             upstream_watermarks.clone(),
             current_watermark.clone(),
-            status.clone(),
             checkpoint_aligner,
             metrics_labels.clone(),
             execution_attempt_id,
@@ -225,16 +221,19 @@ pub(super) async fn run(params: RunParams) -> Result<()> {
         processor_loop(
             &mut operator,
             ProcessorLoopParams {
-                vertex_id: vertex_id.clone(),
-                runtime_context: &runtime_context,
-                status: status.clone(),
-                execution_attempt_id,
-                collectors: &mut collectors_per_target_operator,
-                master_client: &mut master_client,
-                metrics_labels: metrics_labels.as_ref(),
-                task_time_metrics: task_time_metrics.clone(),
-                current_watermark: current_watermark.clone(),
-                input: input_with_idle_tracking(preprocessed_stream, task_time_metrics.clone()),
+                ctx: TaskCtx {
+                    vertex_id: vertex_id.clone(),
+                    runtime_context: &runtime_context,
+                    status: status.clone(),
+                    execution_attempt_id,
+                    collectors: &mut collectors_per_target_operator,
+                    master_client: &mut master_client,
+                    metrics_labels: metrics_labels.as_ref(),
+                    task_time_metrics: task_time_metrics.clone(),
+                    current_watermark: current_watermark.clone(),
+                },
+                mailbox: input_stream,
+                front,
                 reader_control,
             },
         )
@@ -250,7 +249,7 @@ pub(super) async fn run(params: RunParams) -> Result<()> {
         timestamp(),
         vertex_id
     );
-    StreamTask::wait_for_signal(close_receiver, status.clone(), false).await;
+    StreamTask::wait_for_close(close_receiver, status.clone()).await;
     println!(
         "{:?} Task {:?} received close signal, performing close",
         timestamp(),

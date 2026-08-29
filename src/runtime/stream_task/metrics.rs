@@ -2,7 +2,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use futures::StreamExt;
 use metrics::counter;
 
 use crate::common::message::Message;
@@ -17,17 +16,16 @@ use crate::runtime::metrics::{
     METRIC_STREAM_TASK_RECORDS_RECV, METRIC_STREAM_TASK_RECORDS_SENT,
     METRIC_STREAM_TASK_WATERMARK_LAG_MS, METRIC_STREAM_TASK_WM_PROPAGATION_MS,
 };
-use crate::runtime::operators::operator::MessageStream;
 use crate::runtime::VertexId;
 
 use super::task::StreamTask;
 
 /// Accumulates Flink-style task time metrics within a report window.
 ///
-/// Idle = waiting on the input stream (`next()`), not operator compute such as
-/// Window `insert_batch` / `process_due`. Backpressured = exclusive tx-queue
-/// wait via [`BackpressureTracker`]; busy = residual wall time so the three
-/// ms/s gauges sum to ~1000.
+/// Idle = waiting on mailbox `next()` / source `fetch_next()`, not operator
+/// compute such as Window `insert_batch` / `process_due`. Backpressured =
+/// exclusive tx-queue wait via [`BackpressureTracker`]; busy = residual wall
+/// time so the three ms/s gauges sum to ~1000.
 #[derive(Debug, Default)]
 pub(super) struct TaskTimeMetrics {
     idle_ns: AtomicU64,
@@ -62,25 +60,6 @@ impl TaskTimeMetrics {
         let scale = 1000.0 / window_ms;
         (busy_ms * scale, idle_ms * scale, bp_ms * scale)
     }
-}
-
-/// Idle = time spent in `input.next()`, which is wait-for-mailbox (plus cheap
-/// preprocess). Operator compute after the mailbox wait returns is not included.
-pub(super) fn input_with_idle_tracking(
-    mut input: MessageStream,
-    metrics: Arc<TaskTimeMetrics>,
-) -> MessageStream {
-    Box::pin(async_stream::stream! {
-        loop {
-            let start = Instant::now();
-            let item = input.next().await;
-            metrics.add_idle_ns(start.elapsed().as_nanos() as u64);
-            match item {
-                Some(msg) => yield msg,
-                None => break,
-            }
-        }
-    })
 }
 
 impl StreamTask {

@@ -14,16 +14,12 @@ use async_trait::async_trait;
 
 pub struct JoinOperator {
     base: OperatorBase,
-    left_buffer: Vec<Message>,
-    right_buffer: Vec<Message>,
 }
 
 impl fmt::Debug for JoinOperator {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("JoinOperator")
             .field("base", &self.base)
-            .field("left_buffer", &self.left_buffer)
-            .field("right_buffer", &self.right_buffer)
             .finish()
     }
 }
@@ -36,8 +32,6 @@ impl JoinOperator {
         };
         Self {
             base: OperatorBase::new_with_function(join_function, config),
-            left_buffer: Vec::new(),
-            right_buffer: Vec::new(),
         }
     }
 }
@@ -65,14 +59,6 @@ impl OperatorTrait for JoinOperator {
 impl StreamOperator for JoinOperator {
     async fn process_data(&mut self, data: Vec<Message>, out: &mut dyn Output) -> Result<()> {
         for message in data {
-            // TODO proper lookup for upstream_vertex_id position (left or right)
-            if let Some(upstream_id) = message.upstream_vertex_id() {
-                if upstream_id.contains("left") {
-                    self.left_buffer.push(message.clone());
-                } else {
-                    self.right_buffer.push(message.clone());
-                }
-            }
             out.emit(message).await?;
         }
         Ok(())

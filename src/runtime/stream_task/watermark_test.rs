@@ -1,22 +1,14 @@
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, AtomicU8};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use arrow::array::{ArrayRef, Int64Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
-use futures::stream;
-use futures::StreamExt;
-use tokio::sync::Mutex;
 
-use crate::common::message::Message;
-use crate::runtime::observability::snapshot_types::StreamTaskStatus;
-use crate::runtime::watermark::WatermarkAssignConfig;
-use crate::transport::transport_client::DataReaderControl;
+use crate::common::message::{CheckpointBarrierMessage, Message};
+use crate::runtime::watermark::{TimeHint, WatermarkAssignConfig};
 
-use super::checkpoint::CheckpointAligner;
-use super::preprocess::create_preprocessed_input_stream;
+use super::mailbox::{empty_aligner, MailboxFront};
 use super::watermark::WatermarkAssignerState;
 
 #[test]
@@ -70,6 +62,12 @@ fn ts_message(ts_ms: i64) -> Message {
     Message::new(None, b, None, None)
 }
 
+fn ts_up(upstream: &str, ts_ms: i64) -> Message {
+    let mut m = ts_message(ts_ms);
+    m.set_upstream_vertex_id(upstream.to_string());
+    m
+}
+
 fn assigner_with_interval(interval: Duration) -> WatermarkAssignerState {
     WatermarkAssignerState::new(
         WatermarkAssignConfig::new(
@@ -79,6 +77,27 @@ fn assigner_with_interval(interval: Duration) -> WatermarkAssignerState {
             },
         )
         .with_emit_interval(interval),
+    )
+}
+
+fn column_assign(idle_timeout_ms: Option<u64>) -> WatermarkAssignConfig {
+    let mut cfg = WatermarkAssignConfig::new(
+        0,
+        TimeHint::ColumnName {
+            name: "ts_ms".to_string(),
+        },
+    );
+    cfg.idle_timeout_ms = idle_timeout_ms;
+    cfg
+}
+
+fn test_front(assign: Option<WatermarkAssignConfig>, upstreams: &[&str]) -> MailboxFront {
+    let ups: Vec<String> = upstreams.iter().map(|s| s.to_string()).collect();
+    MailboxFront::for_test(
+        Arc::<str>::from("v0"),
+        assign,
+        ups.clone(),
+        empty_aligner(&ups),
     )
 }
 
@@ -165,12 +184,11 @@ fn data_path_emits_when_interval_elapsed() {
 }
 
 #[tokio::test]
-async fn stream_task_preprocess_injects_watermarks_after_data() {
+async fn mailbox_front_assigns_watermarks_after_data() {
     let schema = Arc::new(Schema::new(vec![
         Field::new("k", DataType::Utf8, false),
         Field::new("ts_ms", DataType::Int64, false),
     ]));
-
     let b1 = RecordBatch::try_new(
         schema.clone(),
         vec![
@@ -180,7 +198,7 @@ async fn stream_task_preprocess_injects_watermarks_after_data() {
     )
     .unwrap();
     let b2 = RecordBatch::try_new(
-        schema.clone(),
+        schema,
         vec![
             Arc::new(StringArray::from(vec!["A"])) as ArrayRef,
             Arc::new(Int64Array::from(vec![250_i64])) as ArrayRef,
@@ -188,61 +206,25 @@ async fn stream_task_preprocess_injects_watermarks_after_data() {
     )
     .unwrap();
 
-    let input = Box::pin(stream::iter(vec![
-        Message::new(Some("u0".to_string()), b1, None, None),
-        Message::new(Some("u0".to_string()), b2, None, None),
-    ]));
-
-    let cfg = WatermarkAssignConfig::new(
-        0,
-        TimeHint::ColumnName {
-            name: "ts_ms".to_string(),
-        },
-    );
-
-    let mut out = create_preprocessed_input_stream(
-        input,
-        Arc::<str>::from("v0"),
-        Some(cfg),
-        vec!["u0".to_string()],
-        Arc::new(Mutex::new(HashMap::new())),
-        Arc::new(AtomicU64::new(0)),
-        Arc::new(AtomicU8::new(StreamTaskStatus::Running as u8)),
-        CheckpointAligner::new(&["u0".to_string()], DataReaderControl::empty_for_test()),
-        None,
-        0,
-    );
-
-    let mut seen = Vec::new();
-    while let Some(m) = out.next().await {
-        seen.push(m);
-    }
-
-    assert!(matches!(seen[0], Message::Regular(_)));
-    assert!(matches!(seen[1], Message::Watermark(_)));
-    assert!(matches!(seen[2], Message::Regular(_)));
-    assert!(matches!(seen[3], Message::Watermark(_)));
-
-    let wm1 = match &seen[1] {
-        Message::Watermark(w) => w.watermark_value,
-        _ => unreachable!(),
-    };
-    let wm2 = match &seen[3] {
-        Message::Watermark(w) => w.watermark_value,
-        _ => unreachable!(),
-    };
-
-    assert_eq!(wm1, 120);
-    assert_eq!(wm2, 250);
+    let mut front = test_front(Some(column_assign(None)), &["u0"]);
+    let wm1 = front
+        .assign_and_merge(&Message::new(Some("u0".to_string()), b1, None, None))
+        .await
+        .unwrap();
+    let wm2 = front
+        .assign_and_merge(&Message::new(Some("u0".to_string()), b2, None, None))
+        .await
+        .unwrap();
+    assert_eq!(wm1.watermark_value, 120);
+    assert_eq!(wm2.watermark_value, 250);
 }
 
 #[tokio::test]
-async fn stream_task_preprocess_is_per_upstream_and_min_merged() {
+async fn mailbox_front_is_per_upstream_and_min_merged() {
     let schema = Arc::new(Schema::new(vec![
         Field::new("k", DataType::Utf8, false),
         Field::new("ts_ms", DataType::Int64, false),
     ]));
-
     let b_u0 = RecordBatch::try_new(
         schema.clone(),
         vec![
@@ -252,7 +234,7 @@ async fn stream_task_preprocess_is_per_upstream_and_min_merged() {
     )
     .unwrap();
     let b_u1 = RecordBatch::try_new(
-        schema.clone(),
+        schema,
         vec![
             Arc::new(StringArray::from(vec!["B"])) as ArrayRef,
             Arc::new(Int64Array::from(vec![50_i64])) as ArrayRef,
@@ -260,47 +242,16 @@ async fn stream_task_preprocess_is_per_upstream_and_min_merged() {
     )
     .unwrap();
 
-    let m0 = Message::new(Some("u0".to_string()), b_u0, None, None);
-    let m1 = Message::new(Some("u1".to_string()), b_u1, None, None);
-
-    let input = Box::pin(stream::iter(vec![m0, m1]));
-    let cfg = WatermarkAssignConfig::new(
-        0,
-        TimeHint::ColumnName {
-            name: "ts_ms".to_string(),
-        },
-    );
-
-    let mut out = create_preprocessed_input_stream(
-        input,
-        Arc::<str>::from("v0"),
-        Some(cfg),
-        vec!["u0".to_string(), "u1".to_string()],
-        Arc::new(Mutex::new(HashMap::new())),
-        Arc::new(AtomicU64::new(0)),
-        Arc::new(AtomicU8::new(StreamTaskStatus::Running as u8)),
-        CheckpointAligner::new(
-            &["u0".to_string(), "u1".to_string()],
-            DataReaderControl::empty_for_test(),
-        ),
-        None,
-        0,
-    );
-
-    let mut seen = Vec::new();
-    while let Some(m) = out.next().await {
-        seen.push(m);
-    }
-
-    assert!(matches!(seen[0], Message::Regular(_)));
-    assert!(matches!(seen[1], Message::Regular(_)));
-    assert!(matches!(seen[2], Message::Watermark(_)));
-
-    let wm = match &seen[2] {
-        Message::Watermark(w) => w.watermark_value,
-        _ => unreachable!(),
-    };
-    assert_eq!(wm, 50);
+    let mut front = test_front(Some(column_assign(None)), &["u0", "u1"]);
+    assert!(front
+        .assign_and_merge(&Message::new(Some("u0".to_string()), b_u0, None, None))
+        .await
+        .is_none());
+    let wm = front
+        .assign_and_merge(&Message::new(Some("u1".to_string()), b_u1, None, None))
+        .await
+        .unwrap();
+    assert_eq!(wm.watermark_value, 50);
 }
 
 #[tokio::test]
@@ -309,9 +260,8 @@ async fn idle_upstream_is_excluded_from_min_merge() {
         Field::new("k", DataType::Utf8, false),
         Field::new("ts_ms", DataType::Int64, false),
     ]));
-
     let batch = RecordBatch::try_new(
-        schema.clone(),
+        schema,
         vec![
             Arc::new(StringArray::from(vec!["A"])) as ArrayRef,
             Arc::new(Int64Array::from(vec![100_i64])) as ArrayRef,
@@ -319,42 +269,13 @@ async fn idle_upstream_is_excluded_from_min_merge() {
     )
     .unwrap();
 
-    let input = Box::pin(async_stream::stream! {
-        tokio::time::sleep(Duration::from_millis(5)).await;
-        yield Message::new(Some("u0".to_string()), batch, None, None);
-    });
-
-    let mut cfg = WatermarkAssignConfig::new(
-        0,
-        TimeHint::ColumnName {
-            name: "ts_ms".to_string(),
-        },
-    );
-    cfg.idle_timeout_ms = Some(1);
-
-    let mut out = create_preprocessed_input_stream(
-        input,
-        Arc::<str>::from("v0"),
-        Some(cfg),
-        vec!["u0".to_string(), "u1".to_string()],
-        Arc::new(Mutex::new(HashMap::new())),
-        Arc::new(AtomicU64::new(0)),
-        Arc::new(AtomicU8::new(StreamTaskStatus::Running as u8)),
-        CheckpointAligner::new(
-            &["u0".to_string(), "u1".to_string()],
-            DataReaderControl::empty_for_test(),
-        ),
-        None,
-        0,
-    );
-
-    let mut seen = Vec::new();
-    while let Some(m) = out.next().await {
-        seen.push(m);
-    }
-
-    assert!(matches!(seen[0], Message::Regular(_)));
-    assert!(matches!(seen[1], Message::Watermark(_)));
+    let mut front = test_front(Some(column_assign(Some(1))), &["u0", "u1"]);
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let wm = front
+        .assign_and_merge(&Message::new(Some("u0".to_string()), batch, None, None))
+        .await
+        .unwrap();
+    assert_eq!(wm.watermark_value, 100);
 }
 
 #[tokio::test]
@@ -363,9 +284,8 @@ async fn idle_timeout_disabled_blocks_min_merge() {
         Field::new("k", DataType::Utf8, false),
         Field::new("ts_ms", DataType::Int64, false),
     ]));
-
     let batch = RecordBatch::try_new(
-        schema.clone(),
+        schema,
         vec![
             Arc::new(StringArray::from(vec!["A"])) as ArrayRef,
             Arc::new(Int64Array::from(vec![100_i64])) as ArrayRef,
@@ -373,54 +293,15 @@ async fn idle_timeout_disabled_blocks_min_merge() {
     )
     .unwrap();
 
-    let input = Box::pin(async_stream::stream! {
-        tokio::time::sleep(Duration::from_millis(5)).await;
-        yield Message::new(Some("u0".to_string()), batch, None, None);
-    });
-
-    let mut cfg = WatermarkAssignConfig::new(
-        0,
-        TimeHint::ColumnName {
-            name: "ts_ms".to_string(),
-        },
-    );
-    cfg.idle_timeout_ms = None;
-
-    let mut out = create_preprocessed_input_stream(
-        input,
-        Arc::<str>::from("v0"),
-        Some(cfg),
-        vec!["u0".to_string(), "u1".to_string()],
-        Arc::new(Mutex::new(HashMap::new())),
-        Arc::new(AtomicU64::new(0)),
-        Arc::new(AtomicU8::new(StreamTaskStatus::Running as u8)),
-        CheckpointAligner::new(
-            &["u0".to_string(), "u1".to_string()],
-            DataReaderControl::empty_for_test(),
-        ),
-        None,
-        0,
-    );
-
-    let mut seen = Vec::new();
-    while let Some(m) = out.next().await {
-        seen.push(m);
-    }
-
-    assert!(matches!(seen[0], Message::Regular(_)));
-    assert_eq!(seen.len(), 1);
+    let mut front = test_front(Some(column_assign(None)), &["u0", "u1"]);
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    assert!(front
+        .assign_and_merge(&Message::new(Some("u0".to_string()), batch, None, None))
+        .await
+        .is_none());
 }
 
-fn ts_up(upstream: &str, ts_ms: i64) -> Message {
-    let mut m = ts_message(ts_ms);
-    m.set_upstream_vertex_id(upstream.to_string());
-    m
-}
-
-fn preprocess_assign(
-    input: crate::runtime::operators::operator::MessageStream,
-    interval: Duration,
-) -> crate::runtime::operators::operator::MessageStream {
+fn interval_front(interval: Duration) -> MailboxFront {
     let cfg = WatermarkAssignConfig::new(
         0,
         TimeHint::ColumnName {
@@ -428,80 +309,38 @@ fn preprocess_assign(
         },
     )
     .with_emit_interval(interval);
-    create_preprocessed_input_stream(
-        input,
-        Arc::<str>::from("v0"),
-        Some(cfg),
-        vec!["u0".to_string()],
-        Arc::new(Mutex::new(HashMap::new())),
-        Arc::new(AtomicU64::new(0)),
-        Arc::new(AtomicU8::new(StreamTaskStatus::Running as u8)),
-        CheckpointAligner::new(&["u0".to_string()], DataReaderControl::empty_for_test()),
-        None,
-        0,
-    )
+    test_front(Some(cfg), &["u0"])
 }
 
 #[tokio::test]
-async fn stream_task_preprocess_timer_emits_held_watermark_without_next_record() {
+async fn mailbox_front_timer_emits_held_watermark() {
     let interval = Duration::from_millis(50);
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    let mut out = preprocess_assign(
-        Box::pin(tokio_stream::wrappers::UnboundedReceiverStream::new(rx)),
-        interval,
-    );
+    let mut front = interval_front(interval);
 
-    tx.send(ts_up("u0", 100)).unwrap();
-    assert!(matches!(out.next().await, Some(Message::Regular(_))));
-    match out.next().await {
-        Some(Message::Watermark(w)) => assert_eq!(w.watermark_value, 100),
-        other => panic!("expected first watermark, got {other:?}"),
-    }
+    let first = front.assign_and_merge(&ts_up("u0", 100)).await.unwrap();
+    assert_eq!(first.watermark_value, 100);
+    assert!(front.assign_on_data(&ts_up("u0", 150)).is_none());
 
-    tx.send(ts_up("u0", 150)).unwrap();
-    assert!(matches!(out.next().await, Some(Message::Regular(_))));
-
-    let held = tokio::time::timeout(Duration::from_millis(500), out.next())
-        .await
-        .expect("timer should emit held watermark with no following record")
-        .expect("stream ended");
-    match held {
-        Message::Watermark(w) => assert_eq!(w.watermark_value, 150),
-        other => panic!("expected coalesced watermark, got {other:?}"),
-    }
-    drop(tx);
+    tokio::time::sleep(interval + Duration::from_millis(10)).await;
+    let due = front.on_timer().await;
+    assert_eq!(due.len(), 1);
+    assert_eq!(due[0].watermark_value, 150);
 }
 
 #[tokio::test]
-async fn stream_task_preprocess_flushes_held_watermark_before_aligned_barrier() {
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    let mut out = preprocess_assign(
-        Box::pin(tokio_stream::wrappers::UnboundedReceiverStream::new(rx)),
-        Duration::from_secs(30),
-    );
+async fn mailbox_front_flushes_held_watermark_before_aligned_barrier() {
+    let mut front = interval_front(Duration::from_secs(30));
 
-    tx.send(ts_up("u0", 100)).unwrap();
-    assert!(matches!(out.next().await, Some(Message::Regular(_))));
-    match out.next().await {
-        Some(Message::Watermark(w)) => assert_eq!(w.watermark_value, 100),
-        other => panic!("expected first watermark, got {other:?}"),
-    }
+    let first = front.assign_and_merge(&ts_up("u0", 100)).await.unwrap();
+    assert_eq!(first.watermark_value, 100);
+    assert!(front.assign_on_data(&ts_up("u0", 180)).is_none());
 
-    tx.send(ts_up("u0", 180)).unwrap();
-    assert!(matches!(out.next().await, Some(Message::Regular(_))));
-
-    tx.send(Message::CheckpointBarrier(
-        crate::common::message::CheckpointBarrierMessage::new("u0".to_string(), 1, 0, None),
-    ))
-    .unwrap();
-
-    match out.next().await {
-        Some(Message::Watermark(w)) => assert_eq!(w.watermark_value, 180),
-        other => panic!("expected flushed watermark before barrier, got {other:?}"),
-    }
-    assert!(
-        matches!(out.next().await, Some(Message::CheckpointBarrier(_))),
-        "aligned barrier should follow flushed watermark"
-    );
-    drop(tx);
+    let barrier = CheckpointBarrierMessage::new("u0".to_string(), 1, 0, None);
+    let (_, _, _, wms) = front
+        .on_aligned_barrier(&barrier)
+        .await
+        .unwrap()
+        .expect("single-upstream barrier should align");
+    assert_eq!(wms.len(), 1);
+    assert_eq!(wms[0].watermark_value, 180);
 }

@@ -387,7 +387,18 @@ where
     if first.is_control() {
         return NextInputs::Control(first);
     }
+    NextInputs::Data(drain_ready_after(first, input, max_records).await)
+}
 
+/// Continue a data drain after `first` has already been taken.
+pub(crate) async fn drain_ready_after<S>(
+    first: Message,
+    input: &mut Peekable<S>,
+    max_records: usize,
+) -> Vec<Message>
+where
+    S: Stream<Item = Message> + Unpin,
+{
     let mut data = vec![first];
     let mut rows = data_rows(&data[0]);
 
@@ -407,7 +418,7 @@ where
         rows += n;
         data.push(msg);
     }
-    NextInputs::Data(data)
+    data
 }
 
 fn data_rows(msg: &Message) -> usize {

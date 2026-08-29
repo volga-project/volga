@@ -95,11 +95,10 @@ impl OperatorTrait for SinkOperator {
 
 #[async_trait]
 impl StreamOperator for SinkOperator {
-    async fn process_data(&mut self, data: Vec<Message>, out: &mut dyn Output) -> Result<()> {
+    async fn process_data(&mut self, data: Vec<Message>, _out: &mut dyn Output) -> Result<()> {
         let function = self.base.get_function_mut::<SinkFunction>().unwrap();
         for message in data {
-            function.sink(message.clone()).await?;
-            out.emit(message).await?;
+            function.sink(message).await?;
         }
         Ok(())
     }

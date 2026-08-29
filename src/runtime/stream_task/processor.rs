@@ -1,38 +1,24 @@
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
-use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Result;
+use futures::StreamExt;
 
-use crate::common::message::Message;
-use crate::runtime::collector::Collector;
-use crate::runtime::master::server::master_service::master_service_client::MasterServiceClient;
-use crate::runtime::metrics::MetricsLabels;
+use crate::common::message::{CheckpointBarrierMessage, Message};
 use crate::runtime::observability::StreamTaskStatus;
 use crate::runtime::operators::operator::{
-    drain_ready_inputs, NextInputs, Operator, StreamOperator, INGEST_MAX_RECORDS,
+    drain_ready_after, Operator, StreamOperator, INGEST_MAX_RECORDS,
 };
-use crate::runtime::runtime_context::RuntimeContext;
-use crate::runtime::VertexId;
 use crate::transport::transport_client::DataReaderControl;
 
 use super::checkpoint::on_checkpoint_barrier;
-use super::metrics::TaskTimeMetrics;
-use super::output::TransportOutput;
+use super::ctx::TaskCtx;
+use super::mailbox::{sleep_until_deadline, MailboxFront};
 use super::task::{timestamp, StreamTask};
 
 pub(super) struct ProcessorLoopParams<'a> {
-    pub vertex_id: VertexId,
-    pub runtime_context: &'a RuntimeContext,
-    pub status: Arc<AtomicU8>,
-    pub execution_attempt_id: u64,
-    pub collectors: &'a mut HashMap<String, Collector>,
-    pub master_client: &'a mut Option<MasterServiceClient<tonic::transport::Channel>>,
-    pub metrics_labels: Option<&'a MetricsLabels>,
-    pub task_time_metrics: Arc<TaskTimeMetrics>,
-    pub current_watermark: Arc<AtomicU64>,
-    pub input: crate::runtime::operators::operator::MessageStream,
+    pub ctx: TaskCtx<'a>,
+    pub mailbox: crate::runtime::operators::operator::MessageStream,
+    pub front: MailboxFront,
     pub reader_control: DataReaderControl,
 }
 
@@ -41,89 +27,133 @@ pub(super) async fn processor_loop(
     params: ProcessorLoopParams<'_>,
 ) -> Result<()> {
     let ProcessorLoopParams {
-        vertex_id,
-        runtime_context,
-        status,
-        execution_attempt_id,
-        collectors,
-        master_client,
-        metrics_labels,
-        task_time_metrics,
-        current_watermark,
-        input,
+        mut ctx,
+        mailbox,
+        mut front,
         reader_control,
     } = params;
 
-    let mut input = {
-        use futures::StreamExt;
-        input.peekable()
-    };
+    let mut mailbox = mailbox.peekable();
     let mut metrics_window_start = Instant::now();
 
-    while status.load(Ordering::SeqCst) == StreamTaskStatus::Running as u8 {
-        match drain_ready_inputs(&mut input, INGEST_MAX_RECORDS).await {
-            NextInputs::Exhausted => {
-                println!(
-                    "{:?} StreamTask {}: upstream ended without terminal watermark; finishing",
-                    timestamp(),
-                    vertex_id.as_ref()
-                );
-                status.store(StreamTaskStatus::Finished as u8, Ordering::SeqCst);
-                break;
+    while ctx.status.load(std::sync::atomic::Ordering::SeqCst) == StreamTaskStatus::Running as u8 {
+        let idle_start = Instant::now();
+        tokio::select! {
+            biased;
+            message = mailbox.next() => {
+                ctx.task_time_metrics
+                    .add_idle_ns(idle_start.elapsed().as_nanos() as u64);
+                match message {
+                    None => {
+                        emit_watermarks(operator, &mut ctx, front.flush_pending().await).await?;
+                        println!(
+                            "{:?} StreamTask {}: upstream ended without terminal watermark; finishing",
+                            timestamp(),
+                            ctx.vertex_id.as_ref()
+                        );
+                        ctx.status.store(
+                            StreamTaskStatus::Finished as u8,
+                            std::sync::atomic::Ordering::SeqCst,
+                        );
+                        break;
+                    }
+                    Some(Message::Watermark(wm)) => {
+                        record_recv(&ctx, &Message::Watermark(wm.clone()));
+                        emit_watermarks(operator, &mut ctx, front.on_upstream_watermark(wm).await)
+                            .await?;
+                    }
+                    Some(Message::CheckpointBarrier(barrier)) => {
+                        record_recv(&ctx, &Message::CheckpointBarrier(barrier.clone()));
+                        match front.on_aligned_barrier(&barrier).await {
+                            Ok(None) => {}
+                            Ok(Some((checkpoint_id, inject_stamp, _, wms))) => {
+                                emit_watermarks(operator, &mut ctx, wms).await?;
+                                let aligned = CheckpointBarrierMessage::new(
+                                    ctx.vertex_id.as_ref().to_string(),
+                                    checkpoint_id,
+                                    ctx.execution_attempt_id,
+                                    inject_stamp,
+                                );
+                                on_checkpoint_barrier(
+                                    operator,
+                                    ctx.master_client,
+                                    &aligned,
+                                    false,
+                                    &ctx.vertex_id,
+                                    ctx.runtime_context.task_index(),
+                                    ctx.execution_attempt_id,
+                                    ctx.metrics_labels,
+                                    Some(&reader_control),
+                                )
+                                .await?;
+                                let mut out = ctx.output(false);
+                                operator.handle_barrier(aligned, &mut out).await?;
+                            }
+                            Err(error) => {
+                                panic!(
+                                    "[CHECKPOINT] {} alignment failed: {}",
+                                    ctx.vertex_id.as_ref(),
+                                    error
+                                );
+                            }
+                        }
+                    }
+                    Some(first) => {
+                        record_recv(&ctx, &first);
+                        let mut assigned = Vec::new();
+                        if let Some(wm) = front.assign_and_merge(&first).await {
+                            assigned.push(wm);
+                        }
+                        let batch =
+                            drain_ready_after(first, &mut mailbox, INGEST_MAX_RECORDS).await;
+                        for extra in &batch[1..] {
+                            record_recv(&ctx, extra);
+                            if let Some(wm) = front.assign_and_merge(extra).await {
+                                assigned.push(wm);
+                            }
+                        }
+                        {
+                            let mut out = ctx.output(false);
+                            operator.process_data(batch, &mut out).await?;
+                        }
+                        emit_watermarks(operator, &mut ctx, assigned).await?;
+                    }
+                }
             }
-            NextInputs::Data(data) => {
-                let mut out = TransportOutput {
-                    collectors,
-                    vertex_id: vertex_id.clone(),
-                    labels: metrics_labels,
-                    stamp_ingest_if_missing: false,
-                    status: status.clone(),
-                };
-                operator.process_data(data, &mut out).await?;
-            }
-            NextInputs::Control(Message::Watermark(wm)) => {
-                let mut out = TransportOutput {
-                    collectors,
-                    vertex_id: vertex_id.clone(),
-                    labels: metrics_labels,
-                    stamp_ingest_if_missing: false,
-                    status: status.clone(),
-                };
-                operator.handle_watermark(wm, &mut out).await?;
-            }
-            NextInputs::Control(Message::CheckpointBarrier(barrier)) => {
-                on_checkpoint_barrier(
-                    operator,
-                    master_client,
-                    &barrier,
-                    false,
-                    &vertex_id,
-                    runtime_context.task_index(),
-                    execution_attempt_id,
-                    metrics_labels,
-                    Some(&reader_control),
-                )
-                .await?;
-                let mut out = TransportOutput {
-                    collectors,
-                    vertex_id: vertex_id.clone(),
-                    labels: metrics_labels,
-                    stamp_ingest_if_missing: false,
-                    status: status.clone(),
-                };
-                operator.handle_barrier(barrier, &mut out).await?;
-            }
-            NextInputs::Control(other) => {
-                panic!("unexpected control message in processor loop: {other:?}");
+            _ = sleep_until_deadline(front.next_emit_deadline()) => {
+                ctx.task_time_metrics
+                    .add_idle_ns(idle_start.elapsed().as_nanos() as u64);
+                emit_watermarks(operator, &mut ctx, front.on_timer().await).await?;
             }
         }
+
         StreamTask::report_task_time_metrics(
-            &task_time_metrics,
+            &ctx.task_time_metrics,
             &mut metrics_window_start,
-            &vertex_id,
-            metrics_labels,
-            &current_watermark,
+            &ctx.vertex_id,
+            ctx.metrics_labels,
+            &ctx.current_watermark,
         );
+    }
+    Ok(())
+}
+
+fn record_recv(ctx: &TaskCtx<'_>, message: &Message) {
+    StreamTask::record_metrics(ctx.vertex_id.clone(), message, true, ctx.metrics_labels);
+    StreamTask::record_control_propagation(&ctx.vertex_id, message, ctx.metrics_labels);
+}
+
+async fn emit_watermarks(
+    operator: &mut Operator,
+    ctx: &mut TaskCtx<'_>,
+    wms: Vec<crate::common::message::WatermarkMessage>,
+) -> Result<()> {
+    if wms.is_empty() {
+        return Ok(());
+    }
+    let mut out = ctx.output(false);
+    for wm in wms {
+        operator.handle_watermark(wm, &mut out).await?;
     }
     Ok(())
 }

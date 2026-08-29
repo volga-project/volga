@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use futures::FutureExt;
-use tokio::sync::{mpsc, watch, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::task::JoinHandle;
 
 use crate::runtime::checkpoint::SerializedRestore;
@@ -40,8 +40,8 @@ pub struct StreamTask {
     operator_config: OperatorConfig,
     transport_client_config: Option<TransportClientConfig>,
     execution_graph: ExecutionGraph,
-    run_signal_sender: Option<watch::Sender<bool>>,
-    close_signal_sender: Option<watch::Sender<bool>>,
+    run_signal_sender: Option<oneshot::Sender<()>>,
+    close_signal_sender: Option<oneshot::Sender<()>>,
     checkpoint_trigger_sender: Option<mpsc::UnboundedSender<u64>>,
     upstream_watermarks: Arc<Mutex<HashMap<String, u64>>>,
     current_watermark: Arc<AtomicU64>,
@@ -129,10 +129,10 @@ impl StreamTask {
 
         let transport_client_config = self.transport_client_config.take().unwrap();
 
-        let (run_sender, run_receiver) = watch::channel(false);
+        let (run_sender, run_receiver) = oneshot::channel();
         self.run_signal_sender = Some(run_sender);
 
-        let (close_sender, close_receiver) = watch::channel(false);
+        let (close_sender, close_receiver) = oneshot::channel();
         self.close_signal_sender = Some(close_sender);
 
         let (checkpoint_sender, checkpoint_receiver) = mpsc::unbounded_channel::<u64>();
@@ -183,15 +183,18 @@ impl StreamTask {
     }
 
     pub fn signal_to_run(&mut self) {
-        let run_signal_sender = self.run_signal_sender.as_ref().unwrap();
-        let _ = run_signal_sender.send(true);
+        let run_signal_sender = self
+            .run_signal_sender
+            .take()
+            .expect("run signal sender not set");
+        let _ = run_signal_sender.send(());
     }
 
-    /// Set the close watch. If still mid-run, abort the run loop (watch is only
-    /// observed after Finished). After Finished, signal alone runs operator.close.
+    /// Signal close. If still mid-run, abort the run loop (the close receiver
+    /// is only observed after Finished). After Finished, signal alone runs operator.close.
     pub fn close(&mut self) {
-        if let Some(close_signal_sender) = self.close_signal_sender.as_ref() {
-            let _ = close_signal_sender.send(true);
+        if let Some(close_signal_sender) = self.close_signal_sender.take() {
+            let _ = close_signal_sender.send(());
         }
         let status = self.status.load(Ordering::SeqCst);
         if status == StreamTaskStatus::Created as u8
@@ -212,41 +215,47 @@ impl StreamTask {
         let _ = sender.send(checkpoint_id);
     }
 
-    pub(super) async fn wait_for_signal(
-        mut receiver: watch::Receiver<bool>,
-        status: Arc<AtomicU8>,
-        skip_on_finished: bool,
-    ) {
+    pub(super) async fn wait_for_run(mut receiver: oneshot::Receiver<()>, status: Arc<AtomicU8>) {
         let timeout = Duration::from_millis(50000);
-        let start_time = SystemTime::now();
+        let start_time = std::time::Instant::now();
 
         loop {
-            if skip_on_finished {
-                let current_status = status.load(Ordering::SeqCst);
-                if current_status == StreamTaskStatus::Finished as u8
-                    || current_status == StreamTaskStatus::Closed as u8
-                {
-                    println!(
-                        "{:?} Task status is {:?}, stopping wait for signal",
-                        timestamp(),
-                        StreamTaskStatus::from(current_status)
-                    );
-                    return;
-                }
+            let current_status = status.load(Ordering::SeqCst);
+            if current_status == StreamTaskStatus::Finished as u8
+                || current_status == StreamTaskStatus::Closed as u8
+            {
+                println!(
+                    "{:?} Task status is {:?}, stopping wait for run signal",
+                    timestamp(),
+                    StreamTaskStatus::from(current_status)
+                );
+                return;
             }
 
-            if start_time.elapsed().unwrap_or_default() > timeout {
+            if start_time.elapsed() > timeout {
                 panic!(
-                    "Timeout waiting for signal after {:?}, current status is {:?}",
+                    "Timeout waiting for run signal after {:?}, current status is {:?}",
                     timeout,
                     StreamTaskStatus::from(status.load(Ordering::SeqCst))
                 );
             }
 
-            match tokio::time::timeout(Duration::from_millis(50), receiver.changed()).await {
+            match tokio::time::timeout(Duration::from_millis(50), &mut receiver).await {
                 Ok(_) => return,
                 Err(_) => continue,
             }
+        }
+    }
+
+    pub(super) async fn wait_for_close(receiver: oneshot::Receiver<()>, status: Arc<AtomicU8>) {
+        let timeout = Duration::from_millis(50000);
+        match tokio::time::timeout(timeout, receiver).await {
+            Ok(_) => {}
+            Err(_) => panic!(
+                "Timeout waiting for close signal after {:?}, current status is {:?}",
+                timeout,
+                StreamTaskStatus::from(status.load(Ordering::SeqCst))
+            ),
         }
     }
 }
