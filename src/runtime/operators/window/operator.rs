@@ -274,43 +274,39 @@ impl WindowOperator {
         watermark: crate::common::message::WatermarkMessage,
         out: &mut dyn Output,
     ) -> Result<()> {
-                let wm_ts = if watermark.watermark_value == MAX_WATERMARK_VALUE {
-                    i64::MAX
-                } else {
-                    watermark.watermark_value as i64
-                };
-                let advance_to = Cursor::new(wm_ts, u64::MAX);
-                let state = self.state_ref();
+        let wm_ts = if watermark.watermark_value == MAX_WATERMARK_VALUE {
+            i64::MAX
+        } else {
+            watermark.watermark_value as i64
+        };
+        let advance_to = Cursor::new(wm_ts, u64::MAX);
+        let state = self.state_ref();
 
-                let advances_frontier = state
-                    .watermark_frontier()
-                    .map_or(true, |frontier| wm_ts > frontier);
-                let result = if advances_frontier
-                    && self.output_mode == WindowOutputMode::Emit
-                {
-                    let started = Instant::now();
-                    let batch = self.process_due(advance_to).await;
-                    if let Some((task_id, labels)) = self.metrics_target() {
-                        metrics::record_wm_process_ms(
-                            task_id,
-                            labels,
-                            started.elapsed().as_secs_f64() * 1000.0,
-                        );
-                    }
-                    batch
-                } else {
-                    RecordBatch::new_empty(self.output_schema.clone())
-                };
-                if advances_frontier {
-                    state
-                        .watermark_frontier
-                        .store(wm_ts, Ordering::Release);
-                }
+        let advances_frontier = state
+            .watermark_frontier()
+            .map_or(true, |frontier| wm_ts > frontier);
+        let result = if advances_frontier && self.output_mode == WindowOutputMode::Emit {
+            let started = Instant::now();
+            let batch = self.process_due(advance_to).await;
+            if let Some((task_id, labels)) = self.metrics_target() {
+                metrics::record_wm_process_ms(
+                    task_id,
+                    labels,
+                    started.elapsed().as_secs_f64() * 1000.0,
+                );
+            }
+            batch
+        } else {
+            RecordBatch::new_empty(self.output_schema.clone())
+        };
+        if advances_frontier {
+            state.watermark_frontier.store(wm_ts, Ordering::Release);
+        }
 
-                if self.output_mode == WindowOutputMode::Emit {
-                    out.emit(Message::new(None, result, None, None)).await?;
-                }
-                out.emit(Message::Watermark(watermark)).await
+        if self.output_mode == WindowOutputMode::Emit {
+            out.emit(Message::new(None, result, None, None)).await?;
+        }
+        out.emit(Message::Watermark(watermark)).await
     }
 }
 

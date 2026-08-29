@@ -1,5 +1,3 @@
-use std::fmt;
-
 use crate::{
     common::Message,
     runtime::{
@@ -58,16 +56,9 @@ impl std::fmt::Display for SinkConfig {
     }
 }
 
+#[derive(Debug)]
 pub struct SinkOperator {
     base: OperatorBase,
-}
-
-impl fmt::Debug for SinkOperator {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SinkOperator")
-            .field("base", &self.base)
-            .finish()
-    }
 }
 
 impl SinkOperator {

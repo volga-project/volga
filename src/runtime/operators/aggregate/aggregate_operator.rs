@@ -36,8 +36,6 @@ impl fmt::Debug for AggregateOperator {
             .field("aggregate_exec", &self.aggregate_exec)
             .field("group_input_exprs", &self.group_input_exprs)
             .field("accumulators", &self.accumulators)
-            // .field("input_stream", &"<MessageStream>")
-            // .field("pending_messages", &self.pending_messages)
             .finish()
     }
 }

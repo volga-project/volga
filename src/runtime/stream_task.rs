@@ -74,7 +74,7 @@ impl TaskTimeMetrics {
 }
 
 /// Idle = time spent in `input.next()`, which is wait-for-mailbox (plus cheap
-/// preprocess). Operator compute after `next_input` returns is not included.
+/// preprocess). Operator compute after the mailbox wait returns is not included.
 pub(crate) fn input_with_idle_tracking(
     mut input: MessageStream,
     metrics: Arc<TaskTimeMetrics>,
@@ -91,7 +91,7 @@ pub(crate) fn input_with_idle_tracking(
         }
     })
 }
-// serde imports removed; this module does not define serializable DTOs directly.
+
 use crate::runtime::master::server::master_service::master_service_client::MasterServiceClient;
 use std::sync::atomic::AtomicBool;
 use crate::runtime::VertexId;
@@ -180,11 +180,8 @@ impl CheckpointAligner {
         }
         Ok(None)
     }
-
-    // Unblocking is done in StreamTask after checkpointing.
 }
 
-// Helper function to get current timestamp
 pub(crate) fn timestamp() -> String {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -192,8 +189,6 @@ pub(crate) fn timestamp() -> String {
         .as_millis()
         .to_string()
 }
-
-// StreamTaskStatus/StreamTaskState moved to runtime/observability/snapshot_types.rs
 
 #[derive(Debug)]
 pub struct StreamTask {
@@ -478,7 +473,6 @@ impl StreamTask {
         }
     }
 
-    // Helper function to send message to collectors (similar to original stream_task.rs).
     pub(crate) async fn send_to_collectors_if_needed(
         collectors_per_target_operator: &mut HashMap<String, Collector>,
         message: Message,

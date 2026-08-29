@@ -9,8 +9,6 @@ use futures::stream;
 use std::sync::{Arc, atomic::{AtomicBool, AtomicU32, Ordering}};
 use crate::runtime::VertexId;
 
-// pub type MessageStream = Pin<Box<dyn Stream<Item = Message> + Send>>;
-
 #[derive(Debug)]
 pub struct TransportClientConfig {
     pub vertex_id: VertexId,
