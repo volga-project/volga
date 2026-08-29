@@ -14,38 +14,47 @@ use crate::runtime::health::WorkerHealth;
 use crate::runtime::master::server::master_service::master_service_client::MasterServiceClient;
 use crate::runtime::metrics::MetricsLabels;
 use crate::runtime::observability::StreamTaskStatus;
-use crate::runtime::operators::operator::{create_operator, Operator, OperatorTrait};
+use crate::runtime::operators::operator::{
+    create_operator, Operator, OperatorConfig, OperatorTrait,
+};
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::VertexId;
 use crate::transport::transport_client::{TransportClient, TransportClientConfig};
 
 use super::checkpoint::CheckpointAligner;
 use super::ctx::TaskCtx;
-use super::mailbox::MailboxFront;
 use super::metrics::TaskTimeMetrics;
 use super::processor::processor_loop;
 use super::source::source_loop;
 use super::task::{timestamp, StreamTask};
 use super::watermark::WatermarkManager;
 
+pub(super) struct TaskSignals {
+    pub run_receiver: oneshot::Receiver<()>,
+    pub close_receiver: oneshot::Receiver<()>,
+    pub checkpoint_receiver: mpsc::UnboundedReceiver<u64>,
+}
+
+pub(super) struct WatermarkHandles {
+    pub upstream_watermarks: Arc<Mutex<HashMap<String, u64>>>,
+    pub current_watermark: Arc<AtomicU64>,
+    pub upstream_vertices: Vec<String>,
+}
+
 pub(super) struct RunParams {
     pub vertex_id: VertexId,
     pub runtime_context: RuntimeContext,
     pub status: Arc<AtomicU8>,
-    pub operator_config: crate::runtime::operators::operator::OperatorConfig,
+    pub operator_config: OperatorConfig,
     pub execution_graph: ExecutionGraph,
     pub master_addr: Option<String>,
     pub restore_data: Option<SerializedRestore>,
     pub execution_attempt_id: u64,
     pub worker_health: Arc<WorkerHealth>,
-    pub upstream_watermarks: Arc<Mutex<HashMap<String, u64>>>,
-    pub current_watermark: Arc<AtomicU64>,
-    pub upstream_vertices: Vec<String>,
+    pub watermark: WatermarkHandles,
     pub transport_client_config: TransportClientConfig,
     pub metrics_labels: Option<MetricsLabels>,
-    pub run_receiver: oneshot::Receiver<()>,
-    pub close_receiver: oneshot::Receiver<()>,
-    pub checkpoint_receiver: mpsc::UnboundedReceiver<u64>,
+    pub signals: TaskSignals,
 }
 
 pub(super) async fn run(params: RunParams) -> Result<()> {
@@ -59,14 +68,20 @@ pub(super) async fn run(params: RunParams) -> Result<()> {
         restore_data,
         execution_attempt_id,
         worker_health,
-        upstream_watermarks,
-        current_watermark,
-        upstream_vertices,
+        watermark:
+            WatermarkHandles {
+                upstream_watermarks,
+                current_watermark,
+                upstream_vertices,
+            },
         transport_client_config,
         metrics_labels,
-        run_receiver,
-        close_receiver,
-        mut checkpoint_receiver,
+        signals:
+            TaskSignals {
+                run_receiver,
+                close_receiver,
+                mut checkpoint_receiver,
+            },
     } = params;
 
     let mut operator = create_operator(operator_config);
@@ -142,7 +157,7 @@ pub(super) async fn run(params: RunParams) -> Result<()> {
         timestamp(),
         vertex_id
     );
-    StreamTask::wait_for_run(run_receiver, status.clone()).await;
+    StreamTask::wait_for_oneshot(run_receiver, status.clone(), "run", true).await;
     println!(
         "{:?} Task {:?} received run signal, starting processing",
         timestamp(),
@@ -185,46 +200,46 @@ pub(super) async fn run(params: RunParams) -> Result<()> {
         current_watermark: current_watermark.clone(),
     };
 
-    if let Operator::Source(ref mut source) = operator {
-        let mut source_watermark_manager = WatermarkManager::new(
-            watermark_assign,
-            upstream_vertices.clone(),
-            upstream_watermarks.clone(),
-            current_watermark.clone(),
-        );
-        source_loop(
-            source,
-            ctx,
-            &mut checkpoint_receiver,
-            &mut source_watermark_manager,
-        )
-        .await?;
-    } else {
-        let reader = transport_client
-            .reader
-            .take()
-            .expect("Reader should be initialized for non-SOURCE operator");
-        let _rx_queue_ticker = reader.spawn_rx_queue_ticker(metrics_labels.clone());
-        let (input_stream, reader_control) = reader.message_stream_with_control();
-        let checkpoint_aligner = CheckpointAligner::new(&upstream_vertices, reader_control.clone());
-        let front = MailboxFront::new(
-            vertex_id.clone(),
-            watermark_assign,
-            upstream_vertices.clone(),
-            upstream_watermarks.clone(),
-            current_watermark.clone(),
-            checkpoint_aligner,
-            metrics_labels.clone(),
-            execution_attempt_id,
-        );
-        processor_loop(
-            operator.as_stream_mut(),
-            ctx,
-            input_stream,
-            front,
-            reader_control,
-        )
-        .await?;
+    match &mut operator {
+        Operator::Source(source) => {
+            let mut source_watermark_manager = WatermarkManager::new(
+                watermark_assign,
+                upstream_vertices.clone(),
+                upstream_watermarks.clone(),
+                current_watermark.clone(),
+            );
+            source_loop(
+                source.as_mut(),
+                ctx,
+                &mut checkpoint_receiver,
+                &mut source_watermark_manager,
+            )
+            .await?;
+        }
+        Operator::Stream(stream) => {
+            let reader = transport_client
+                .reader
+                .take()
+                .expect("Reader should be initialized for non-SOURCE operator");
+            let _rx_queue_ticker = reader.spawn_rx_queue_ticker(metrics_labels.clone());
+            let (input_stream, reader_control) = reader.message_stream_with_control();
+            let aligner = CheckpointAligner::new(&upstream_vertices, reader_control.clone());
+            let manager = WatermarkManager::new(
+                watermark_assign,
+                upstream_vertices.clone(),
+                upstream_watermarks.clone(),
+                current_watermark.clone(),
+            );
+            processor_loop(
+                stream.as_mut(),
+                ctx,
+                input_stream,
+                manager,
+                aligner,
+                reader_control,
+            )
+            .await?;
+        }
     }
 
     for (_, collector) in collectors_per_target_operator.iter_mut() {
@@ -236,7 +251,7 @@ pub(super) async fn run(params: RunParams) -> Result<()> {
         timestamp(),
         vertex_id
     );
-    StreamTask::wait_for_close(close_receiver, status.clone()).await;
+    StreamTask::wait_for_oneshot(close_receiver, status.clone(), "close", false).await;
     println!(
         "{:?} Task {:?} received close signal, performing close",
         timestamp(),

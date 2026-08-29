@@ -2,9 +2,8 @@ use crate::{
     common::Message,
     runtime::{
         operators::operator::{
-            OperatorBase, OperatorConfig, OperatorTrait, OperatorType, Output, StreamOperator,
+            HasOperatorBase, OperatorBase, OperatorConfig, Output, StreamOperator,
         },
-        runtime_context::RuntimeContext,
     },
 };
 use anyhow::Result;
@@ -27,22 +26,13 @@ impl JoinOperator {
     }
 }
 
-#[async_trait]
-impl OperatorTrait for JoinOperator {
-    async fn open(&mut self, context: &RuntimeContext) -> Result<()> {
-        self.base.open(context).await
+impl HasOperatorBase for JoinOperator {
+    fn operator_base(&self) -> &OperatorBase {
+        &self.base
     }
 
-    async fn close(&mut self) -> Result<()> {
-        self.base.close().await
-    }
-
-    fn operator_config(&self) -> &OperatorConfig {
-        self.base.operator_config()
-    }
-
-    fn operator_type(&self) -> OperatorType {
-        self.base.operator_type()
+    fn operator_base_mut(&mut self) -> &mut OperatorBase {
+        &mut self.base
     }
 }
 

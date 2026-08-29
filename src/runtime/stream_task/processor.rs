@@ -3,23 +3,28 @@ use std::time::Instant;
 use anyhow::Result;
 use futures::StreamExt;
 
-use crate::common::message::{CheckpointBarrierMessage, Message, WatermarkMessage};
+use crate::common::message::Message;
 use crate::runtime::observability::StreamTaskStatus;
 use crate::runtime::operators::operator::{
     drain_ready_after, MessageStream, StreamOperator, INGEST_MAX_RECORDS,
 };
 use crate::transport::transport_client::DataReaderControl;
 
-use super::checkpoint::on_checkpoint_barrier;
+use super::checkpoint::{on_checkpoint_barrier, CheckpointAligner};
 use super::ctx::TaskCtx;
-use super::mailbox::{sleep_until_deadline, MailboxFront};
+use super::mailbox::{
+    assign_and_merge, flush_pending, on_aligned_barrier, on_timer, on_upstream_watermark,
+    sleep_until_deadline,
+};
 use super::task::{timestamp, StreamTask};
+use super::watermark::WatermarkManager;
 
 pub(super) async fn processor_loop(
     operator: &mut dyn StreamOperator,
     mut ctx: TaskCtx<'_>,
     mailbox: MessageStream,
-    mut front: MailboxFront,
+    mut manager: WatermarkManager,
+    mut aligner: CheckpointAligner,
     reader_control: DataReaderControl,
 ) -> Result<()> {
     let mut mailbox = mailbox.peekable();
@@ -34,30 +39,61 @@ pub(super) async fn processor_loop(
                     .add_idle_ns(idle_start.elapsed().as_nanos() as u64);
                 match message {
                     None => {
-                        emit_watermarks(operator, &mut ctx, front.flush_pending().await).await?;
+                        ctx.emit_watermarks(
+                            flush_pending(&mut manager, ctx.vertex_id.as_ref()).await,
+                            false,
+                            Some(operator),
+                        )
+                        .await?;
                         println!(
                             "{:?} StreamTask {}: upstream ended without terminal watermark; finishing",
                             timestamp(),
                             ctx.vertex_id.as_ref()
                         );
-                        ctx.status.store(
-                            StreamTaskStatus::Finished as u8,
-                            std::sync::atomic::Ordering::SeqCst,
-                        );
+                        ctx.mark_finished();
                         break;
                     }
                     Some(Message::Watermark(wm)) => {
-                        record_recv(&ctx, &Message::Watermark(wm.clone()));
-                        emit_watermarks(operator, &mut ctx, front.on_upstream_watermark(wm).await)
-                            .await?;
+                        let msg = Message::Watermark(wm);
+                        StreamTask::record_control_propagation(
+                            &ctx.vertex_id,
+                            &msg,
+                            ctx.metrics_labels,
+                        );
+                        let Message::Watermark(wm) = msg else {
+                            unreachable!()
+                        };
+                        ctx.emit_watermarks(
+                            on_upstream_watermark(&mut manager, ctx.vertex_id.as_ref(), wm).await,
+                            false,
+                            Some(operator),
+                        )
+                        .await?;
                     }
                     Some(Message::CheckpointBarrier(barrier)) => {
-                        record_recv(&ctx, &Message::CheckpointBarrier(barrier.clone()));
-                        match front.on_aligned_barrier(&barrier).await {
+                        let msg = Message::CheckpointBarrier(barrier);
+                        StreamTask::record_control_propagation(
+                            &ctx.vertex_id,
+                            &msg,
+                            ctx.metrics_labels,
+                        );
+                        let Message::CheckpointBarrier(barrier) = msg else {
+                            unreachable!()
+                        };
+                        match on_aligned_barrier(
+                            &mut aligner,
+                            &mut manager,
+                            &ctx.vertex_id,
+                            ctx.metrics_labels,
+                            ctx.execution_attempt_id,
+                            &barrier,
+                        )
+                        .await
+                        {
                             Ok(None) => {}
                             Ok(Some((checkpoint_id, inject_stamp, wms))) => {
-                                emit_watermarks(operator, &mut ctx, wms).await?;
-                                let aligned = CheckpointBarrierMessage::new(
+                                ctx.emit_watermarks(wms, false, Some(operator)).await?;
+                                let aligned = crate::common::message::CheckpointBarrierMessage::new(
                                     ctx.vertex_id.as_ref().to_string(),
                                     checkpoint_id,
                                     ctx.execution_attempt_id,
@@ -71,7 +107,7 @@ pub(super) async fn processor_loop(
                                     Some(&reader_control),
                                 )
                                 .await?;
-                                let mut out = ctx.output(false);
+                                let mut out = ctx.output();
                                 operator.handle_barrier(aligned, &mut out).await?;
                             }
                             Err(error) => {
@@ -86,29 +122,38 @@ pub(super) async fn processor_loop(
                     Some(first) => {
                         record_recv(&ctx, &first);
                         let mut assigned = Vec::new();
-                        if let Some(wm) = front.assign_and_merge(&first).await {
+                        if let Some(wm) =
+                            assign_and_merge(&mut manager, ctx.vertex_id.as_ref(), &first).await
+                        {
                             assigned.push(wm);
                         }
                         let batch =
                             drain_ready_after(first, &mut mailbox, INGEST_MAX_RECORDS).await;
                         for extra in &batch[1..] {
                             record_recv(&ctx, extra);
-                            if let Some(wm) = front.assign_and_merge(extra).await {
+                            if let Some(wm) =
+                                assign_and_merge(&mut manager, ctx.vertex_id.as_ref(), extra).await
+                            {
                                 assigned.push(wm);
                             }
                         }
                         {
-                            let mut out = ctx.output(false);
+                            let mut out = ctx.output();
                             operator.process_data(batch, &mut out).await?;
                         }
-                        emit_watermarks(operator, &mut ctx, assigned).await?;
+                        ctx.emit_watermarks(assigned, false, Some(operator)).await?;
                     }
                 }
             }
-            _ = sleep_until_deadline(front.next_emit_deadline()) => {
+            _ = sleep_until_deadline(manager.next_emit_deadline()) => {
                 ctx.task_time_metrics
                     .add_idle_ns(idle_start.elapsed().as_nanos() as u64);
-                emit_watermarks(operator, &mut ctx, front.on_timer().await).await?;
+                ctx.emit_watermarks(
+                    on_timer(&mut manager, ctx.vertex_id.as_ref()).await,
+                    false,
+                    Some(operator),
+                )
+                .await?;
             }
         }
 
@@ -126,19 +171,4 @@ pub(super) async fn processor_loop(
 fn record_recv(ctx: &TaskCtx<'_>, message: &Message) {
     StreamTask::record_metrics(ctx.vertex_id.clone(), message, true, ctx.metrics_labels);
     StreamTask::record_control_propagation(&ctx.vertex_id, message, ctx.metrics_labels);
-}
-
-async fn emit_watermarks(
-    operator: &mut dyn StreamOperator,
-    ctx: &mut TaskCtx<'_>,
-    wms: Vec<WatermarkMessage>,
-) -> Result<()> {
-    if wms.is_empty() {
-        return Ok(());
-    }
-    let mut out = ctx.output(false);
-    for wm in wms {
-        operator.handle_watermark(wm, &mut out).await?;
-    }
-    Ok(())
 }

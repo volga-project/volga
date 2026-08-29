@@ -22,8 +22,8 @@ use super::task::StreamTask;
 
 /// Accumulates Flink-style task time metrics within a report window.
 ///
-/// Idle = waiting on mailbox `next()` / source `fetch_next()`, not operator
-/// compute such as Window `insert_batch` / `process_due`. Backpressured =
+/// Idle = waiting on mailbox `next()`, not operator compute such as Window
+/// `insert_batch` / `process_due` and not source `fetch_next`. Backpressured =
 /// exclusive tx-queue wait via [`BackpressureTracker`]; busy = residual wall
 /// time so the three ms/s gauges sum to ~1000.
 #[derive(Debug, Default)]

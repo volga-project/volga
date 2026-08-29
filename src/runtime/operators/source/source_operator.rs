@@ -216,13 +216,17 @@ impl OperatorTrait for SourceOperator {
 
 #[async_trait]
 impl SourceFetch for SourceOperator {
-    async fn fetch_next(&mut self, interrupt: Option<&SourceInterrupt>) -> FetchResult {
-        if self.handle.as_ref().is_some_and(|h| h.is_stopped()) {
+    fn is_stopped(&self) -> bool {
+        self.handle.as_ref().is_some_and(|h| h.is_stopped())
+    }
+
+    async fn fetch_next(&mut self) -> FetchResult {
+        if self.is_stopped() {
             return FetchResult::Idle;
         }
 
         let owned = self.checkpoint_interrupt_arc();
-        let interrupt = interrupt.or(owned.as_deref());
+        let interrupt = owned.as_deref();
 
         // Wake arrived between fetches: yield before pulling more data.
         if interrupt.is_some_and(|interrupt| interrupt.take_canceled()) {

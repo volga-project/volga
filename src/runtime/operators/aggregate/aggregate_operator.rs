@@ -9,8 +9,7 @@ use datafusion::physical_plan::aggregates::AggregateExec;
 use datafusion::physical_plan::PhysicalExpr;
 use async_trait::async_trait;
 use anyhow::Result as AnyhowResult;
-use crate::runtime::operators::operator::{OperatorTrait, OperatorBase, OperatorType, OperatorConfig, Output, StreamOperator};
-use crate::runtime::runtime_context::RuntimeContext;
+use crate::runtime::operators::operator::{HasOperatorBase, OperatorBase, OperatorConfig, Output, StreamOperator};
 use crate::runtime::functions::key_by::pack::split_by_key_exprs;
 use crate::common::{BaseMessage, Message, MAX_WATERMARK_VALUE};
 use std::sync::Arc;
@@ -211,22 +210,13 @@ impl AggregateOperator {
 
 }
 
-#[async_trait]
-impl OperatorTrait for AggregateOperator {
-    async fn open(&mut self, context: &RuntimeContext) -> AnyhowResult<()> {
-        self.base.open(context).await
+impl HasOperatorBase for AggregateOperator {
+    fn operator_base(&self) -> &OperatorBase {
+        &self.base
     }
 
-    async fn close(&mut self) -> AnyhowResult<()> {
-        self.base.close().await
-    }
-
-    fn operator_type(&self) -> OperatorType {
-        self.base.operator_type()
-    }
-
-    fn operator_config(&self) -> &OperatorConfig {
-        self.base.operator_config()
+    fn operator_base_mut(&mut self) -> &mut OperatorBase {
+        &mut self.base
     }
 }
 

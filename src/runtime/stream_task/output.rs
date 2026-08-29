@@ -1,15 +1,12 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::common::message::Message;
-use crate::common::MAX_WATERMARK_VALUE;
 use crate::runtime::collector::Collector;
 use crate::runtime::metrics::MetricsLabels;
-use crate::runtime::observability::StreamTaskStatus;
 use crate::runtime::operators::operator::Output;
 use crate::runtime::VertexId;
 
@@ -19,21 +16,12 @@ pub(super) struct TransportOutput<'a> {
     pub collectors: &'a mut HashMap<String, Collector>,
     pub vertex_id: VertexId,
     pub labels: Option<&'a MetricsLabels>,
-    pub stamp_ingest_if_missing: bool,
-    pub status: Arc<AtomicU8>,
 }
 
 #[async_trait]
 impl Output for TransportOutput<'_> {
     async fn emit(&mut self, mut message: Message) -> Result<()> {
-        if self.stamp_ingest_if_missing && message.ingest_timestamp().is_none() {
-            message.set_ingest_timestamp(StreamTask::now_ms());
-        }
         if let Message::Watermark(ref watermark) = message {
-            if watermark.watermark_value == MAX_WATERMARK_VALUE {
-                self.status
-                    .store(StreamTaskStatus::Finished as u8, Ordering::SeqCst);
-            }
             StreamTask::set_watermark_lag_gauge(
                 &self.vertex_id,
                 watermark.watermark_value,

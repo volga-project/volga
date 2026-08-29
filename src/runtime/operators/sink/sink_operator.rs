@@ -6,9 +6,8 @@ use crate::{
             SinkFunctionTrait,
         },
         operators::operator::{
-            OperatorBase, OperatorConfig, OperatorTrait, OperatorType, Output, StreamOperator,
+            HasOperatorBase, OperatorBase, OperatorConfig, Output, StreamOperator,
         },
-        runtime_context::RuntimeContext,
     },
 };
 use anyhow::Result;
@@ -74,22 +73,13 @@ impl SinkOperator {
     }
 }
 
-#[async_trait]
-impl OperatorTrait for SinkOperator {
-    async fn open(&mut self, context: &RuntimeContext) -> Result<()> {
-        self.base.open(context).await
+impl HasOperatorBase for SinkOperator {
+    fn operator_base(&self) -> &OperatorBase {
+        &self.base
     }
 
-    async fn close(&mut self) -> Result<()> {
-        self.base.close().await
-    }
-
-    fn operator_type(&self) -> OperatorType {
-        self.base.operator_type()
-    }
-
-    fn operator_config(&self) -> &OperatorConfig {
-        self.base.operator_config()
+    fn operator_base_mut(&mut self) -> &mut OperatorBase {
+        &mut self.base
     }
 }
 

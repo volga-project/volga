@@ -18,7 +18,7 @@ use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::VertexId;
 use crate::transport::transport_client::TransportClientConfig;
 
-use super::run::{run, RunParams};
+use super::run::{run, RunParams, TaskSignals, WatermarkHandles};
 
 pub static MESSAGE_TRACE_ENABLED: AtomicBool = AtomicBool::new(false);
 
@@ -150,14 +150,18 @@ impl StreamTask {
             restore_data,
             execution_attempt_id,
             worker_health: run_loop_health,
-            upstream_watermarks,
-            current_watermark,
-            upstream_vertices,
+            watermark: WatermarkHandles {
+                upstream_watermarks,
+                current_watermark,
+                upstream_vertices,
+            },
             transport_client_config,
             metrics_labels,
-            run_receiver,
-            close_receiver,
-            checkpoint_receiver,
+            signals: TaskSignals {
+                run_receiver,
+                close_receiver,
+                checkpoint_receiver,
+            },
         });
         let run_loop_handle = tokio::spawn(run_loop.map(move |result| {
             if let Err(error) = &result {
@@ -215,36 +219,34 @@ impl StreamTask {
         let _ = sender.send(checkpoint_id);
     }
 
-    pub(super) async fn wait_for_run(receiver: oneshot::Receiver<()>, status: Arc<AtomicU8>) {
-        let current_status = status.load(Ordering::SeqCst);
-        if current_status == StreamTaskStatus::Finished as u8
-            || current_status == StreamTaskStatus::Closed as u8
-        {
-            println!(
-                "{:?} Task status is {:?}, stopping wait for run signal",
-                timestamp(),
-                StreamTaskStatus::from(current_status)
-            );
-            return;
+    pub(super) async fn wait_for_oneshot(
+        receiver: oneshot::Receiver<()>,
+        status: Arc<AtomicU8>,
+        name: &str,
+        skip_if_terminal: bool,
+    ) {
+        if skip_if_terminal {
+            let current_status = status.load(Ordering::SeqCst);
+            if current_status == StreamTaskStatus::Finished as u8
+                || current_status == StreamTaskStatus::Closed as u8
+            {
+                println!(
+                    "{:?} Task status is {:?}, stopping wait for {name} signal",
+                    timestamp(),
+                    StreamTaskStatus::from(current_status)
+                );
+                return;
+            }
         }
-
         let timeout = Duration::from_millis(50000);
         match tokio::time::timeout(timeout, receiver).await {
-            Ok(_) => {}
-            Err(_) => panic!(
-                "Timeout waiting for run signal after {:?}, current status is {:?}",
-                timeout,
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => panic!(
+                "{name} signal sender dropped, current status is {:?}",
                 StreamTaskStatus::from(status.load(Ordering::SeqCst))
             ),
-        }
-    }
-
-    pub(super) async fn wait_for_close(receiver: oneshot::Receiver<()>, status: Arc<AtomicU8>) {
-        let timeout = Duration::from_millis(50000);
-        match tokio::time::timeout(timeout, receiver).await {
-            Ok(_) => {}
             Err(_) => panic!(
-                "Timeout waiting for close signal after {:?}, current status is {:?}",
+                "Timeout waiting for {name} signal after {:?}, current status is {:?}",
                 timeout,
                 StreamTaskStatus::from(status.load(Ordering::SeqCst))
             ),
