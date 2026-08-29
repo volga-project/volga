@@ -4,7 +4,7 @@ use datafusion::scalar::ScalarValue;
 
 use crate::common::message::Message;
 use crate::common::MAX_WATERMARK_VALUE;
-use crate::runtime::operators::operator::{OperatorPollResult, OperatorTrait};
+use crate::runtime::operators::operator::{StreamOperator, VecOutput};
 use crate::runtime::operators::window::operator::WindowOperatorConfig;
 use crate::test_utils::window::harness::{
     assert_window_values, batch, keyed_message, run_wo, watermark_message, window_exec_from_sql,
@@ -151,27 +151,36 @@ WINDOW w AS (
 )"#;
     let exec = window_exec_from_sql(sql).await;
     let mut h = Harness::new(WindowOperatorConfig::new(exec)).await;
-    h.op.set_input(Some(Box::pin(futures::stream::iter(vec![
-        keyed_message(batch(vec![1000], vec![1.0], vec!["A"]), "A"),
-        keyed_message(batch(vec![2000], vec![2.0], vec!["A"]), "A"),
-        watermark_message(2000),
-    ]))));
+    let mut out = VecOutput::default();
+    h.op.process_data(
+        vec![
+            keyed_message(batch(vec![1000], vec![1.0], vec!["A"]), "A"),
+            keyed_message(batch(vec![2000], vec![2.0], vec!["A"]), "A"),
+        ],
+        &mut out,
+    )
+    .await
+    .expect("ingest both data messages");
+    assert!(out.messages.is_empty(), "ingest should not emit");
 
-    assert!(matches!(
-        h.op.poll_next().await,
-        OperatorPollResult::Continue
-    ));
-    let out = match h.op.poll_next().await {
-        OperatorPollResult::Ready(Message::Regular(base)) => base.record_batch,
-        other => panic!("expected emit on deferred watermark, got {other:?}"),
+    h.op.handle_watermark(
+        match watermark_message(2000) {
+            Message::Watermark(w) => w,
+            other => panic!("expected watermark, got {other:?}"),
+        },
+        &mut out,
+    )
+    .await
+    .expect("watermark");
+    let emit = match out.messages.as_slice() {
+        [Message::Regular(base), Message::Watermark(w)] => {
+            assert_eq!(w.watermark_value, 2000);
+            base.record_batch.clone()
+        }
+        other => panic!("expected emit then watermark, got {other:?}"),
     };
-    let wm = match h.op.poll_next().await {
-        OperatorPollResult::Ready(Message::Watermark(w)) => w.watermark_value,
-        other => panic!("expected passthrough watermark, got {other:?}"),
-    };
-    assert_eq!(wm, 2000);
     assert_window_values(
-        &out,
+        &emit,
         3,
         &[
             vec![ScalarValue::Float64(Some(1.0))],

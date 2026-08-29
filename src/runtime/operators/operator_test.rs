@@ -8,7 +8,7 @@ use futures::{stream, StreamExt};
 
 use crate::common::message::{Message, WatermarkMessage};
 use crate::runtime::operators::operator::{
-    NextInputs, OperatorBase, OperatorConfig, OperatorTrait,
+    NextInputs, OperatorBase, OperatorConfig,
 };
 use crate::runtime::operators::source::source_operator::{SourceConfig, VectorSourceConfig};
 

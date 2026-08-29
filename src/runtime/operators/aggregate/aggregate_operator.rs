@@ -9,7 +9,7 @@ use datafusion::physical_plan::aggregates::AggregateExec;
 use datafusion::physical_plan::PhysicalExpr;
 use async_trait::async_trait;
 use anyhow::Result as AnyhowResult;
-use crate::runtime::operators::operator::{OperatorTrait, OperatorBase, OperatorType, OperatorConfig, OperatorPollResult, MessageStream};
+use crate::runtime::operators::operator::{OperatorTrait, OperatorBase, OperatorType, OperatorConfig, Output, StreamOperator};
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::functions::key_by::pack::split_by_key_exprs;
 use crate::common::{BaseMessage, Message, MAX_WATERMARK_VALUE};
@@ -222,10 +222,6 @@ impl OperatorTrait for AggregateOperator {
     async fn close(&mut self) -> AnyhowResult<()> {
         self.base.close().await
     }
-
-    fn set_input(&mut self, input: Option<MessageStream>) {
-        self.base.set_input(input);
-    }
     
     fn operator_type(&self) -> OperatorType {
         self.base.operator_type()
@@ -234,56 +230,46 @@ impl OperatorTrait for AggregateOperator {
     fn operator_config(&self) -> &OperatorConfig {
         self.base.operator_config()
     }
+}
 
-    async fn poll_next(&mut self) -> OperatorPollResult {
-        if let Some(msg) = self.base.pop_pending_output() {
-            return OperatorPollResult::Ready(msg);
-        }
-
-        match self.base.next_input().await {
-            Some(message) => {
-                match message {
-                    Message::Regular(base) => {
-                        if self.group_input_exprs.is_empty() {
-                            self.process_group(0, base.clone(), &base.record_batch);
-                        } else {
-                            for (key, payload) in
-                                split_by_key_exprs(&base.record_batch, &self.group_input_exprs)
-                            {
-                                let first = BaseMessage::new(
-                                    base.metadata.upstream_vertex_id.clone(),
-                                    payload.clone(),
-                                    base.metadata.ingest_timestamp,
-                                    base.metadata.extras.clone(),
-                                );
-                                self.process_group(key.hash(), first, &payload);
-                            }
-                        }
-                        OperatorPollResult::Continue
-                    }
-                    Message::Watermark(watermark) => {
-                        // Inline process_watermark logic
-                        // TODO why do we emit only on max watermark?
-                        if watermark.watermark_value == MAX_WATERMARK_VALUE {
-                            if !self.accumulators.is_empty() {
-                                // Emit aggregated result first
-                                if let Some(result_msg) = self.emit_all_accumulators() {
-                                    // Buffer the watermark to be returned on next poll
-                                    self.base.pending_messages.push(Message::Watermark(watermark));
-                                    return OperatorPollResult::Ready(result_msg);
-                                }
-                            }
-                        }
-                        // Always pass through watermarks (if no result was emitted)
-                        OperatorPollResult::Ready(Message::Watermark(watermark))
-                    }
-                    Message::CheckpointBarrier(barrier) => {
-                        OperatorPollResult::Ready(Message::CheckpointBarrier(barrier))
-                    }
+#[async_trait]
+impl StreamOperator for AggregateOperator {
+    async fn process_data(&mut self, data: Vec<Message>, _out: &mut dyn Output) -> AnyhowResult<()> {
+        for message in data {
+            let Message::Regular(base) = message else {
+                panic!("aggregate ingest expects data messages, got {message:?}");
+            };
+            if self.group_input_exprs.is_empty() {
+                self.process_group(0, base.clone(), &base.record_batch);
+            } else {
+                for (key, payload) in
+                    split_by_key_exprs(&base.record_batch, &self.group_input_exprs)
+                {
+                    let first = BaseMessage::new(
+                        base.metadata.upstream_vertex_id.clone(),
+                        payload.clone(),
+                        base.metadata.ingest_timestamp,
+                        base.metadata.extras.clone(),
+                    );
+                    self.process_group(key.hash(), first, &payload);
                 }
             }
-            None => OperatorPollResult::None,
         }
+        Ok(())
+    }
+
+    async fn handle_watermark(
+        &mut self,
+        watermark: crate::common::message::WatermarkMessage,
+        out: &mut dyn Output,
+    ) -> AnyhowResult<()> {
+        // TODO why do we emit only on max watermark?
+        if watermark.watermark_value == MAX_WATERMARK_VALUE {
+            if let Some(result_msg) = self.emit_all_accumulators() {
+                out.emit(result_msg).await?;
+            }
+        }
+        out.emit(Message::Watermark(watermark)).await
     }
 }
 
@@ -363,22 +349,24 @@ mod tests {
         // Get expected schema from AggregateExec before moving operator
         let expected_schema = operator.aggregate_exec.schema();
         
-        // Create input stream from collected messages
-        let input_stream = Box::pin(futures::stream::iter(messages_to_process));
-        
-        // Process through message stream
-        operator.set_input(Some(input_stream));
+        // Process through handlers
+        let mut out = crate::runtime::operators::operator::VecOutput::default();
+        let mut data = Vec::new();
+        let mut max_wm = None;
+        for message in messages_to_process {
+            match message {
+                Message::Watermark(wm) => max_wm = Some(wm),
+                other => data.push(other),
+            }
+        }
+        operator.process_data(data, &mut out).await.unwrap();
+        if let Some(wm) = max_wm {
+            operator.handle_watermark(wm, &mut out).await.unwrap();
+        }
         let mut final_result = Vec::new();
-        
-        loop {
-            match operator.poll_next().await {
-                OperatorPollResult::None => break,
-                OperatorPollResult::Continue => continue,
-                OperatorPollResult::Ready(message) => {
-                    if !matches!(message, Message::Watermark(_)) {
-                        final_result.push(message);
-                    }
-                }
+        for message in out.messages {
+            if !matches!(message, Message::Watermark(_)) {
+                final_result.push(message);
             }
         }
         

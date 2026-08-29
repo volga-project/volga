@@ -9,7 +9,7 @@ use crate::runtime::operators::join::join_operator::JoinOperator;
 use crate::runtime::operators::key_by::key_by_operator::KeyByOperator;
 use crate::runtime::operators::map::map_operator::MapOperator;
 use crate::runtime::operators::sink::sink_operator::{SinkConfig, SinkOperator};
-use crate::runtime::operators::source::source_operator::{SourceConfig, SourceOperator};
+use crate::runtime::operators::source::source_operator::{SourceConfig, SourceOperator as SourceOp};
 use crate::runtime::operators::window::operator::{WindowOperator, WindowOperatorConfig};
 use crate::runtime::operators::window::request::WindowRequestOperatorConfig;
 use crate::runtime::operators::window::WindowRequestOperator;
@@ -25,23 +25,6 @@ use crate::runtime::functions::{
 };
 
 pub type MessageStream = Pin<Box<dyn Stream<Item = Message> + Send + Sync>>;
-
-#[derive(Debug, Clone)]
-pub enum OperatorPollResult {
-    Ready(Message),
-    Continue,    
-    None
-}
-
-impl OperatorPollResult {
-    pub fn get_result_message(self) -> Message {
-        match self {
-            OperatorPollResult::Ready(msg) => msg,
-            OperatorPollResult::Continue => panic!("OperatorPollResult is Continue, expected Ready"),
-            OperatorPollResult::None => panic!("OperatorPollResult is None, expected Ready"),
-        }
-    }
-}
 
 /// Result of [`OperatorBase::next_inputs`].
 ///
@@ -66,20 +49,35 @@ pub enum OperatorType {
     Processor,
 }
 
+/// Cap for one processor ingest (`drain_ready_inputs`).
+pub(crate) const INGEST_MAX_RECORDS: usize = 64 * 1024;
+
+#[async_trait]
+pub trait Output: Send {
+    async fn emit(&mut self, msg: Message) -> Result<()>;
+}
+
+/// Collects operator output for unit tests.
+#[derive(Debug, Default)]
+pub struct VecOutput {
+    pub messages: Vec<Message>,
+}
+
+#[async_trait]
+impl Output for VecOutput {
+    async fn emit(&mut self, msg: Message) -> Result<()> {
+        self.messages.push(msg);
+        Ok(())
+    }
+}
+
+/// Lifecycle shared by sources and stream operators.
 #[async_trait]
 pub trait OperatorTrait: Send + Sync + fmt::Debug {
     async fn open(&mut self, context: &RuntimeContext) -> Result<()>;
     async fn close(&mut self) -> Result<()>;
     fn operator_type(&self) -> OperatorType;
     fn operator_config(&self) -> &OperatorConfig;
-
-    async fn poll_next(&mut self) -> OperatorPollResult {
-        panic!("poll_next not implemented for this operator")
-    }
-
-    fn set_input(&mut self, _input: Option<MessageStream>) {
-        panic!("set_input not implemented for this operator")
-    }
 
     async fn checkpoint(&mut self, _checkpoint_id: u64) -> Result<SerializedCheckpoint> {
         Ok(SerializedCheckpoint::new(Vec::new()))
@@ -88,6 +86,37 @@ pub trait OperatorTrait: Send + Sync + fmt::Debug {
     async fn restore(&mut self, _restore: SerializedRestore) -> Result<()> {
         Ok(())
     }
+}
+
+/// Processor / sink: the task owns the mailbox and dispatches events.
+#[async_trait]
+pub trait StreamOperator: OperatorTrait {
+    async fn process_data(&mut self, data: Vec<Message>, out: &mut dyn Output) -> Result<()>;
+
+    async fn handle_watermark(
+        &mut self,
+        wm: crate::common::message::WatermarkMessage,
+        out: &mut dyn Output,
+    ) -> Result<()> {
+        out.emit(Message::Watermark(wm)).await
+    }
+
+    async fn handle_barrier(
+        &mut self,
+        barrier: crate::common::message::CheckpointBarrierMessage,
+        out: &mut dyn Output,
+    ) -> Result<()> {
+        out.emit(Message::CheckpointBarrier(barrier)).await
+    }
+}
+
+/// Source: the task pulls via [`fetch_next`]; no mailbox.
+#[async_trait]
+pub trait SourceOperator: OperatorTrait {
+    async fn fetch_next(
+        &mut self,
+        interrupt: Option<&crate::runtime::operators::source::source_handles::SourceInterrupt>,
+    ) -> crate::runtime::functions::source::FetchResult;
 }
 
 pub fn operator_config_requires_checkpoint(operator_config: &OperatorConfig) -> bool {
@@ -110,7 +139,7 @@ pub enum Operator {
     Map(MapOperator),
     Join(JoinOperator),
     Sink(SinkOperator),
-    Source(SourceOperator),
+    Source(SourceOp),
     KeyBy(KeyByOperator),
     Aggregate(AggregateOperator),
     Window(WindowOperator),
@@ -197,32 +226,6 @@ impl OperatorTrait for Operator {
             Operator::WindowRequest(op) => op.operator_config(),
         }
     }
-    
-    fn set_input(&mut self, input: Option<MessageStream>) {
-        match self {
-            Operator::Map(op) => op.set_input(input),
-            Operator::Join(op) => op.set_input(input),
-            Operator::Sink(op) => op.set_input(input),
-            Operator::Source(op) => op.set_input(input),
-            Operator::KeyBy(op) => op.set_input(input),
-            Operator::Aggregate(op) => op.set_input(input),
-            Operator::Window(op) => op.set_input(input),
-            Operator::WindowRequest(op) => op.set_input(input),
-        }
-    }
-    
-    async fn poll_next(&mut self) -> OperatorPollResult {
-        match self {
-            Operator::Map(op) => op.poll_next().await,
-            Operator::Join(op) => op.poll_next().await,
-            Operator::Sink(op) => op.poll_next().await,
-            Operator::Source(op) => op.poll_next().await,
-            Operator::KeyBy(op) => op.poll_next().await,
-            Operator::Aggregate(op) => op.poll_next().await,
-            Operator::Window(op) => op.poll_next().await,
-            Operator::WindowRequest(op) => op.poll_next().await,
-        }
-    }
 
     async fn checkpoint(&mut self, checkpoint_id: u64) -> Result<SerializedCheckpoint> {
         match self {
@@ -251,6 +254,61 @@ impl OperatorTrait for Operator {
     }
 }
 
+#[async_trait]
+impl StreamOperator for Operator {
+    async fn process_data(&mut self, data: Vec<Message>, out: &mut dyn Output) -> Result<()> {
+        match self {
+            Operator::Map(op) => op.process_data(data, out).await,
+            Operator::Join(op) => op.process_data(data, out).await,
+            Operator::Sink(op) => op.process_data(data, out).await,
+            Operator::Source(_) => {
+                panic!("Source operators do not implement StreamOperator; use fetch_next")
+            }
+            Operator::KeyBy(op) => op.process_data(data, out).await,
+            Operator::Aggregate(op) => op.process_data(data, out).await,
+            Operator::Window(op) => op.process_data(data, out).await,
+            Operator::WindowRequest(op) => op.process_data(data, out).await,
+        }
+    }
+
+    async fn handle_watermark(
+        &mut self,
+        wm: crate::common::message::WatermarkMessage,
+        out: &mut dyn Output,
+    ) -> Result<()> {
+        match self {
+            Operator::Map(op) => op.handle_watermark(wm, out).await,
+            Operator::Join(op) => op.handle_watermark(wm, out).await,
+            Operator::Sink(op) => op.handle_watermark(wm, out).await,
+            Operator::Source(_) => {
+                panic!("Source operators do not implement StreamOperator; use fetch_next")
+            }
+            Operator::KeyBy(op) => op.handle_watermark(wm, out).await,
+            Operator::Aggregate(op) => op.handle_watermark(wm, out).await,
+            Operator::Window(op) => op.handle_watermark(wm, out).await,
+            Operator::WindowRequest(op) => op.handle_watermark(wm, out).await,
+        }
+    }
+
+    async fn handle_barrier(
+        &mut self,
+        barrier: crate::common::message::CheckpointBarrierMessage,
+        out: &mut dyn Output,
+    ) -> Result<()> {
+        match self {
+            Operator::Map(op) => op.handle_barrier(barrier, out).await,
+            Operator::Join(op) => op.handle_barrier(barrier, out).await,
+            Operator::Sink(op) => op.handle_barrier(barrier, out).await,
+            Operator::Source(_) => {
+                panic!("Source operators do not implement StreamOperator; use fetch_next")
+            }
+            Operator::KeyBy(op) => op.handle_barrier(barrier, out).await,
+            Operator::Aggregate(op) => op.handle_barrier(barrier, out).await,
+            Operator::Window(op) => op.handle_barrier(barrier, out).await,
+            Operator::WindowRequest(op) => op.handle_barrier(barrier, out).await,
+        }
+    }
+}
 
 pub struct OperatorBase {
     pub runtime_context: Option<RuntimeContext>,
@@ -325,6 +383,10 @@ impl OperatorBase {
     pub fn operator_config(&self) -> &OperatorConfig {
         &self.operator_config
     }
+
+    pub fn set_input(&mut self, input: Option<MessageStream>) {
+        self.input = input.map(|s| s.peekable());
+    }
 }
 
 #[async_trait]
@@ -353,15 +415,6 @@ impl OperatorTrait for OperatorBase {
     fn operator_config(&self) -> &OperatorConfig {
         &self.operator_config
     }
-    
-    fn set_input(&mut self, input: Option<MessageStream>) {
-        self.input = input.map(|s| s.peekable());
-    }
-    
-    async fn poll_next(&mut self) -> OperatorPollResult {
-        // OperatorBase is not a real stream operator, conform to OperatorTrait
-        panic!("poll_next not implemented for OperatorBase");
-    }
 }
 
 
@@ -372,7 +425,7 @@ pub fn create_operator(
         OperatorConfig::MapConfig(_) => Operator::Map(MapOperator::new(operator_config)),
         OperatorConfig::JoinConfig(_) => Operator::Join(JoinOperator::new(operator_config)),
         OperatorConfig::SinkConfig(_) => Operator::Sink(SinkOperator::new(operator_config)),
-        OperatorConfig::SourceConfig(_) => Operator::Source(SourceOperator::new(operator_config)),
+        OperatorConfig::SourceConfig(_) => Operator::Source(SourceOp::new(operator_config)),
         OperatorConfig::KeyByConfig(_) => Operator::KeyBy(KeyByOperator::new(operator_config)),
         OperatorConfig::AggregateConfig(_) => Operator::Aggregate(AggregateOperator::new(operator_config)),
         OperatorConfig::WindowConfig(_) => Operator::Window(WindowOperator::new(operator_config)),
@@ -395,7 +448,7 @@ pub fn get_operator_type_from_config(operator_config: &OperatorConfig) -> Operat
 }
 
 /// Pull ready data messages until `max_records` or a control / empty / pending stop.
-async fn drain_ready_inputs<S>(input: &mut Peekable<S>, max_records: usize) -> NextInputs
+pub(crate) async fn drain_ready_inputs<S>(input: &mut Peekable<S>, max_records: usize) -> NextInputs
 where
     S: Stream<Item = Message> + Unpin,
 {

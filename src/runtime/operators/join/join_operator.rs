@@ -1,8 +1,16 @@
 use std::fmt;
 
-use crate::{common::Message, runtime::{operators::operator::{MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType}, runtime_context::RuntimeContext}};
-use async_trait::async_trait;
+use crate::{
+    common::Message,
+    runtime::{
+        operators::operator::{
+            OperatorBase, OperatorConfig, OperatorTrait, OperatorType, Output, StreamOperator,
+        },
+        runtime_context::RuntimeContext,
+    },
+};
 use anyhow::Result;
+use async_trait::async_trait;
 
 pub struct JoinOperator {
     base: OperatorBase,
@@ -26,7 +34,7 @@ impl JoinOperator {
             OperatorConfig::JoinConfig(join_function) => join_function,
             _ => panic!("Expected JoinConfig, got {:?}", config),
         };
-        Self { 
+        Self {
             base: OperatorBase::new_with_function(join_function, config),
             left_buffer: Vec::new(),
             right_buffer: Vec::new(),
@@ -44,34 +52,29 @@ impl OperatorTrait for JoinOperator {
         self.base.close().await
     }
 
-    fn set_input(&mut self, input: Option<MessageStream>) {
-        self.base.set_input(input);
-    }
-
     fn operator_config(&self) -> &OperatorConfig {
         self.base.operator_config()
     }
 
-    async fn poll_next(&mut self) -> OperatorPollResult {
-        match self.base.next_input().await {
-            Some(Message::Watermark(watermark)) => OperatorPollResult::Ready(Message::Watermark(watermark)),
-            Some(Message::CheckpointBarrier(barrier)) => OperatorPollResult::Ready(Message::CheckpointBarrier(barrier)),
-            Some(message) => {
-                // TODO proper lookup for upstream_vertex_id position (left or right)
-                if let Some(upstream_id) = message.upstream_vertex_id() {
-                    if upstream_id.contains("left") {
-                        self.left_buffer.push(message.clone());
-                    } else {
-                        self.right_buffer.push(message.clone());
-                    }
-                }
-                OperatorPollResult::Ready(message)
-            }
-            None => OperatorPollResult::None,
-        }
-    }
-
     fn operator_type(&self) -> OperatorType {
         self.base.operator_type()
+    }
+}
+
+#[async_trait]
+impl StreamOperator for JoinOperator {
+    async fn process_data(&mut self, data: Vec<Message>, out: &mut dyn Output) -> Result<()> {
+        for message in data {
+            // TODO proper lookup for upstream_vertex_id position (left or right)
+            if let Some(upstream_id) = message.upstream_vertex_id() {
+                if upstream_id.contains("left") {
+                    self.left_buffer.push(message.clone());
+                } else {
+                    self.right_buffer.push(message.clone());
+                }
+            }
+            out.emit(message).await?;
+        }
+        Ok(())
     }
 }

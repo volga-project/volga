@@ -5,6 +5,7 @@ pub mod execution_graph;
 pub mod operators;
 pub mod stream_task;
 pub mod stream_task_preprocess;
+pub mod stream_task_run;
 pub mod stream_task_actor;
 pub mod worker;
 pub mod worker_config_utils;

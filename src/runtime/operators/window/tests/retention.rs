@@ -3,7 +3,7 @@
 use futures::TryStreamExt;
 
 use crate::runtime::checkpoint::SerializedRestore;
-use crate::runtime::operators::operator::{OperatorPollResult, OperatorTrait};
+use crate::runtime::operators::operator::{OperatorTrait, StreamOperator, VecOutput};
 use crate::runtime::operators::window::model::{Cursor, RawRun, TileRun};
 use crate::runtime::operators::window::operator::{WindowOperatorConfig, WindowOutputMode};
 use crate::runtime::operators::window::spec::WindowSpec;
@@ -229,13 +229,16 @@ async fn state_only_prunes_without_triggers_or_evaluation_state() {
     .await;
     assert_eq!(due_trigger_count(&h, 10_000).await, 0);
 
-    h.op.set_input(Some(Box::pin(futures::stream::iter(vec![
-        watermark_message(10_000),
-    ]))));
-    assert!(matches!(
-        h.op.poll_next().await,
-        OperatorPollResult::Continue
-    ));
+    let mut out = VecOutput::default();
+    h.op.handle_watermark(
+        match watermark_message(10_000) {
+            crate::common::message::Message::Watermark(w) => w,
+            other => panic!("expected watermark, got {other:?}"),
+        },
+        &mut out,
+    )
+    .await
+    .expect("watermark");
     h.run_maintenance().await;
 
     assert_eq!(raw_timestamps(&h, "A").await, vec![5_000, 10_000]);
