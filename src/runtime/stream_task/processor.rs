@@ -4,7 +4,6 @@ use anyhow::Result;
 use futures::StreamExt;
 
 use crate::common::message::Message;
-use crate::runtime::observability::StreamTaskStatus;
 use crate::runtime::operators::operator::{
     drain_ready_after, MessageStream, StreamOperator, INGEST_MAX_RECORDS,
 };
@@ -13,7 +12,7 @@ use crate::transport::transport_client::DataReaderControl;
 use super::checkpoint::on_checkpoint_barrier;
 use super::ctx::TaskCtx;
 use super::progress::{sleep_until_deadline, InputProgress};
-use super::task::{timestamp, StreamTask};
+use super::task::timestamp;
 
 pub(super) async fn processor_loop(
     operator: &mut dyn StreamOperator,
@@ -25,13 +24,12 @@ pub(super) async fn processor_loop(
     let mut mailbox = mailbox.peekable();
     let mut metrics_window_start = Instant::now();
 
-    while ctx.status.load(std::sync::atomic::Ordering::SeqCst) == StreamTaskStatus::Running as u8 {
+    while ctx.is_running() {
         let idle_start = Instant::now();
         tokio::select! {
             biased;
             message = mailbox.next() => {
-                ctx.task_time_metrics
-                    .add_idle_ns(idle_start.elapsed().as_nanos() as u64);
+                ctx.add_idle(idle_start);
                 match message {
                     None => {
                         ctx.emit_watermarks(progress.flush_pending().await, false, Some(operator))
@@ -46,11 +44,7 @@ pub(super) async fn processor_loop(
                     }
                     Some(Message::Watermark(wm)) => {
                         let msg = Message::Watermark(wm);
-                        StreamTask::record_control_propagation(
-                            &ctx.vertex_id,
-                            &msg,
-                            ctx.metrics_labels,
-                        );
+                        ctx.record_control(&msg);
                         let Message::Watermark(wm) = msg else {
                             unreachable!()
                         };
@@ -63,11 +57,7 @@ pub(super) async fn processor_loop(
                     }
                     Some(Message::CheckpointBarrier(barrier)) => {
                         let msg = Message::CheckpointBarrier(barrier);
-                        StreamTask::record_control_propagation(
-                            &ctx.vertex_id,
-                            &msg,
-                            ctx.metrics_labels,
-                        );
+                        ctx.record_control(&msg);
                         let Message::CheckpointBarrier(barrier) = msg else {
                             unreachable!()
                         };
@@ -75,12 +65,7 @@ pub(super) async fn processor_loop(
                             Ok(None) => {}
                             Ok(Some((checkpoint_id, inject_stamp, wms))) => {
                                 ctx.emit_watermarks(wms, false, Some(operator)).await?;
-                                let aligned = crate::common::message::CheckpointBarrierMessage::new(
-                                    ctx.vertex_id.as_ref().to_string(),
-                                    checkpoint_id,
-                                    ctx.execution_attempt_id,
-                                    inject_stamp,
-                                );
+                                let aligned = ctx.new_barrier(checkpoint_id, inject_stamp);
                                 on_checkpoint_barrier(
                                     operator,
                                     &mut ctx,
@@ -102,7 +87,7 @@ pub(super) async fn processor_loop(
                         }
                     }
                     Some(first) => {
-                        record_recv(&ctx, &first);
+                        ctx.record_recv(&first);
                         let mut assigned = Vec::new();
                         if let Some(wm) = progress.assign_and_merge(&first).await {
                             assigned.push(wm);
@@ -110,7 +95,7 @@ pub(super) async fn processor_loop(
                         let batch =
                             drain_ready_after(first, &mut mailbox, INGEST_MAX_RECORDS).await;
                         for extra in &batch[1..] {
-                            record_recv(&ctx, extra);
+                            ctx.record_recv(extra);
                             if let Some(wm) = progress.assign_and_merge(extra).await {
                                 assigned.push(wm);
                             }
@@ -124,25 +109,13 @@ pub(super) async fn processor_loop(
                 }
             }
             _ = sleep_until_deadline(progress.next_emit_deadline()) => {
-                ctx.task_time_metrics
-                    .add_idle_ns(idle_start.elapsed().as_nanos() as u64);
+                ctx.add_idle(idle_start);
                 ctx.emit_watermarks(progress.on_timer().await, false, Some(operator))
                     .await?;
             }
         }
 
-        StreamTask::report_task_time_metrics(
-            &ctx.task_time_metrics,
-            &mut metrics_window_start,
-            &ctx.vertex_id,
-            ctx.metrics_labels,
-            &ctx.current_watermark,
-        );
+        ctx.report_time_metrics(&mut metrics_window_start);
     }
     Ok(())
-}
-
-fn record_recv(ctx: &TaskCtx<'_>, message: &Message) {
-    StreamTask::record_metrics(ctx.vertex_id.clone(), message, true, ctx.metrics_labels);
-    StreamTask::record_control_propagation(&ctx.vertex_id, message, ctx.metrics_labels);
 }

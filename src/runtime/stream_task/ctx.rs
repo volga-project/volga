@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::Result;
 
-use crate::common::message::{Message, WatermarkMessage};
+use crate::common::message::{CheckpointBarrierMessage, Message, WatermarkMessage};
 use crate::common::MAX_WATERMARK_VALUE;
 use crate::runtime::collector::Collector;
 use crate::runtime::master::server::master_service::master_service_client::MasterServiceClient;
@@ -39,9 +40,50 @@ impl TaskCtx<'_> {
         }
     }
 
+    pub fn is_running(&self) -> bool {
+        self.status.load(Ordering::SeqCst) == StreamTaskStatus::Running as u8
+    }
+
     pub fn mark_finished(&self) {
         self.status
             .store(StreamTaskStatus::Finished as u8, Ordering::SeqCst);
+    }
+
+    pub fn add_idle(&self, idle_start: Instant) {
+        self.task_time_metrics
+            .add_idle_ns(idle_start.elapsed().as_nanos() as u64);
+    }
+
+    pub fn record_recv(&self, message: &Message) {
+        StreamTask::record_metrics(self.vertex_id.clone(), message, true, self.metrics_labels);
+        self.record_control(message);
+    }
+
+    pub fn record_control(&self, message: &Message) {
+        StreamTask::record_control_propagation(&self.vertex_id, message, self.metrics_labels);
+    }
+
+    pub fn report_time_metrics(&self, window_start: &mut Instant) {
+        StreamTask::report_task_time_metrics(
+            &self.task_time_metrics,
+            window_start,
+            &self.vertex_id,
+            self.metrics_labels,
+            &self.current_watermark,
+        );
+    }
+
+    pub fn new_barrier(
+        &self,
+        checkpoint_id: u64,
+        inject_stamp: Option<u64>,
+    ) -> CheckpointBarrierMessage {
+        CheckpointBarrierMessage::new(
+            self.vertex_id.as_ref().to_string(),
+            checkpoint_id,
+            self.execution_attempt_id,
+            inject_stamp,
+        )
     }
 
     pub fn mark_finished_if_max_wm(&self, wm: &WatermarkMessage) {

@@ -12,6 +12,7 @@ use crate::runtime::watermark::WatermarkAssignConfig;
 use crate::runtime::VertexId;
 
 use super::checkpoint::CheckpointAligner;
+use super::ctx::TaskCtx;
 use super::task::StreamTask;
 use super::watermark::WatermarkManager;
 
@@ -35,6 +36,25 @@ pub(super) struct InputProgress {
 
 impl InputProgress {
     pub(super) fn new(
+        ctx: &TaskCtx<'_>,
+        watermark_assign: Option<WatermarkAssignConfig>,
+        upstream_vertices: Vec<String>,
+        upstream_watermarks: Arc<Mutex<HashMap<String, u64>>>,
+        aligner: CheckpointAligner,
+    ) -> Self {
+        Self::from_parts(
+            ctx.vertex_id.clone(),
+            watermark_assign,
+            upstream_vertices,
+            upstream_watermarks,
+            ctx.current_watermark.clone(),
+            aligner,
+            ctx.metrics_labels.cloned(),
+            ctx.execution_attempt_id,
+        )
+    }
+
+    fn from_parts(
         vertex_id: VertexId,
         watermark_assign: Option<WatermarkAssignConfig>,
         upstream_vertices: Vec<String>,
@@ -155,7 +175,7 @@ impl InputProgress {
             &ups,
             crate::transport::transport_client::DataReaderControl::empty_for_test(),
         );
-        Self::new(
+        Self::from_parts(
             Arc::<str>::from("v0"),
             watermark_assign,
             ups,

@@ -139,10 +139,7 @@ pub(super) async fn on_checkpoint_barrier(
     data_reader_control: Option<&DataReaderControl>,
 ) -> Result<()> {
     let checkpoint_id = barrier.checkpoint_id;
-    let vertex_id = ctx.vertex_id.clone();
     let task_index = ctx.runtime_context.task_index();
-    let execution_attempt_id = ctx.execution_attempt_id;
-    let metrics_labels = ctx.metrics_labels;
     let propagation_phase = if is_source {
         crate::runtime::master::server::master_service::CheckpointPropagationPhase::BarrierInjected
     } else {
@@ -151,9 +148,9 @@ pub(super) async fn on_checkpoint_barrier(
     StreamTask::report_checkpoint_propagation(
         ctx.master_client,
         checkpoint_id,
-        vertex_id.as_ref(),
+        ctx.vertex_id.as_ref(),
         task_index,
-        execution_attempt_id,
+        ctx.execution_attempt_id,
         propagation_phase,
     )
     .await?;
@@ -161,7 +158,7 @@ pub(super) async fn on_checkpoint_barrier(
     if operator_config_requires_checkpoint(operator.operator_config()) {
         println!(
             "[CHECKPOINT] {} checkpointing checkpoint_id={}",
-            vertex_id, checkpoint_id
+            ctx.vertex_id, checkpoint_id
         );
         let started = Instant::now();
         let checkpoint_result = async {
@@ -176,10 +173,10 @@ pub(super) async fn on_checkpoint_barrier(
                 .report_checkpoint(tonic::Request::new(
                     crate::runtime::master::server::master_service::ReportCheckpointRequest {
                         checkpoint_id,
-                        vertex_id: vertex_id.as_ref().to_string(),
+                        vertex_id: ctx.vertex_id.as_ref().to_string(),
                         task_index,
                         checkpoint_data,
-                        execution_attempt_id,
+                        execution_attempt_id: ctx.execution_attempt_id,
                     },
                 ))
                 .await?
@@ -200,32 +197,32 @@ pub(super) async fn on_checkpoint_barrier(
                 StreamTask::record_histogram(
                     METRIC_STREAM_TASK_CHECKPOINT_DURATION_MS,
                     duration_ms,
-                    &vertex_id,
-                    metrics_labels,
+                    &ctx.vertex_id,
+                    ctx.metrics_labels,
                 );
                 StreamTask::record_histogram(
                     METRIC_STREAM_TASK_CHECKPOINT_PAYLOAD_BYTES,
                     payload_len as f64,
-                    &vertex_id,
-                    metrics_labels,
+                    &ctx.vertex_id,
+                    ctx.metrics_labels,
                 );
                 increment_task_counter(
                     METRIC_STREAM_TASK_CHECKPOINT_SUCCESS,
                     1,
-                    vertex_id.as_ref(),
-                    metrics_labels,
+                    ctx.vertex_id.as_ref(),
+                    ctx.metrics_labels,
                 );
                 println!(
                     "[CHECKPOINT] {} reported checkpoint_id={}",
-                    vertex_id, checkpoint_id
+                    ctx.vertex_id, checkpoint_id
                 );
             }
             Err(error) => {
                 increment_task_counter(
                     METRIC_STREAM_TASK_CHECKPOINT_FAILED,
                     1,
-                    vertex_id.as_ref(),
-                    metrics_labels,
+                    ctx.vertex_id.as_ref(),
+                    ctx.metrics_labels,
                 );
                 return Err(error);
             }

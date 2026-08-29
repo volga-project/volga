@@ -1,10 +1,9 @@
 use anyhow::Result;
 use tokio::sync::mpsc;
 
-use crate::common::message::{CheckpointBarrierMessage, Message, WatermarkMessage};
+use crate::common::message::{Message, WatermarkMessage};
 use crate::common::MAX_WATERMARK_VALUE;
 use crate::runtime::functions::source::FetchResult;
-use crate::runtime::observability::StreamTaskStatus;
 use crate::runtime::operators::operator::{
     operator_config_requires_checkpoint, Output, SourceOperator,
 };
@@ -24,7 +23,7 @@ pub(super) async fn source_loop(
     let mut metrics_window_start = std::time::Instant::now();
     let checkpointable = operator_config_requires_checkpoint(source.operator_config());
 
-    while ctx.status.load(std::sync::atomic::Ordering::SeqCst) == StreamTaskStatus::Running as u8 {
+    while ctx.is_running() {
         let deadline = if source_watermark_manager.assigner_enabled() {
             source_watermark_manager.next_emit_deadline()
         } else {
@@ -112,13 +111,7 @@ pub(super) async fn source_loop(
             }
         }
 
-        StreamTask::report_task_time_metrics(
-            &ctx.task_time_metrics,
-            &mut metrics_window_start,
-            &ctx.vertex_id,
-            ctx.metrics_labels,
-            &ctx.current_watermark,
-        );
+        ctx.report_time_metrics(&mut metrics_window_start);
     }
     Ok(())
 }
@@ -135,12 +128,7 @@ async fn inject_source_barrier(
     );
     ctx.emit_watermarks(source_watermark_manager.flush_pending(), true, None)
         .await?;
-    let barrier = CheckpointBarrierMessage::new(
-        ctx.vertex_id.as_ref().to_string(),
-        checkpoint_id,
-        ctx.execution_attempt_id,
-        Some(StreamTask::now_ms()),
-    );
+    let barrier = ctx.new_barrier(checkpoint_id, Some(StreamTask::now_ms()));
     on_checkpoint_barrier(source, ctx, &barrier, true, None).await?;
     let mut barrier_msg = Message::CheckpointBarrier(barrier);
     TaskCtx::stamp_ingest_if_missing(&mut barrier_msg);

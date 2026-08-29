@@ -207,7 +207,7 @@ pub(super) async fn run(params: RunParams) -> Result<()> {
                 watermark_assign,
                 upstream_vertices.clone(),
                 upstream_watermarks.clone(),
-                current_watermark.clone(),
+                ctx.current_watermark.clone(),
             );
             source_loop(
                 source.as_mut(),
@@ -226,14 +226,11 @@ pub(super) async fn run(params: RunParams) -> Result<()> {
             let (input_stream, reader_control) = reader.message_stream_with_control();
             let aligner = CheckpointAligner::new(&upstream_vertices, reader_control.clone());
             let progress = InputProgress::new(
-                vertex_id.clone(),
+                &ctx,
                 watermark_assign,
                 upstream_vertices.clone(),
                 upstream_watermarks.clone(),
-                current_watermark.clone(),
                 aligner,
-                metrics_labels.clone(),
-                execution_attempt_id,
             );
             processor_loop(
                 stream.as_mut(),
