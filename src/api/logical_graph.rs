@@ -6,7 +6,6 @@ use arrow::datatypes::Schema as ArrowSchema;
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::prelude::EdgeRef;
 use petgraph::Direction;
-use crate::runtime::operators::chained::chained_operator::group_operators_for_chaining;
 use crate::runtime::operators::operator::OperatorConfig;
 use crate::runtime::execution_graph::{ExecutionGraph, ExecutionVertex, ExecutionEdge};
 use crate::runtime::operators::sink::sink_operator::SinkConfig;
@@ -330,22 +329,13 @@ impl LogicalGraph {
         execution_graph
     }
 
-    pub fn from_linear_operators(operator_list: Vec<OperatorConfig>, parallelism: usize, chained: bool) -> Self {
-        // Group operators based on chaining configuration
-        let grouped_operators = if chained {
-            group_operators_for_chaining(&operator_list)
-        } else {
-            // If no chaining, each operator becomes its own group
-            operator_list.clone()
-        };
-
-        // Create a linear logical graph
+    pub fn from_linear_operators(operator_list: Vec<OperatorConfig>, parallelism: usize) -> Self {
         let mut logical_graph = LogicalGraph::new();
         logical_graph.set_max_parallelism(parallelism);
         let mut node_indices = Vec::new();
         
         // Add nodes for each operator
-        for op_config in &grouped_operators {
+        for op_config in &operator_list {
             let node = LogicalNode::new(
                 op_config.clone(),
                 parallelism,
@@ -357,7 +347,7 @@ impl LogicalGraph {
         }
 
         // Add edges between operators
-        for i in 0..grouped_operators.len() - 1 {
+        for i in 0..operator_list.len() - 1 {
             
             logical_graph.add_edge(
                 node_indices[i],
@@ -564,8 +554,31 @@ fn distance(graph: &DiGraph<LogicalNode, LogicalEdge>, source: NodeIndex, target
     usize::MAX // No path found
 }
 
-fn chained_config_has_key_by(configs: &[OperatorConfig]) -> bool {
-    configs.iter().any(|config| matches!(config, OperatorConfig::KeyByConfig(_)))
+/// Groups a linear operator list into chains that do not cross a shuffle
+/// ([`PartitionType::Hash`]). Not wired into execution; kept for a later
+/// in-process chaining pass so the split rule is not reinvented.
+pub fn group_operators_for_chaining(operators: &[OperatorConfig]) -> Vec<Vec<OperatorConfig>> {
+    let mut groups: Vec<Vec<OperatorConfig>> = Vec::new();
+    let mut current: Vec<OperatorConfig> = Vec::new();
+
+    for op_config in operators {
+        current.push(op_config.clone());
+        if current.len() > 1 {
+            let prev = &current[current.len() - 2];
+            let last = current.last().unwrap();
+            // Parallelism is unused for the Hash check (shuffle vs local).
+            if determine_partition_type(prev, last, 1, 1) == PartitionType::Hash {
+                let next_chain_head = current.pop().unwrap();
+                groups.push(current);
+                current = vec![next_chain_head];
+            }
+        }
+    }
+
+    if !current.is_empty() {
+        groups.push(current);
+    }
+    groups
 }
 
 /// Determines the appropriate partition type between two operators.
@@ -582,9 +595,6 @@ pub fn determine_partition_type(
     match (source_config, target_config) {
         (_, OperatorConfig::SinkConfig(SinkConfig::RequestSinkConfig)) => PartitionType::RequestRoute,
         (OperatorConfig::KeyByConfig(_), _) => PartitionType::Hash,
-        (OperatorConfig::ChainedConfig(configs), _) if chained_config_has_key_by(configs) => {
-            PartitionType::Hash
-        }
         _ if source_parallelism == target_parallelism => PartitionType::Forward,
         _ => PartitionType::RoundRobin,
     }
@@ -610,6 +620,23 @@ mod tests {
     use arrow::datatypes::{Schema, Field, DataType};
     use datafusion::prelude::{col, lit};
     use std::sync::Arc;
+
+    fn filter_op() -> OperatorConfig {
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
+        OperatorConfig::MapConfig(MapFunction::Filter(FilterFunction::new(
+            DFSchemaRef::from(DFSchema::try_from(schema).unwrap()),
+            col("id").gt(lit(0)),
+            SessionContext::new(),
+        )))
+    }
+
+    #[test]
+    fn group_operators_for_chaining_keeps_forward_ops_together() {
+        let ops = vec![filter_op(), filter_op(), filter_op()];
+        let groups = group_operators_for_chaining(&ops);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].len(), 3);
+    }
 
     #[test]
     fn test_logical_to_execution_graph_conversion() {

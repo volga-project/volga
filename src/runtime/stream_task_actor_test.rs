@@ -54,7 +54,7 @@ fn test_stream_task_actor() -> Result<()> {
             OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction)),
         ];
 
-        let logical_graph = LogicalGraph::from_linear_operators(operators, 1, false);
+        let logical_graph = LogicalGraph::from_linear_operators(operators, 1);
         let mut graph = logical_graph.to_execution_graph();
         graph.configure_channels(None, None);
 

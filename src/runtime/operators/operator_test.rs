@@ -10,6 +10,7 @@ use crate::common::message::{Message, WatermarkMessage};
 use crate::runtime::operators::operator::{
     NextInputs, OperatorBase, OperatorConfig, OperatorTrait,
 };
+use crate::runtime::operators::source::source_operator::{SourceConfig, VectorSourceConfig};
 
 fn int_batch(rows: Vec<i64>) -> RecordBatch {
     let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int64, false)]));
@@ -34,7 +35,9 @@ fn data_len(out: &NextInputs) -> usize {
 fn base_with_input(
     stream: impl futures::Stream<Item = Message> + Send + Sync + 'static,
 ) -> OperatorBase {
-    let mut base = OperatorBase::new(OperatorConfig::ChainedConfig(vec![]));
+    let mut base = OperatorBase::new(OperatorConfig::SourceConfig(
+        SourceConfig::VectorSourceConfig(VectorSourceConfig::new(vec![])),
+    ));
     base.set_input(Some(Box::pin(stream)));
     base
 }

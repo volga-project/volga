@@ -677,7 +677,7 @@ impl StreamTask {
             }
 
             let operator_type = operator.operator_type();
-            let is_source = operator_type == OperatorType::Source || operator_type == OperatorType::ChainedSourceSink;
+            let is_source = operator_type == OperatorType::Source;
             let mut data_reader_control: Option<crate::transport::transport_client::DataReaderControl> = None;
             let vertex_meta = execution_graph
                 .get_vertex(&vertex_id)

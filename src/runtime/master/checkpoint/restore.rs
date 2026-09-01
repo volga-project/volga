@@ -72,9 +72,6 @@ impl RestorePlanner {
             OperatorConfig::SourceConfig(_) | OperatorConfig::WindowConfig(_) => {
                 Ok(Self::passthrough(checkpoint))
             }
-            OperatorConfig::ChainedConfig(_) => {
-                anyhow::bail!("chained restore is not implemented")
-            }
             _ => anyhow::bail!("operator is not checkpointable"),
         }
     }

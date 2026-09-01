@@ -356,8 +356,8 @@ async fn test_request_source_sink_e2e() {
         OperatorConfig::SinkConfig(SinkConfig::RequestSinkConfig),
     ];
 
-    // Create logical graph, no chaining
-    let logical_graph = LogicalGraph::from_linear_operators(operators, parallelism, false);
+    // Create logical graph (one vertex per operator; chaining is not wired).
+    let logical_graph = LogicalGraph::from_linear_operators(operators, parallelism);
 
     // Build PipelineSpec with runtime knobs; logical graph is passed separately to executor.
     let spec = PipelineSpecBuilder::new()
