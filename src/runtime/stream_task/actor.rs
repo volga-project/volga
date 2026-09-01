@@ -2,7 +2,7 @@ use anyhow::Result;
 use kameo::Actor;
 use kameo::message::Context;
 use crate::runtime::observability::TaskSnapshot;
-use crate::runtime::stream_task::StreamTask;
+use super::task::StreamTask;
 
 #[derive(Debug, Clone)]
 pub enum StreamTaskMessage {

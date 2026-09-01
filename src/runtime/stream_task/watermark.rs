@@ -9,7 +9,7 @@ use tokio::sync::Mutex;
 
 use crate::common::message::{Message, WatermarkMessage};
 
-use super::confg::{TimeHint, WatermarkAssignConfig};
+use crate::runtime::watermark::{TimeHint, WatermarkAssignConfig};
 
 #[derive(Debug, Default, Clone)]
 struct UpstreamWatermarkProgress {
@@ -20,8 +20,8 @@ struct UpstreamWatermarkProgress {
 
 /// Stateful event-time watermark generator.
 ///
-/// Progress is tracked **per upstream vertex id** (sources use the task's own id; map/preprocess
-/// uses the message upstream id).
+/// Progress is tracked **per upstream vertex id** (sources use the task's own id;
+/// processors use the message upstream id).
 #[derive(Debug)]
 pub struct WatermarkAssignerState {
     out_of_orderness_ms: u64,

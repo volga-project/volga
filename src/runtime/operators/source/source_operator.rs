@@ -11,8 +11,8 @@ use crate::runtime::functions::source::{
     RequestSourceConfig, SourceFunction, SourceFunctionTrait,
 };
 use crate::runtime::operators::operator::{
-    operator_config_requires_checkpoint, MessageStream, OperatorBase, OperatorConfig,
-    OperatorPollResult, OperatorTrait, OperatorType,
+    operator_config_requires_checkpoint, OperatorBase, OperatorConfig, OperatorTrait, OperatorType,
+    SourceOperator as SourceFetch,
 };
 use crate::runtime::observability::TaskMetadata;
 use crate::runtime::runtime_context::RuntimeContext;
@@ -192,10 +192,6 @@ impl OperatorTrait for SourceOperator {
         self.base.operator_config()
     }
 
-    fn set_input(&mut self, input: Option<MessageStream>) {
-        self.base.set_input(input);
-    }
-
     async fn checkpoint(&mut self, _checkpoint_id: u64) -> Result<SerializedCheckpoint> {
         let function = self.base.get_function_mut::<SourceFunction>().unwrap();
         let position = function.snapshot_position().await?;
@@ -216,41 +212,40 @@ impl OperatorTrait for SourceOperator {
         }
         Ok(())
     }
+}
 
-    async fn poll_next(&mut self) -> OperatorPollResult {
-        if self.handle.as_ref().is_some_and(|h| h.is_stopped()) {
-            return OperatorPollResult::None;
+#[async_trait]
+impl SourceFetch for SourceOperator {
+    fn is_stopped(&self) -> bool {
+        self.handle.as_ref().is_some_and(|h| h.is_stopped())
+    }
+
+    async fn fetch_next(&mut self) -> FetchResult {
+        if self.is_stopped() {
+            return FetchResult::Idle;
         }
 
-        let interrupt = self.checkpoint_interrupt_arc();
+        let owned = self.checkpoint_interrupt_arc();
+        let interrupt = owned.as_deref();
 
         // Wake arrived between fetches: yield before pulling more data.
-        if interrupt
-            .as_ref()
-            .is_some_and(|interrupt| interrupt.take_canceled())
-        {
-            return OperatorPollResult::Continue;
+        if interrupt.is_some_and(|interrupt| interrupt.take_canceled()) {
+            return FetchResult::Interrupted;
         }
 
         let function = self.base.get_function_mut::<SourceFunction>().unwrap();
-        match function.fetch(interrupt.as_deref()).await {
-            FetchResult::Interrupted => OperatorPollResult::Continue,
-            FetchResult::Data(Message::Watermark(watermark)) => {
-                OperatorPollResult::Ready(Message::Watermark(watermark))
-            }
+        match function.fetch(interrupt).await {
+            FetchResult::Interrupted => FetchResult::Interrupted,
             FetchResult::Data(message) => {
-                match &message {
-                    Message::Regular(_) => {
-                        self.task_metadata.increment_u64(
-                            TASK_METADATA_RECORDS_GENERATED,
-                            message.num_records() as u64,
-                        );
-                    }
-                    Message::Watermark(_) | Message::CheckpointBarrier(_) => {}
+                if matches!(message, Message::Regular(_)) {
+                    self.task_metadata.increment_u64(
+                        TASK_METADATA_RECORDS_GENERATED,
+                        message.num_records() as u64,
+                    );
                 }
-                OperatorPollResult::Ready(message)
+                FetchResult::Data(message)
             }
-            FetchResult::Idle => OperatorPollResult::None,
+            FetchResult::Idle => FetchResult::Idle,
         }
     }
 }

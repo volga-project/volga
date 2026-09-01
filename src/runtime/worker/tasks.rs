@@ -22,8 +22,7 @@ use crate::runtime::observability::snapshot_types::{TaskOperatorMetrics, WorkerS
 use crate::runtime::observability::{StreamTaskStatus, TaskMetadata};
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::state::StateRegistry;
-use crate::runtime::stream_task::StreamTask;
-use crate::runtime::stream_task_actor::{StreamTaskActor, StreamTaskMessage};
+use crate::runtime::stream_task::{StreamTask, StreamTaskActor, StreamTaskMessage};
 use crate::runtime::VertexId;
 use crate::transport::transport_backend_actor::{
     TransportBackendActor, TransportBackendActorMessage,
@@ -292,7 +291,7 @@ impl WorkerInner {
             let task_ref = task_ref.clone();
             let fut = task_runtime.spawn(async move {
                 if let Err(e) = task_ref
-                    .ask(crate::runtime::stream_task_actor::StreamTaskMessage::Start)
+                    .ask(crate::runtime::stream_task::StreamTaskMessage::Start)
                     .await
                 {
                     eprintln!("Error starting task {}: {}", vertex_id, e);

@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::api::PipelineSpec;
 use crate::orchestrator::task_assignment::TaskWorkerMapping;
-use crate::runtime::operators::operator::{get_operator_type_from_config, OperatorConfig};
+use crate::runtime::operators::operator::OperatorConfig;
 use crate::runtime::partition::PartitionType;
 use crate::transport::channel::Channel;
 use crate::transport::transport_spec::TransportSpec;
@@ -207,7 +207,7 @@ impl ExecutionGraph {
 
     pub fn get_vertex_type(&self, vertex_id: &str) -> OperatorType {
         let vertex = self.vertices.get(vertex_id).expect("vertex should exist");
-        get_operator_type_from_config(&vertex.operator_config)
+        vertex.operator_config.role()
     }
 
     pub fn get_sink_vertices(&self) -> Vec<String> {

@@ -14,7 +14,9 @@ use crate::api::planner::{Planner, PlanningContext};
 use crate::common::message::Message;
 use crate::common::{Key, WatermarkMessage};
 use crate::runtime::functions::key_by::key_by_function::extract_datafusion_window_exec;
-use crate::runtime::operators::operator::{OperatorConfig, OperatorPollResult, OperatorTrait};
+use crate::runtime::operators::operator::{
+    OperatorConfig, OperatorTrait, StreamOperator, VecOutput,
+};
 use crate::runtime::operators::source::source_operator::{SourceConfig, VectorSourceConfig};
 use crate::runtime::operators::window::operator::{
     WindowOperator, WindowOperatorConfig, WindowOutputMode,
@@ -95,6 +97,7 @@ pub struct Harness {
     pub store: Arc<InMemWindowStore>,
     pub namespace: StateNamespace,
     pub task_metadata: TaskMetadata,
+    pending: Vec<Message>,
 }
 
 impl Harness {
@@ -127,6 +130,7 @@ impl Harness {
             store,
             namespace,
             task_metadata,
+            pending: Vec::new(),
         }
     }
 
@@ -140,31 +144,47 @@ impl Harness {
     }
 
     pub async fn ingest(&mut self, b: RecordBatch, partition: &str) {
+        let mut out = VecOutput::default();
         self.op
-            .set_input(Some(Box::pin(futures::stream::iter(vec![keyed_message(
-                b, partition,
-            )]))));
-        assert!(matches!(
-            self.op.poll_next().await,
-            OperatorPollResult::Continue
-        ));
+            .process_data(vec![keyed_message(b, partition)], &mut out)
+            .await
+            .expect("ingest");
+        assert!(
+            out.messages.is_empty(),
+            "window ingest should not emit, got {:?}",
+            out.messages
+        );
     }
 
     pub async fn watermark_and_output(&mut self, wm: u64) -> RecordBatch {
-        self.op.set_input(Some(Box::pin(futures::stream::iter(vec![
-            watermark_message(wm),
-        ]))));
-        let out = match self.op.poll_next().await {
-            OperatorPollResult::Ready(Message::Regular(base)) => base.record_batch,
-            other => panic!("expected output on watermark, got {:?}", other),
-        };
+        let mut out = VecOutput::default();
+        self.op
+            .handle_watermark(
+                match watermark_message(wm) {
+                    Message::Watermark(w) => w,
+                    other => panic!("expected watermark, got {other:?}"),
+                },
+                &mut out,
+            )
+            .await
+            .expect("watermark");
+        let mut batch = None;
+        for msg in out.messages {
+            match msg {
+                Message::Regular(base) => {
+                    assert!(batch.is_none(), "multiple emit batches");
+                    batch = Some(base.record_batch);
+                }
+                other => self.pending.push(other),
+            }
+        }
         self.run_maintenance().await;
-        out
+        batch.expect("expected output on watermark")
     }
 
     pub async fn drain_passthrough_watermark(&mut self) -> u64 {
-        match self.op.poll_next().await {
-            OperatorPollResult::Ready(Message::Watermark(wm)) => wm.watermark_value,
+        match self.pending.pop() {
+            Some(Message::Watermark(wm)) => wm.watermark_value,
             other => panic!("expected passthrough watermark, got {:?}", other),
         }
     }
@@ -277,41 +297,42 @@ impl WoWroHarness {
     }
 
     pub async fn ingest(&mut self, b: RecordBatch, partition: &str) {
+        let mut out = VecOutput::default();
         self.wo
-            .set_input(Some(Box::pin(futures::stream::iter(vec![keyed_message(
-                b, partition,
-            )]))));
-        assert!(matches!(
-            self.wo.poll_next().await,
-            OperatorPollResult::Continue
-        ));
+            .process_data(vec![keyed_message(b, partition)], &mut out)
+            .await
+            .expect("wo ingest");
+        assert!(out.messages.is_empty(), "wo ingest should not emit");
     }
 
     /// State-only advance: no emit batch, then passthrough watermark.
     pub async fn advance(&mut self, wm: u64) {
-        self.wo.set_input(Some(Box::pin(futures::stream::iter(vec![
-            watermark_message(wm),
-        ]))));
-        assert!(matches!(
-            self.wo.poll_next().await,
-            OperatorPollResult::Continue
-        ));
-        match self.wo.poll_next().await {
-            OperatorPollResult::Ready(Message::Watermark(w)) => {
-                assert_eq!(w.watermark_value, wm);
-            }
+        let mut out = VecOutput::default();
+        self.wo
+            .handle_watermark(
+                match watermark_message(wm) {
+                    Message::Watermark(w) => w,
+                    other => panic!("expected watermark, got {other:?}"),
+                },
+                &mut out,
+            )
+            .await
+            .expect("wo advance");
+        match out.messages.as_slice() {
+            [Message::Watermark(w)] => assert_eq!(w.watermark_value, wm),
             other => panic!("expected passthrough watermark, got {:?}", other),
         }
         self.run_maintenance().await;
     }
 
     pub async fn request(&mut self, b: RecordBatch, partition: &str) -> RecordBatch {
+        let mut out = VecOutput::default();
         self.wro
-            .set_input(Some(Box::pin(futures::stream::iter(vec![keyed_message(
-                b, partition,
-            )]))));
-        match self.wro.poll_next().await {
-            OperatorPollResult::Ready(Message::Regular(base)) => base.record_batch,
+            .process_data(vec![keyed_message(b, partition)], &mut out)
+            .await
+            .expect("wro request");
+        match out.messages.as_slice() {
+            [Message::Regular(base)] => base.record_batch.clone(),
             other => panic!("expected WRO result, got {:?}", other),
         }
     }

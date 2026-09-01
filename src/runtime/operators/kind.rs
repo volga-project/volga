@@ -55,6 +55,6 @@ impl OperatorConfig {
 
     /// Execution role (today’s [`OperatorType`]).
     pub fn role(&self) -> OperatorType {
-        super::operator::get_operator_type_from_config(self)
+        self.kind().role()
     }
 }

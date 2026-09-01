@@ -15,7 +15,7 @@ use crate::common::message::Message;
 use crate::common::Key;
 use crate::runtime::functions::key_by::pack::split_by_key_exprs;
 use crate::runtime::operators::operator::{
-    MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType,
+    OperatorBase, OperatorConfig, OperatorTrait, OperatorType, Output, StreamOperator,
 };
 use crate::runtime::operators::window::config::{BuiltWindows, WindowConfig};
 use crate::runtime::operators::window::eval::{assemble_window_batch, evaluate_points};
@@ -225,10 +225,6 @@ impl OperatorTrait for WindowRequestOperator {
         self.base.close().await
     }
 
-    fn set_input(&mut self, input: Option<MessageStream>) {
-        self.base.set_input(input);
-    }
-
     fn operator_type(&self) -> OperatorType {
         self.base.operator_type()
     }
@@ -236,33 +232,29 @@ impl OperatorTrait for WindowRequestOperator {
     fn operator_config(&self) -> &OperatorConfig {
         self.base.operator_config()
     }
+}
 
-    async fn poll_next(&mut self) -> OperatorPollResult {
-        if let Some(msg) = self.base.pop_pending_output() {
-            return OperatorPollResult::Ready(msg);
+#[async_trait]
+impl StreamOperator for WindowRequestOperator {
+    async fn process_data(&mut self, data: Vec<Message>, out: &mut dyn Output) -> Result<()> {
+        for message in data {
+            let Message::Regular(base) = message else {
+                panic!("window request ingest expects data messages, got {message:?}");
+            };
+            let groups = split_by_key_exprs(&base.record_batch, &self.partition_by);
+            if groups.is_empty() {
+                out.emit(Message::new(
+                    None,
+                    RecordBatch::new_empty(self.output_schema.clone()),
+                    None,
+                    None,
+                ))
+                .await?;
+                continue;
+            }
+            let batch = self.process_groups(groups).await;
+            out.emit(Message::new(None, batch, None, None)).await?;
         }
-
-        match self.base.next_input().await {
-            Some(message) => match message {
-                Message::Regular(base) => {
-                    let groups = split_by_key_exprs(&base.record_batch, &self.partition_by);
-                    if groups.is_empty() {
-                        return OperatorPollResult::Ready(Message::new(
-                            None,
-                            RecordBatch::new_empty(self.output_schema.clone()),
-                            None,
-                            None,
-                        ));
-                    }
-                    let out = self.process_groups(groups).await;
-                    OperatorPollResult::Ready(Message::new(None, out, None, None))
-                }
-                Message::Watermark(w) => OperatorPollResult::Ready(Message::Watermark(w)),
-                Message::CheckpointBarrier(barrier) => {
-                    OperatorPollResult::Ready(Message::CheckpointBarrier(barrier))
-                }
-            },
-            None => OperatorPollResult::None,
-        }
+        Ok(())
     }
 }

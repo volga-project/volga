@@ -14,7 +14,7 @@ use crate::runtime::metrics::MetricsLabels;
 use crate::runtime::observability::snapshot_types::WorkerSnapshot;
 use crate::runtime::operators::source::SourceHandles;
 use crate::runtime::state::{StateRegistry, StateResourceTracker, StateSessionHandle};
-use crate::runtime::stream_task_actor::StreamTaskActor;
+use crate::runtime::stream_task::StreamTaskActor;
 use crate::runtime::VertexId;
 use crate::transport::transport_backend_actor::{
     TransportBackendActor, TransportBackendActorMessage,

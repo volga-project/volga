@@ -17,8 +17,7 @@ use crate::common::MAX_WATERMARK_VALUE;
 use crate::runtime::functions::key_by::pack::split_by_key_exprs;
 use crate::runtime::checkpoint::{SerializedCheckpoint, SerializedRestore};
 use crate::runtime::operators::operator::{
-    MessageStream, NextInputs, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait,
-    OperatorType,
+    OperatorBase, OperatorConfig, OperatorTrait, OperatorType, Output, StreamOperator,
 };
 use crate::runtime::operators::window::config::{BuiltWindows, WindowConfig};
 use crate::runtime::operators::window::eval::advance_key;
@@ -43,9 +42,6 @@ use crate::runtime::operators::window::store::WindowOperatorStore;
 
 pub const TASK_METADATA_ROWS_ACCEPTED: &str = "window_rows_accepted";
 pub const TASK_METADATA_ROWS_DROPPED_LATE: &str = "window_rows_dropped_late";
-
-/// One ingest step: take ready data inputs until this many records.
-const INGEST_MAX_RECORDS: usize = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WindowOutputMode {
@@ -225,7 +221,7 @@ impl WindowOperator {
         arrow::compute::concat_batches(&self.output_schema, &batches).expect("concat")
     }
 
-    async fn ingest_data(&mut self, messages: Vec<Message>) -> OperatorPollResult {
+    async fn ingest_data(&mut self, messages: Vec<Message>) {
         let ingest_started = Instant::now();
         let emit = self.output_mode == WindowOutputMode::Emit;
         let mut by_key: HashMap<Key, Vec<RecordBatch>> = HashMap::new();
@@ -271,60 +267,46 @@ impl WindowOperator {
             );
             metrics::add_late_dropped(task_id, labels, dropped as u64);
         }
-        OperatorPollResult::Continue
     }
 
-    async fn handle_control(&mut self, message: Message) -> OperatorPollResult {
-        match message {
-            Message::Watermark(watermark) => {
-                let wm_ts = if watermark.watermark_value == MAX_WATERMARK_VALUE {
-                    i64::MAX
-                } else {
-                    watermark.watermark_value as i64
-                };
-                let advance_to = Cursor::new(wm_ts, u64::MAX);
-                let state = self.state_ref();
+    async fn handle_watermark_inner(
+        &mut self,
+        watermark: crate::common::message::WatermarkMessage,
+        out: &mut dyn Output,
+    ) -> Result<()> {
+        let wm_ts = if watermark.watermark_value == MAX_WATERMARK_VALUE {
+            i64::MAX
+        } else {
+            watermark.watermark_value as i64
+        };
+        let advance_to = Cursor::new(wm_ts, u64::MAX);
+        let state = self.state_ref();
 
-                let advances_frontier = state
-                    .watermark_frontier()
-                    .map_or(true, |frontier| wm_ts > frontier);
-                let result = if advances_frontier
-                    && self.output_mode == WindowOutputMode::Emit
-                {
-                    let started = Instant::now();
-                    let batch = self.process_due(advance_to).await;
-                    if let Some((task_id, labels)) = self.metrics_target() {
-                        metrics::record_wm_process_ms(
-                            task_id,
-                            labels,
-                            started.elapsed().as_secs_f64() * 1000.0,
-                        );
-                    }
-                    batch
-                } else {
-                    RecordBatch::new_empty(self.output_schema.clone())
-                };
-                if advances_frontier {
-                    state
-                        .watermark_frontier
-                        .store(wm_ts, Ordering::Release);
-                }
-
-                self.base
-                    .pending_messages
-                    .push(Message::Watermark(watermark));
-
-                if self.output_mode == WindowOutputMode::StateOnly {
-                    OperatorPollResult::Continue
-                } else {
-                    OperatorPollResult::Ready(Message::new(None, result, None, None))
-                }
+        let advances_frontier = state
+            .watermark_frontier()
+            .map_or(true, |frontier| wm_ts > frontier);
+        let result = if advances_frontier && self.output_mode == WindowOutputMode::Emit {
+            let started = Instant::now();
+            let batch = self.process_due(advance_to).await;
+            if let Some((task_id, labels)) = self.metrics_target() {
+                metrics::record_wm_process_ms(
+                    task_id,
+                    labels,
+                    started.elapsed().as_secs_f64() * 1000.0,
+                );
             }
-            Message::CheckpointBarrier(barrier) => {
-                OperatorPollResult::Ready(Message::CheckpointBarrier(barrier))
-            }
-            other => panic!("Window operator expects data messages or watermarks, got {other:?}"),
+            batch
+        } else {
+            RecordBatch::new_empty(self.output_schema.clone())
+        };
+        if advances_frontier {
+            state.watermark_frontier.store(wm_ts, Ordering::Release);
         }
+
+        if self.output_mode == WindowOutputMode::Emit {
+            out.emit(Message::new(None, result, None, None)).await?;
+        }
+        out.emit(Message::Watermark(watermark)).await
     }
 }
 
@@ -384,10 +366,6 @@ impl OperatorTrait for WindowOperator {
         self.base.close().await
     }
 
-    fn set_input(&mut self, input: Option<MessageStream>) {
-        self.base.set_input(input);
-    }
-
     fn operator_type(&self) -> OperatorType {
         self.base.operator_type()
     }
@@ -407,16 +385,20 @@ impl OperatorTrait for WindowOperator {
         self.state_ref().restore(snapshot).await?;
         Ok(())
     }
+}
 
-    async fn poll_next(&mut self) -> OperatorPollResult {
-        if let Some(msg) = self.base.pop_pending_output() {
-            return OperatorPollResult::Ready(msg);
-        }
+#[async_trait]
+impl StreamOperator for WindowOperator {
+    async fn process_data(&mut self, data: Vec<Message>, _out: &mut dyn Output) -> Result<()> {
+        self.ingest_data(data).await;
+        Ok(())
+    }
 
-        match self.base.next_inputs(INGEST_MAX_RECORDS).await {
-            NextInputs::Exhausted => OperatorPollResult::None,
-            NextInputs::Control(message) => self.handle_control(message).await,
-            NextInputs::Data(messages) => self.ingest_data(messages).await,
-        }
+    async fn handle_watermark(
+        &mut self,
+        wm: crate::common::message::WatermarkMessage,
+        out: &mut dyn Output,
+    ) -> Result<()> {
+        self.handle_watermark_inner(wm, out).await
     }
 }

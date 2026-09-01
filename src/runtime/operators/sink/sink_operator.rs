@@ -1,5 +1,3 @@
-use std::fmt;
-
 use crate::{
     common::Message,
     runtime::{
@@ -8,10 +6,8 @@ use crate::{
             SinkFunctionTrait,
         },
         operators::operator::{
-            MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait,
-            OperatorType,
+            HasOperatorBase, OperatorBase, OperatorConfig, Output, StreamOperator,
         },
-        runtime_context::RuntimeContext,
     },
 };
 use anyhow::Result;
@@ -59,16 +55,9 @@ impl std::fmt::Display for SinkConfig {
     }
 }
 
+#[derive(Debug)]
 pub struct SinkOperator {
     base: OperatorBase,
-}
-
-impl fmt::Debug for SinkOperator {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SinkOperator")
-            .field("base", &self.base)
-            .finish()
-    }
 }
 
 impl SinkOperator {
@@ -84,48 +73,34 @@ impl SinkOperator {
     }
 }
 
+impl HasOperatorBase for SinkOperator {
+    fn operator_base(&self) -> &OperatorBase {
+        &self.base
+    }
+
+    fn operator_base_mut(&mut self) -> &mut OperatorBase {
+        &mut self.base
+    }
+}
+
 #[async_trait]
-impl OperatorTrait for SinkOperator {
-    async fn open(&mut self, context: &RuntimeContext) -> Result<()> {
-        self.base.open(context).await
-    }
-
-    async fn close(&mut self) -> Result<()> {
-        self.base.close().await
-    }
-
-    fn operator_type(&self) -> OperatorType {
-        self.base.operator_type()
-    }
-
-    fn set_input(&mut self, input: Option<MessageStream>) {
-        self.base.set_input(input);
-    }
-
-    fn operator_config(&self) -> &OperatorConfig {
-        self.base.operator_config()
-    }
-
-    async fn poll_next(&mut self) -> OperatorPollResult {
-        match self.base.next_input().await {
-            Some(Message::Watermark(watermark)) => {
-                OperatorPollResult::Ready(Message::Watermark(watermark))
-            }
-            Some(Message::CheckpointBarrier(barrier)) => {
-                // Barrier alignment must imply durable sink state for restore safety.
-                let function = self.base.get_function_mut::<SinkFunction>().unwrap();
-                function
-                    .flush()
-                    .await
-                    .expect("sink flush before checkpoint barrier");
-                OperatorPollResult::Ready(Message::CheckpointBarrier(barrier))
-            }
-            Some(message) => {
-                let function = self.base.get_function_mut::<SinkFunction>().unwrap();
-                function.sink(message.clone()).await.unwrap();
-                OperatorPollResult::Ready(message)
-            }
-            None => OperatorPollResult::None,
+impl StreamOperator for SinkOperator {
+    async fn process_data(&mut self, data: Vec<Message>, _out: &mut dyn Output) -> Result<()> {
+        let function = self.base.get_function_mut::<SinkFunction>().unwrap();
+        for message in data {
+            function.sink(message).await?;
         }
+        Ok(())
+    }
+
+    async fn handle_barrier(
+        &mut self,
+        barrier: crate::common::message::CheckpointBarrierMessage,
+        out: &mut dyn Output,
+    ) -> Result<()> {
+        // Barrier alignment must imply durable sink state for restore safety.
+        let function = self.base.get_function_mut::<SinkFunction>().unwrap();
+        function.flush().await?;
+        out.emit(Message::CheckpointBarrier(barrier)).await
     }
 }

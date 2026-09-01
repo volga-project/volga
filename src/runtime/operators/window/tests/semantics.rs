@@ -4,7 +4,9 @@ use datafusion::scalar::ScalarValue;
 use futures::TryStreamExt;
 
 use crate::runtime::checkpoint::SerializedRestore;
-use crate::runtime::operators::operator::{OperatorConfig, OperatorPollResult, OperatorTrait};
+use crate::runtime::operators::operator::{
+    OperatorConfig, OperatorTrait, StreamOperator, VecOutput,
+};
 use crate::runtime::operators::window::model::Cursor;
 use crate::runtime::operators::window::operator::{WindowOperatorConfig, WindowOutputMode};
 use crate::runtime::operators::window::request::{
@@ -45,17 +47,21 @@ async fn open_wro(
 }
 
 async fn request_sum(wro: &mut WindowRequestOperator, partition: &str, ts: i64) -> ScalarValue {
-    wro.set_input(Some(Box::pin(futures::stream::iter(vec![keyed_message(
-        batch(vec![ts], vec![0.0], vec![partition]),
-        partition,
-    )]))));
-    let out = match wro.poll_next().await {
-        OperatorPollResult::Ready(crate::common::message::Message::Regular(base)) => {
-            base.record_batch
-        }
+    let mut out = VecOutput::default();
+    wro.process_data(
+        vec![keyed_message(
+            batch(vec![ts], vec![0.0], vec![partition]),
+            partition,
+        )],
+        &mut out,
+    )
+    .await
+    .expect("wro request");
+    let batch = match out.messages.as_slice() {
+        [crate::common::message::Message::Regular(base)] => base.record_batch.clone(),
         other => panic!("expected WRO result, got {other:?}"),
     };
-    ScalarValue::try_from_array(out.column(out.num_columns() - 1), 0).expect("sum")
+    ScalarValue::try_from_array(batch.column(batch.num_columns() - 1), 0).expect("sum")
 }
 
 #[tokio::test]
@@ -169,13 +175,16 @@ async fn state_only_publishes_on_ingest_and_advances_on_watermark() {
         ScalarValue::Float64(Some(3.0))
     );
 
-    h.op.set_input(Some(Box::pin(futures::stream::iter(vec![
-        watermark_message(2000),
-    ]))));
-    assert!(matches!(
-        h.op.poll_next().await,
-        OperatorPollResult::Continue
-    ));
+    let mut out = VecOutput::default();
+    h.op.handle_watermark(
+        match watermark_message(2000) {
+            crate::common::message::Message::Watermark(w) => w,
+            other => panic!("expected watermark, got {other:?}"),
+        },
+        &mut out,
+    )
+    .await
+    .expect("watermark");
     let meta = h.store.load_key_state(&partition).await.expect("state");
     assert!(meta.evaluation.is_none());
 }

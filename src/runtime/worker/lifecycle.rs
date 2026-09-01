@@ -4,7 +4,7 @@ use crate::runtime::observability::snapshot_types::WorkerSnapshot;
 use crate::runtime::observability::StreamTaskStatus;
 use crate::runtime::operators::operator::operator_config_requires_checkpoint;
 use crate::runtime::operators::operator::OperatorType;
-use crate::runtime::stream_task_actor::StreamTaskMessage;
+use crate::runtime::stream_task::StreamTaskMessage;
 
 use super::config::WorkerConfig;
 use super::inner::WorkerInner;
@@ -53,7 +53,7 @@ impl Worker {
         let inner = self.require_inner()?;
         inner.start_transport_backend().await;
         inner
-            .send_signal_to_task_actors(crate::runtime::stream_task_actor::StreamTaskMessage::Run)
+            .send_signal_to_task_actors(crate::runtime::stream_task::StreamTaskMessage::Run)
             .await;
         Ok(())
     }
@@ -204,7 +204,7 @@ impl Worker {
 
 impl WorkerInner {
     pub(crate) async fn signal_tasks_close(&mut self) {
-        self.send_signal_to_task_actors(crate::runtime::stream_task_actor::StreamTaskMessage::Close)
+        self.send_signal_to_task_actors(crate::runtime::stream_task::StreamTaskMessage::Close)
             .await;
     }
 }
