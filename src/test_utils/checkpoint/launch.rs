@@ -10,7 +10,9 @@ use crate::api::spec::connectors::{SinkSpec, SourceSpec, SourceSpecKind};
 use crate::api::spec::operators::{OperatorOverride, OperatorTuningSpec};
 use crate::api::spec::pipeline::ExecutionProfile;
 use crate::api::{CheckpointSpec, PipelineSpecBuilder, TaskWorkerAssignmentStrategyType};
-use crate::runtime::functions::source::datagen_source::{DatagenSpec, FieldGenerator};
+use crate::runtime::functions::source::datagen_source::{
+    DatagenSpec, FieldGenerator, KeyDistribution,
+};
 use crate::runtime::operators::window::spec::WindowSpec;
 use crate::runtime::operators::window::{TileConfig, TimeGranularity};
 use crate::test_utils::harness::PipelineLaunchSpec;
@@ -28,6 +30,7 @@ pub const MULTI_FAILURE_COUNT: usize = 2;
 const SAFETY_DATAGEN_RUN_FOR_S: f64 = 300.0;
 const DATAGEN_RATE: f32 = 200.0;
 pub const WINDOW_RANGE_MS: i64 = 10_000;
+const SHARED_WINDOW_KEYS: usize = 4;
 
 pub fn local_checkpoint_spec() -> CheckpointSpec {
     CheckpointSpec {
@@ -51,7 +54,7 @@ pub enum CheckpointWorkload {
     Window,
 }
 
-pub(super) fn checkpoint_datagen_parts(
+fn checkpoint_datagen_parts(
     parallelism: usize,
     workload: CheckpointWorkload,
 ) -> (Arc<Schema>, DatagenSpec) {
@@ -78,11 +81,11 @@ pub(super) fn checkpoint_datagen_parts(
     fields.insert(
         "key".to_string(),
         FieldGenerator::Key {
-            num_unique_keys: parallelism
-                * match workload {
-                    CheckpointWorkload::PassThrough => 8,
-                    CheckpointWorkload::Window => 4,
-                },
+            num_unique_keys: match workload {
+                CheckpointWorkload::PassThrough => parallelism * 8,
+                CheckpointWorkload::Window => parallelism * 4,
+            },
+            distribution: KeyDistribution::Partitioned,
         },
     );
     fields.insert(
@@ -180,4 +183,23 @@ pub fn checkpoint_recovery_launch_spec(
 /// Multi-worker launch for sequential multi-failure stress (same indefinite datagen).
 pub fn checkpoint_multi_failure_launch_spec() -> PipelineLaunchSpec {
     checkpoint_recovery_launch_spec(MULTI_WORKER_PARALLELISM, CheckpointWorkload::PassThrough)
+}
+
+/// Window SQL with every source task emitting the same keys.
+pub fn checkpoint_shared_key_window_launch_spec(parallelism: usize) -> PipelineLaunchSpec {
+    let mut launch = checkpoint_recovery_launch_spec(parallelism, CheckpointWorkload::Window);
+    let SourceSpecKind::Datagen(datagen) = &mut launch.pipeline.sources[0].source else {
+        panic!("checkpoint launch spec uses datagen");
+    };
+    for gen in datagen.fields.values_mut() {
+        if let FieldGenerator::Key {
+            num_unique_keys,
+            distribution,
+        } = gen
+        {
+            *num_unique_keys = SHARED_WINDOW_KEYS;
+            *distribution = KeyDistribution::Shared;
+        }
+    }
+    launch
 }

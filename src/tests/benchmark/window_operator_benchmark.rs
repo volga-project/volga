@@ -10,7 +10,7 @@ use crate::{
     test_utils::pipeline_exec,
     runtime::{
         functions::source::{
-            datagen_source::{DatagenSourceConfig, FieldGenerator},
+            datagen_source::{DatagenSourceConfig, FieldGenerator, KeyDistribution},
             DatagenSpec,
         },
                 observability::PipelineSnapshot,
@@ -240,6 +240,7 @@ pub async fn run_window_benchmark(config: WindowBenchmarkConfig) -> Result<Bench
             "key".to_string(),
             FieldGenerator::Key {
                 num_unique_keys: config.num_keys,
+                distribution: KeyDistribution::Partitioned,
             },
         ),
         (

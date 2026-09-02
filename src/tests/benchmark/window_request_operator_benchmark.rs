@@ -10,7 +10,7 @@ use crate::{
     test_utils::pipeline_exec,
     runtime::{
         functions::source::{
-            datagen_source::{DatagenSourceConfig, FieldGenerator},
+            datagen_source::{DatagenSourceConfig, FieldGenerator, KeyDistribution},
             DatagenSpec,
         },
                 observability::PipelineSnapshot,
@@ -59,7 +59,8 @@ fn create_datagen_config(
         (
             "key".to_string(),
             FieldGenerator::Key {
-                num_unique_keys: num_unique_keys,
+                num_unique_keys,
+                distribution: KeyDistribution::Partitioned,
             },
         ),
         (

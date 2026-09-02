@@ -114,6 +114,7 @@ pub async fn run_checkpoint_mid_flight_kill_after_safe(
     mode: WorkerKillMode,
 ) -> Result<RecoveryReport> {
     let timeouts = RecoveryTimeouts::for_env(env);
+    let pipeline = launch.pipeline.clone();
     let cluster = VolgaCluster::launch(env, launch).await?;
     let result = async {
         let target = cluster
@@ -188,6 +189,7 @@ pub async fn run_checkpoint_mid_flight_kill_after_safe(
             &snapshot,
             env,
             CheckpointWorkload::PassThrough,
+            &pipeline,
         )
         .await?;
 

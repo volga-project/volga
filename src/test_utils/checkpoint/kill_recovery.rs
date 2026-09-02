@@ -133,6 +133,7 @@ pub async fn run_checkpoint_sequential_failures(
     }
     let timeouts = RecoveryTimeouts::for_env(env);
     let idle_timeout = checkpoint_idle_timeout(env);
+    let pipeline = launch.pipeline.clone();
     let cluster = VolgaCluster::launch(env, launch).await?;
     let result = async {
         let worker_ids = cluster.worker_ids();
@@ -242,7 +243,8 @@ pub async fn run_checkpoint_sequential_failures(
         harness_finish_pipeline(&cluster, &mut cursor, env, failure_count).await?;
 
         let snapshot = cluster.storage().snapshot().await?;
-        assert_sink_matches_offline_datagen(&cluster.master(), &snapshot, env, workload).await?;
+        assert_sink_matches_offline_datagen(&cluster.master(), &snapshot, env, workload, &pipeline)
+            .await?;
 
         let events = cluster.master().lifecycle_events_since(0).await?;
         let report = RecoveryReport::from_events(&events);

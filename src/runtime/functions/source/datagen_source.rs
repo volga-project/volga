@@ -65,6 +65,24 @@ impl DatagenSourceConfig {
     // replayable is part of DatagenSpec
 }
 
+/// How `FieldGenerator::Key` values are assigned across source tasks.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyDistribution {
+    /// Disjoint keys: `key-{task_index}-{key_id}`.
+    #[default]
+    Partitioned,
+    /// Every task emits `key-0` .. `key-{num_unique_keys-1}`.
+    /// Timestamps are offset by `task_index` so `(key, timestamp)` stays unique.
+    Shared,
+}
+
+impl KeyDistribution {
+    fn is_partitioned(&self) -> bool {
+        matches!(self, Self::Partitioned)
+    }
+}
+
 /// Data generation strategies
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,6 +94,8 @@ pub enum FieldGenerator {
         // Cluster image still deserializes `num_unique` until volga:latest is rebuilt.
         #[serde(rename = "num_unique", alias = "num_unique_keys")]
         num_unique_keys: usize,
+        #[serde(default, skip_serializing_if = "KeyDistribution::is_partitioned")]
+        distribution: KeyDistribution,
     },
     Increment {
         #[serde_as(as = "utils::ScalarValueAsBytes")]
@@ -226,11 +246,14 @@ impl DatagenSourceFunction {
         // Initialize key values
         if let Some(key_idx) = key_field_index {
             let key_field_name = self.schema.fields()[key_idx].name();
-            if let Some(FieldGenerator::Key { num_unique_keys }) = self.config.spec.fields.get(key_field_name) {
-                // Distribute unique keys across all tasks
-                self.key_values = Self::gen_key_values_for_task(parallelism as usize, task_index as usize, *num_unique_keys);
-                
-                // Initialize per-key state for distributed keys
+            if let Some(FieldGenerator::Key { num_unique_keys, distribution }) = self.config.spec.fields.get(key_field_name) {
+                self.key_values = Self::gen_key_values_for_task(
+                    parallelism as usize,
+                    task_index as usize,
+                    *num_unique_keys,
+                    *distribution,
+                );
+
                 for key in self.key_values.iter() {
                     self.per_key_timestamps.insert(key.clone(), 0);
                     self.per_key_increments.insert(key.clone(), HashMap::new());
@@ -247,24 +270,29 @@ impl DatagenSourceFunction {
         }
     }
 
-    pub fn gen_key_values_for_task(parallelism: usize, task_index: usize, num_unique_keys: usize) -> Vec<String> {
-        let mut key_values = Vec::new();
-        
-        let keys_per_task = num_unique_keys / parallelism as usize;
-        let remainder = num_unique_keys % parallelism as usize;
-        
-        // If there's a remainder, give it to the last task
-        let num_keys_for_task = if remainder != 0 && task_index == parallelism - 1 {
-            keys_per_task + remainder
-        } else {
-            keys_per_task
-        };
-        
-        for key_id in 0..num_keys_for_task {
-            let key = format!("key-{}-{}", task_index, key_id);
-            key_values.push(key.clone());
+    pub fn gen_key_values_for_task(
+        parallelism: usize,
+        task_index: usize,
+        num_unique_keys: usize,
+        distribution: KeyDistribution,
+    ) -> Vec<String> {
+        match distribution {
+            KeyDistribution::Shared => {
+                (0..num_unique_keys).map(|id| format!("key-{id}")).collect()
+            }
+            KeyDistribution::Partitioned => {
+                let keys_per_task = num_unique_keys / parallelism;
+                let remainder = num_unique_keys % parallelism;
+                let num_keys_for_task = if remainder != 0 && task_index == parallelism - 1 {
+                    keys_per_task + remainder
+                } else {
+                    keys_per_task
+                };
+                (0..num_keys_for_task)
+                    .map(|key_id| format!("key-{task_index}-{key_id}"))
+                    .collect()
+            }
         }
-        key_values
     }
 
     /// Build a batch and advance the emit counter (offline materialize / unit helpers).
@@ -277,6 +305,10 @@ impl DatagenSourceFunction {
     fn build_batch(&mut self, batch_size: usize) -> Result<RecordBatch> {
         let schema = self.schema.clone();
         let mut columns: Vec<ArrayRef> = Vec::new();
+        let shared_keys = self.config.spec.fields.values().any(|g| {
+            matches!(g, FieldGenerator::Key { distribution: KeyDistribution::Shared, .. })
+        });
+        let task_index = self.task_index.unwrap_or(0) as i64;
         
         // Generate records with round-robin key selection
         let mut batch_keys = Vec::with_capacity(batch_size);
@@ -294,7 +326,19 @@ impl DatagenSourceFunction {
             
             let column = match generator {
                 FieldGenerator::IncrementalTimestamp { start_ms, step_ms } => {
-                    Self::generate_incremental_timestamp_column(&mut self.per_key_timestamps, *start_ms, *step_ms, &batch_keys)?
+                    // Shared keys reuse the same strings across tasks, so start
+                    // at start_ms + task_index to keep (key, timestamp) unique.
+                    let start_ms = if shared_keys {
+                        *start_ms + task_index
+                    } else {
+                        *start_ms
+                    };
+                    Self::generate_incremental_timestamp_column(
+                        &mut self.per_key_timestamps,
+                        start_ms,
+                        *step_ms,
+                        &batch_keys,
+                    )?
                 },
                 
                 FieldGenerator::ProcessingTimestamp => {
@@ -330,7 +374,12 @@ impl DatagenSourceFunction {
     }
 
     /// Generate incremental timestamp column with per-key increment
-    fn generate_incremental_timestamp_column(per_key_timestamps: &mut HashMap<String, i64>, start_ms: i64, step_ms: i64, batch_keys: &[String]) -> Result<ArrayRef> {
+    fn generate_incremental_timestamp_column(
+        per_key_timestamps: &mut HashMap<String, i64>,
+        start_ms: i64,
+        step_ms: i64,
+        batch_keys: &[String],
+    ) -> Result<ArrayRef> {
         let mut builder = TimestampMillisecondBuilder::with_capacity(batch_keys.len());
         
         for key in batch_keys {
@@ -695,8 +744,9 @@ mod tests {
                 start_ms: 1000000, 
                 step_ms: 100 
             }),
-            ("key".to_string(), FieldGenerator::Key { 
-                num_unique_keys: 6  // 6 keys total across all tasks
+            ("key".to_string(), FieldGenerator::Key {
+                num_unique_keys: 6,
+                distribution: KeyDistribution::Partitioned,
             }),
             ("id".to_string(), FieldGenerator::Increment { 
                 start: ScalarValue::Int64(Some(1)), 
@@ -850,7 +900,10 @@ mod tests {
 
         let fields = HashMap::from([
             ("processing_time".to_string(), FieldGenerator::ProcessingTimestamp),
-            ("key".to_string(), FieldGenerator::Key { num_unique_keys: 4 }),
+            ("key".to_string(), FieldGenerator::Key {
+                num_unique_keys: 4,
+                distribution: KeyDistribution::Partitioned,
+            }),
             ("id".to_string(), FieldGenerator::Increment { 
                 start: ScalarValue::Int64(Some(1)), 
                 step: ScalarValue::Int64(Some(1))
@@ -972,6 +1025,7 @@ mod tests {
             "key".to_string(),
             FieldGenerator::Key {
                 num_unique_keys,
+                distribution: KeyDistribution::Partitioned,
             },
         );
         fields.insert(
