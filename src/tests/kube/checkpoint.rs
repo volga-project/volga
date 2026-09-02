@@ -4,7 +4,8 @@ use anyhow::Result;
 
 use crate::test_utils::checkpoint::{
     assert_checkpoint_multi_restore, assert_checkpoint_restore,
-    checkpoint_multi_failure_launch_spec, checkpoint_recovery_launch_spec, kube_checkpoint_spec,
+    checkpoint_multi_failure_launch_spec, checkpoint_recovery_launch_spec,
+    checkpoint_shared_key_window_launch_spec, kube_checkpoint_spec,
     run_checkpoint_barrier_path, run_checkpoint_mid_flight_kill_after_safe,
     run_checkpoint_mid_flight_kill_no_prior, run_checkpoint_sequential_failures,
     run_checkpoint_worker_kill_recovery, CheckpointWorkload, MULTI_FAILURE_COUNT,
@@ -130,6 +131,36 @@ async fn test_kube_multi_worker_window_checkpoint_restore() -> Result<()> {
         ),
         WorkerKillMode::Abrupt,
         CheckpointWorkload::Window,
+    )
+    .await?;
+    assert_checkpoint_multi_restore(&report, 1, 2)
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_kube_single_worker_window_shared_key_checkpoint_restore() -> Result<()> {
+    let report = run_checkpoint_worker_kill_recovery(
+        RuntimeEnv::Kube,
+        kube_checkpoint_launch(checkpoint_shared_key_window_launch_spec(
+            SINGLE_WORKER_PARALLELISM,
+        )),
+        WorkerKillMode::Abrupt,
+        CheckpointWorkload::WindowSharedKeys,
+    )
+    .await?;
+    assert_checkpoint_multi_restore(&report, 1, 1)
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_kube_multi_worker_window_shared_key_checkpoint_restore() -> Result<()> {
+    let report = run_checkpoint_worker_kill_recovery(
+        RuntimeEnv::Kube,
+        kube_checkpoint_launch(checkpoint_shared_key_window_launch_spec(
+            MULTI_WORKER_PARALLELISM,
+        )),
+        WorkerKillMode::Abrupt,
+        CheckpointWorkload::WindowSharedKeys,
     )
     .await?;
     assert_checkpoint_multi_restore(&report, 1, 2)

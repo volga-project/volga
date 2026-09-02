@@ -13,9 +13,10 @@ pub use kill_recovery::{
     run_checkpoint_worker_kill_recovery, wait_for_kill_restore,
 };
 pub use launch::{
-    checkpoint_multi_failure_launch_spec, checkpoint_recovery_launch_spec, kube_checkpoint_spec,
-    CheckpointWorkload,
-    MULTI_FAILURE_COUNT, MULTI_WORKER_PARALLELISM, SINGLE_WORKER_PARALLELISM, WINDOW_RANGE_MS,
+    checkpoint_multi_failure_launch_spec, checkpoint_recovery_launch_spec,
+    checkpoint_shared_key_window_launch_spec, kube_checkpoint_spec, CheckpointWorkload,
+    MULTI_FAILURE_COUNT, MULTI_WORKER_PARALLELISM, SHARED_WINDOW_KEYS, SINGLE_WORKER_PARALLELISM,
+    WINDOW_RANGE_MS,
 };
 pub use mid_flight::{
     run_checkpoint_mid_flight_kill_after_safe, run_checkpoint_mid_flight_kill_no_prior,

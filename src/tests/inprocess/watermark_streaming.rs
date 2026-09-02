@@ -66,9 +66,7 @@ pub(crate) async fn run_watermark_window_pipeline(
     );
     fields.insert(
         "partition_key".to_string(),
-        FieldGenerator::Key {
-            num_unique_keys: num_unique_keys,
-        },
+        FieldGenerator::key(num_unique_keys),
     );
     fields.insert(
         "value".to_string(),

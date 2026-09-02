@@ -65,6 +65,24 @@ impl DatagenSourceConfig {
     // replayable is part of DatagenSpec
 }
 
+/// How `FieldGenerator::Key` values are assigned across source tasks.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyDistribution {
+    /// Disjoint keys: `key-{task_index}-{key_id}`.
+    #[default]
+    Partitioned,
+    /// Every task emits the same set: `key-0` .. `key-{num_unique_keys-1}`.
+    /// Pair with per-task event-time lanes so `(key, timestamp)` stays unique.
+    Shared,
+}
+
+impl KeyDistribution {
+    fn is_partitioned(self) -> bool {
+        matches!(self, Self::Partitioned)
+    }
+}
+
 /// Data generation strategies
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,6 +94,9 @@ pub enum FieldGenerator {
         // Cluster image still deserializes `num_unique` until volga:latest is rebuilt.
         #[serde(rename = "num_unique", alias = "num_unique_keys")]
         num_unique_keys: usize,
+        /// Default `Partitioned` keeps serialized specs backward-compatible.
+        #[serde(default, skip_serializing_if = "KeyDistribution::is_partitioned")]
+        distribution: KeyDistribution,
     },
     Increment {
         #[serde_as(as = "utils::ScalarValueAsBytes")]
@@ -93,6 +114,22 @@ pub enum FieldGenerator {
         #[serde_as(as = "Vec<utils::ScalarValueAsBytes>")]
         values: Vec<ScalarValue>,
     }, // Round-robin through provided values
+}
+
+impl FieldGenerator {
+    pub fn key(num_unique_keys: usize) -> Self {
+        Self::Key {
+            num_unique_keys,
+            distribution: KeyDistribution::Partitioned,
+        }
+    }
+
+    pub fn shared_key(num_unique_keys: usize) -> Self {
+        Self::Key {
+            num_unique_keys,
+            distribution: KeyDistribution::Shared,
+        }
+    }
 }
 
 #[serde_as]
@@ -133,6 +170,8 @@ pub struct DatagenSourceFunction {
     // Key-based state tracking
     key_values: Vec<String>, // All possible key values for this task
     current_key_index: usize, // Round-robin index for key selection
+    /// Offset added to IncrementalTimestamp start so shared keys keep unique (key, ts).
+    event_time_lane: i64,
     per_key_timestamps: HashMap<String, i64>, // Timestamp state per key
     per_key_increments: HashMap<String, HashMap<usize, ScalarValue>>, // Increment state per key per field
     per_key_values_indices: HashMap<String, HashMap<usize, usize>>, // Values indices per key per field
@@ -155,6 +194,7 @@ impl DatagenSourceFunction {
             schema,
             key_values: Vec::new(),
             current_key_index: 0,
+            event_time_lane: 0,
             per_key_timestamps: HashMap::new(),
             per_key_increments: HashMap::new(),
             per_key_values_indices: HashMap::new(),
@@ -226,10 +266,21 @@ impl DatagenSourceFunction {
         // Initialize key values
         if let Some(key_idx) = key_field_index {
             let key_field_name = self.schema.fields()[key_idx].name();
-            if let Some(FieldGenerator::Key { num_unique_keys }) = self.config.spec.fields.get(key_field_name) {
-                // Distribute unique keys across all tasks
-                self.key_values = Self::gen_key_values_for_task(parallelism as usize, task_index as usize, *num_unique_keys);
-                
+            if let Some(FieldGenerator::Key { num_unique_keys, distribution }) = self.config.spec.fields.get(key_field_name) {
+                self.key_values = Self::gen_key_values_for_task(
+                    parallelism as usize,
+                    task_index as usize,
+                    *num_unique_keys,
+                    *distribution,
+                );
+                self.event_time_lane = match distribution {
+                    KeyDistribution::Shared => task_index as i64,
+                    KeyDistribution::Partitioned => 0,
+                };
+                if *distribution == KeyDistribution::Shared {
+                    self.validate_shared_event_time_lanes(parallelism as i64);
+                }
+
                 // Initialize per-key state for distributed keys
                 for key in self.key_values.iter() {
                     self.per_key_timestamps.insert(key.clone(), 0);
@@ -247,24 +298,47 @@ impl DatagenSourceFunction {
         }
     }
 
-    pub fn gen_key_values_for_task(parallelism: usize, task_index: usize, num_unique_keys: usize) -> Vec<String> {
-        let mut key_values = Vec::new();
-        
-        let keys_per_task = num_unique_keys / parallelism as usize;
-        let remainder = num_unique_keys % parallelism as usize;
-        
-        // If there's a remainder, give it to the last task
-        let num_keys_for_task = if remainder != 0 && task_index == parallelism - 1 {
-            keys_per_task + remainder
-        } else {
-            keys_per_task
-        };
-        
-        for key_id in 0..num_keys_for_task {
-            let key = format!("key-{}-{}", task_index, key_id);
-            key_values.push(key.clone());
+    pub fn gen_key_values_for_task(
+        parallelism: usize,
+        task_index: usize,
+        num_unique_keys: usize,
+        distribution: KeyDistribution,
+    ) -> Vec<String> {
+        match distribution {
+            KeyDistribution::Shared => (0..num_unique_keys).map(|id| format!("key-{id}")).collect(),
+            KeyDistribution::Partitioned => {
+                let mut key_values = Vec::new();
+
+                let keys_per_task = num_unique_keys / parallelism;
+                let remainder = num_unique_keys % parallelism;
+
+                // If there's a remainder, give it to the last task
+                let num_keys_for_task = if remainder != 0 && task_index == parallelism - 1 {
+                    keys_per_task + remainder
+                } else {
+                    keys_per_task
+                };
+
+                for key_id in 0..num_keys_for_task {
+                    key_values.push(format!("key-{task_index}-{key_id}"));
+                }
+                key_values
+            }
         }
-        key_values
+    }
+
+    fn validate_shared_event_time_lanes(&self, parallelism: i64) {
+        for (field_name, gen) in &self.config.spec.fields {
+            if let FieldGenerator::IncrementalTimestamp { step_ms, .. } = gen {
+                if *step_ms < parallelism {
+                    panic!(
+                        "Shared key distribution requires IncrementalTimestamp step_ms >= parallelism \
+                         so per-task event-time lanes stay unique; field '{field_name}' has \
+                         step_ms={step_ms} parallelism={parallelism}"
+                    );
+                }
+            }
+        }
     }
 
     /// Build a batch and advance the emit counter (offline materialize / unit helpers).
@@ -294,7 +368,13 @@ impl DatagenSourceFunction {
             
             let column = match generator {
                 FieldGenerator::IncrementalTimestamp { start_ms, step_ms } => {
-                    Self::generate_incremental_timestamp_column(&mut self.per_key_timestamps, *start_ms, *step_ms, &batch_keys)?
+                    Self::generate_incremental_timestamp_column(
+                        &mut self.per_key_timestamps,
+                        *start_ms,
+                        *step_ms,
+                        self.event_time_lane,
+                        &batch_keys,
+                    )?
                 },
                 
                 FieldGenerator::ProcessingTimestamp => {
@@ -330,13 +410,19 @@ impl DatagenSourceFunction {
     }
 
     /// Generate incremental timestamp column with per-key increment
-    fn generate_incremental_timestamp_column(per_key_timestamps: &mut HashMap<String, i64>, start_ms: i64, step_ms: i64, batch_keys: &[String]) -> Result<ArrayRef> {
+    fn generate_incremental_timestamp_column(
+        per_key_timestamps: &mut HashMap<String, i64>,
+        start_ms: i64,
+        step_ms: i64,
+        event_time_lane: i64,
+        batch_keys: &[String],
+    ) -> Result<ArrayRef> {
         let mut builder = TimestampMillisecondBuilder::with_capacity(batch_keys.len());
         
         for key in batch_keys {
             let current_ts = per_key_timestamps.get_mut(key).unwrap();
             if *current_ts == 0 {
-                *current_ts = start_ms;
+                *current_ts = start_ms + event_time_lane;
             }
             builder.append_value(*current_ts);
             *current_ts += step_ms;
@@ -695,9 +781,7 @@ mod tests {
                 start_ms: 1000000, 
                 step_ms: 100 
             }),
-            ("key".to_string(), FieldGenerator::Key { 
-                num_unique_keys: 6  // 6 keys total across all tasks
-            }),
+            ("key".to_string(), FieldGenerator::key(6)), // 6 keys total across all tasks
             ("id".to_string(), FieldGenerator::Increment { 
                 start: ScalarValue::Int64(Some(1)), 
                 step: ScalarValue::Int64(Some(1))
@@ -850,7 +934,7 @@ mod tests {
 
         let fields = HashMap::from([
             ("processing_time".to_string(), FieldGenerator::ProcessingTimestamp),
-            ("key".to_string(), FieldGenerator::Key { num_unique_keys: 4 }),
+            ("key".to_string(), FieldGenerator::key(4)),
             ("id".to_string(), FieldGenerator::Increment { 
                 start: ScalarValue::Int64(Some(1)), 
                 step: ScalarValue::Int64(Some(1))
@@ -970,9 +1054,7 @@ mod tests {
         );
         fields.insert(
             "key".to_string(),
-            FieldGenerator::Key {
-                num_unique_keys,
-            },
+            FieldGenerator::key(num_unique_keys),
         );
         fields.insert(
             "value".to_string(),
@@ -1112,5 +1194,226 @@ mod tests {
                 task_index
             );
         }
+    }
+
+    fn create_shared_key_replayable_config(
+        total_records: usize,
+        batch_size: usize,
+        num_unique_keys: usize,
+        step_ms: i64,
+    ) -> DatagenSourceConfig {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("timestamp", DataType::Timestamp(TimeUnit::Millisecond, None), false),
+            Field::new("key", DataType::Utf8, false),
+            Field::new("value", DataType::Float64, false),
+        ]));
+
+        let mut fields = HashMap::new();
+        fields.insert(
+            "timestamp".to_string(),
+            FieldGenerator::IncrementalTimestamp {
+                start_ms: 1000,
+                step_ms,
+            },
+        );
+        fields.insert("key".to_string(), FieldGenerator::shared_key(num_unique_keys));
+        fields.insert(
+            "value".to_string(),
+            FieldGenerator::Values {
+                values: vec![
+                    ScalarValue::Float64(Some(1.0)),
+                    ScalarValue::Float64(Some(2.0)),
+                ],
+            },
+        );
+
+        let spec = DatagenSpec {
+            rate: None,
+            limit: Some(total_records),
+            run_for_s: None,
+            batch_size,
+            fields,
+            replayable: true,
+        };
+        DatagenSourceConfig::new(schema, spec)
+    }
+
+    #[tokio::test]
+    async fn test_partitioned_event_time_starts_at_configured_start_ms() {
+        let cfg = create_replayable_checkpoint_test_config(8, 4, 8);
+        let parallelism = 4;
+        for task_index in 0..parallelism {
+            let mut source = DatagenSourceFunction::new(cfg.clone());
+            let ctx = RuntimeContext::new(
+                "test".to_string().into(),
+                task_index,
+                parallelism,
+                None,
+                None,
+                None,
+            );
+            source.open(&ctx).await.unwrap();
+            let rows = collect_all_rows(&mut source).await;
+            let min_ts = rows.iter().map(|row| row.ts).min().unwrap();
+            assert_eq!(
+                min_ts, 1000,
+                "partitioned task {task_index} must not apply an event-time lane"
+            );
+        }
+    }
+
+    #[test]
+    fn test_key_distribution_partitioned_vs_shared() {
+        let partitioned_0 = DatagenSourceFunction::gen_key_values_for_task(
+            4,
+            0,
+            8,
+            KeyDistribution::Partitioned,
+        );
+        let partitioned_1 = DatagenSourceFunction::gen_key_values_for_task(
+            4,
+            1,
+            8,
+            KeyDistribution::Partitioned,
+        );
+        assert_eq!(partitioned_0, vec!["key-0-0".to_string(), "key-0-1".to_string()]);
+        assert_eq!(partitioned_1, vec!["key-1-0".to_string(), "key-1-1".to_string()]);
+        assert!(partitioned_0.iter().all(|k| !partitioned_1.contains(k)));
+
+        let shared_0 =
+            DatagenSourceFunction::gen_key_values_for_task(4, 0, 4, KeyDistribution::Shared);
+        let shared_3 =
+            DatagenSourceFunction::gen_key_values_for_task(4, 3, 4, KeyDistribution::Shared);
+        assert_eq!(
+            shared_0,
+            vec![
+                "key-0".to_string(),
+                "key-1".to_string(),
+                "key-2".to_string(),
+                "key-3".to_string()
+            ]
+        );
+        assert_eq!(shared_0, shared_3);
+    }
+
+    #[tokio::test]
+    async fn test_shared_keys_use_unique_event_time_lanes() {
+        let parallelism = 4;
+        let num_unique_keys = 4;
+        let records_per_task = 16;
+        let cfg = create_shared_key_replayable_config(records_per_task * parallelism, 4, num_unique_keys, 10);
+
+        let mut all_keys = HashSet::new();
+        let mut identity = HashSet::new();
+        for task_index in 0..parallelism {
+            let mut source = DatagenSourceFunction::new(cfg.clone());
+            let ctx = RuntimeContext::new(
+                "test".to_string().into(),
+                task_index as i32,
+                parallelism as i32,
+                None,
+                None,
+                None,
+            );
+            source.open(&ctx).await.unwrap();
+            let rows = collect_all_rows(&mut source).await;
+            assert_eq!(rows.len(), records_per_task);
+            for row in rows {
+                all_keys.insert(row.key.clone());
+                assert!(
+                    identity.insert((row.key.clone(), row.ts)),
+                    "duplicate (key, timestamp) ({}, {}) from task {task_index}",
+                    row.key,
+                    row.ts
+                );
+                assert_eq!(
+                    (row.ts - 1000) % 10,
+                    task_index as i64,
+                    "task {task_index} should occupy event-time lane {task_index}, got ts {}",
+                    row.ts
+                );
+            }
+        }
+        assert_eq!(all_keys.len(), num_unique_keys);
+        assert!(all_keys.contains("key-0"));
+        assert!(all_keys.contains("key-3"));
+    }
+
+    #[tokio::test]
+    async fn test_shared_keys_checkpoint_restore_matches_uninterrupted() {
+        let parallelism = 4;
+        let batch_size = 8;
+        let total_records = 128;
+        let checkpoint_after = 16;
+        assert_eq!(checkpoint_after % batch_size, 0);
+
+        let cfg = create_shared_key_replayable_config(total_records, batch_size, 4, 10);
+
+        for task_index in 0..parallelism {
+            let mut baseline = DatagenSourceFunction::new(cfg.clone());
+            let ctx = RuntimeContext::new(
+                "test".to_string().into(),
+                task_index,
+                parallelism,
+                None,
+                None,
+                None,
+            );
+            baseline.open(&ctx).await.unwrap();
+            let baseline_rows = collect_all_rows(&mut baseline).await;
+
+            let mut first = DatagenSourceFunction::new(cfg.clone());
+            let ctx_first = RuntimeContext::new(
+                "test".to_string().into(),
+                task_index,
+                parallelism,
+                None,
+                None,
+                None,
+            );
+            first.open(&ctx_first).await.unwrap();
+            let mut resumed_rows = collect_rows(&mut first, Some(checkpoint_after)).await;
+            let snapshot = first.snapshot_position().await.unwrap();
+
+            let mut second = DatagenSourceFunction::new(cfg.clone());
+            let ctx_second = RuntimeContext::new(
+                "test".to_string().into(),
+                task_index,
+                parallelism,
+                None,
+                None,
+                None,
+            );
+            second.open(&ctx_second).await.unwrap();
+            second.restore_position(&snapshot).await.unwrap();
+            resumed_rows.extend(collect_rows(&mut second, None).await);
+
+            assert_eq!(
+                baseline_rows,
+                resumed_rows,
+                "shared-key checkpoint+restore must produce identical rows for task_index={task_index}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_key_distribution_serde_defaults_to_partitioned() {
+        let json = r#"{"Key":{"num_unique":4}}"#;
+        let gen: FieldGenerator = serde_json::from_str(json).unwrap();
+        match gen {
+            FieldGenerator::Key {
+                num_unique_keys,
+                distribution,
+            } => {
+                assert_eq!(num_unique_keys, 4);
+                assert_eq!(distribution, KeyDistribution::Partitioned);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+
+        let shared = FieldGenerator::shared_key(4);
+        let serialized = serde_json::to_value(&shared).unwrap();
+        assert_eq!(serialized["Key"]["distribution"], "shared");
+        assert_eq!(serialized["Key"]["num_unique"], 4);
     }
 }

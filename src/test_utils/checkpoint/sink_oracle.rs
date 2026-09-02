@@ -124,6 +124,16 @@ fn materialize_input_rows(
             }
         }
     }
+    let mut seen = HashSet::new();
+    for row in &rows {
+        if !seen.insert((row.key.clone(), row.timestamp)) {
+            return Err(anyhow!(
+                "duplicate upsert identity ({}, {}); shared-key datagen must use unique event-time lanes",
+                row.key,
+                row.timestamp
+            ));
+        }
+    }
     Ok(rows)
 }
 
@@ -161,6 +171,9 @@ fn pass_through_sink_rows(
 }
 
 fn expected_window_rows(rows: Vec<InputRow>) -> HashMap<String, WindowAggregateRow> {
+    // Shared-key workloads emit the same logical key from every source task; merge
+    // all of those rows before RANGE aggregation so the oracle matches hash-repartitioned
+    // window input rather than per-task partitioned keys.
     let mut by_key: HashMap<String, Vec<InputRow>> = HashMap::new();
     for row in rows {
         by_key.entry(row.key.clone()).or_default().push(row);
@@ -368,8 +381,11 @@ fn window_key_context(
             .find(|(task_index, _)| *task_index == task)
             .map(|(_, records)| *records)
     });
+    let shared_key = key
+        .strip_prefix("key-")
+        .is_some_and(|suffix| !suffix.contains('-'));
     format!(
-        "key={key} expected_key_rows={} actual_key_rows={} source_task={source_task:?} source_records={source_records:?}",
+        "key={key} expected_key_rows={} actual_key_rows={} source_task={source_task:?} source_records={source_records:?} shared_key={shared_key} task_counts={task_counts:?}",
         expected_rows.len(),
         actual_rows.len(),
     )
@@ -424,7 +440,7 @@ pub(super) async fn assert_sink_matches_offline_datagen(
     let total: u64 = task_counts.iter().map(|(_, n)| n).sum();
     let input_rows = materialize_input_rows(&task_counts, workload)?;
 
-    if workload == CheckpointWorkload::Window {
+    if workload.is_window() {
         assert_no_window_late_drops(&snapshot)?;
         let expected = expected_window_rows(input_rows);
         let actual = window_sink_rows(storage)?;
@@ -455,4 +471,37 @@ pub(super) async fn assert_sink_matches_offline_datagen(
         actual.len()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expected_window_rows_merges_shared_keys_across_source_tasks() {
+        let rows = vec![
+            InputRow {
+                key: "key-0".into(),
+                timestamp: 1000,
+                value: 1.0,
+            },
+            InputRow {
+                key: "key-0".into(),
+                timestamp: 1001,
+                value: 2.0,
+            },
+            InputRow {
+                key: "key-0".into(),
+                timestamp: 2000,
+                value: 3.0,
+            },
+        ];
+        let expected = expected_window_rows(rows);
+        let at_1001 = expected.get("key-0|1001").expect("merged row at 1001");
+        assert_eq!(at_1001.count, 2);
+        assert!((at_1001.sum - 3.0).abs() < 1e-9);
+        let at_2000 = expected.get("key-0|2000").expect("merged row at 2000");
+        assert_eq!(at_2000.count, 3);
+        assert!((at_2000.sum - 6.0).abs() < 1e-9);
+    }
 }

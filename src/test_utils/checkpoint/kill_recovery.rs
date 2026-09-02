@@ -171,7 +171,7 @@ pub async fn run_checkpoint_sequential_failures(
                     )
                     .await?
                 }
-                CheckpointWorkload::Window => {
+                CheckpointWorkload::Window | CheckpointWorkload::WindowSharedKeys => {
                     wait_for_sink_progress(&cluster, 0, timeouts.attempt_running).await?;
                     advance_lifecycle_cursor(&cluster.master(), &mut cursor).await?;
                     let checkpoint_id = wait_for_checkpoint_started(

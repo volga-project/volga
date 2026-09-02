@@ -68,7 +68,7 @@ pub fn docker_smoke_launch_spec() -> PipelineLaunchSpec {
 }
 
 pub fn kube_smoke_launch_spec() -> PipelineLaunchSpec {
-    deployment_smoke_launch_spec(FieldGenerator::Key { num_unique_keys: 6 })
+    deployment_smoke_launch_spec(FieldGenerator::key(6))
         .with_kube_worker_health_poll(true)
         .with_state_maintenance(true, 100)
 }

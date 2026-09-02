@@ -28,6 +28,8 @@ pub const MULTI_FAILURE_COUNT: usize = 2;
 const SAFETY_DATAGEN_RUN_FOR_S: f64 = 300.0;
 const DATAGEN_RATE: f32 = 200.0;
 pub const WINDOW_RANGE_MS: i64 = 10_000;
+/// Shared-key window workload: every source task emits this many keys (`key-0`..).
+pub const SHARED_WINDOW_KEYS: usize = 4;
 
 pub fn local_checkpoint_spec() -> CheckpointSpec {
     CheckpointSpec {
@@ -49,6 +51,29 @@ pub fn kube_checkpoint_spec() -> CheckpointSpec {
 pub enum CheckpointWorkload {
     PassThrough,
     Window,
+    /// Same window SQL as `Window`, but all source tasks share `key-0`..`key-{SHARED_WINDOW_KEYS-1}`.
+    WindowSharedKeys,
+}
+
+impl CheckpointWorkload {
+    pub fn is_window(self) -> bool {
+        matches!(self, Self::Window | Self::WindowSharedKeys)
+    }
+
+    fn timestamp_step_ms(self) -> i64 {
+        match self {
+            Self::PassThrough => 1,
+            Self::Window | Self::WindowSharedKeys => 1_000,
+        }
+    }
+
+    fn key_generator(self, parallelism: usize) -> FieldGenerator {
+        match self {
+            Self::PassThrough => FieldGenerator::key(parallelism * 8),
+            Self::Window => FieldGenerator::key(parallelism * 4),
+            Self::WindowSharedKeys => FieldGenerator::shared_key(SHARED_WINDOW_KEYS),
+        }
+    }
 }
 
 pub(super) fn checkpoint_datagen_parts(
@@ -69,22 +94,10 @@ pub(super) fn checkpoint_datagen_parts(
         "timestamp".to_string(),
         FieldGenerator::IncrementalTimestamp {
             start_ms: 1_000,
-            step_ms: match workload {
-                CheckpointWorkload::PassThrough => 1,
-                CheckpointWorkload::Window => 1_000,
-            },
+            step_ms: workload.timestamp_step_ms(),
         },
     );
-    fields.insert(
-        "key".to_string(),
-        FieldGenerator::Key {
-            num_unique_keys: parallelism
-                * match workload {
-                    CheckpointWorkload::PassThrough => 8,
-                    CheckpointWorkload::Window => 4,
-                },
-        },
-    );
+    fields.insert("key".to_string(), workload.key_generator(parallelism));
     fields.insert(
         "value".to_string(),
         FieldGenerator::Values {
@@ -132,7 +145,7 @@ pub fn checkpoint_recovery_launch_spec(
 
     let sql = match workload {
         CheckpointWorkload::PassThrough => "SELECT timestamp, key, value FROM datagen_source",
-        CheckpointWorkload::Window => {
+        CheckpointWorkload::Window | CheckpointWorkload::WindowSharedKeys => {
             let tiling = TileConfig::new(vec![
                 TimeGranularity::Seconds(1),
                 TimeGranularity::Seconds(5),
@@ -180,4 +193,9 @@ pub fn checkpoint_recovery_launch_spec(
 /// Multi-worker launch for sequential multi-failure stress (same indefinite datagen).
 pub fn checkpoint_multi_failure_launch_spec() -> PipelineLaunchSpec {
     checkpoint_recovery_launch_spec(MULTI_WORKER_PARALLELISM, CheckpointWorkload::PassThrough)
+}
+
+/// Window recovery with shared keys across source tasks (hash repartition + multi-input WM merge).
+pub fn checkpoint_shared_key_window_launch_spec(parallelism: usize) -> PipelineLaunchSpec {
+    checkpoint_recovery_launch_spec(parallelism, CheckpointWorkload::WindowSharedKeys)
 }

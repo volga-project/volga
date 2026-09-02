@@ -58,9 +58,7 @@ fn create_datagen_config(
         ),
         (
             "key".to_string(),
-            FieldGenerator::Key {
-                num_unique_keys: num_unique_keys,
-            },
+            FieldGenerator::key(num_unique_keys),
         ),
         (
             "value".to_string(),

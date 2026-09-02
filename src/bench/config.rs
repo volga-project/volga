@@ -336,7 +336,7 @@ fn datagen_from_file(file: Option<&DatagenFile>, parallelism: usize) -> Result<D
     );
     fields.insert(
         "key".to_string(),
-        FieldGenerator::Key { num_unique_keys },
+        FieldGenerator::key(num_unique_keys),
     );
     fields.insert(
         "value".to_string(),
