@@ -295,17 +295,6 @@ impl DatagenSourceFunction {
         }
     }
 
-    fn event_time_lane(&self) -> i64 {
-        let shared = self.config.spec.fields.values().any(|g| {
-            matches!(g, FieldGenerator::Key { distribution: KeyDistribution::Shared, .. })
-        });
-        if shared {
-            self.task_index.unwrap_or(0) as i64
-        } else {
-            0
-        }
-    }
-
     /// Build a batch and advance the emit counter (offline materialize / unit helpers).
     pub(crate) fn generate_batch(&mut self, batch_size: usize) -> Result<RecordBatch> {
         let batch = self.build_batch(batch_size)?;
@@ -316,6 +305,10 @@ impl DatagenSourceFunction {
     fn build_batch(&mut self, batch_size: usize) -> Result<RecordBatch> {
         let schema = self.schema.clone();
         let mut columns: Vec<ArrayRef> = Vec::new();
+        let shared_keys = self.config.spec.fields.values().any(|g| {
+            matches!(g, FieldGenerator::Key { distribution: KeyDistribution::Shared, .. })
+        });
+        let task_index = self.task_index.unwrap_or(0) as i64;
         
         // Generate records with round-robin key selection
         let mut batch_keys = Vec::with_capacity(batch_size);
@@ -333,11 +326,17 @@ impl DatagenSourceFunction {
             
             let column = match generator {
                 FieldGenerator::IncrementalTimestamp { start_ms, step_ms } => {
+                    // Shared keys reuse the same strings across tasks, so start
+                    // at start_ms + task_index to keep (key, timestamp) unique.
+                    let start_ms = if shared_keys {
+                        *start_ms + task_index
+                    } else {
+                        *start_ms
+                    };
                     Self::generate_incremental_timestamp_column(
                         &mut self.per_key_timestamps,
-                        *start_ms,
+                        start_ms,
                         *step_ms,
-                        self.event_time_lane(),
                         &batch_keys,
                     )?
                 },
@@ -379,7 +378,6 @@ impl DatagenSourceFunction {
         per_key_timestamps: &mut HashMap<String, i64>,
         start_ms: i64,
         step_ms: i64,
-        event_time_lane: i64,
         batch_keys: &[String],
     ) -> Result<ArrayRef> {
         let mut builder = TimestampMillisecondBuilder::with_capacity(batch_keys.len());
@@ -387,7 +385,7 @@ impl DatagenSourceFunction {
         for key in batch_keys {
             let current_ts = per_key_timestamps.get_mut(key).unwrap();
             if *current_ts == 0 {
-                *current_ts = start_ms + event_time_lane;
+                *current_ts = start_ms;
             }
             builder.append_value(*current_ts);
             *current_ts += step_ms;

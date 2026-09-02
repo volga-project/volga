@@ -128,7 +128,7 @@ fn materialize_input_rows(
     for row in &rows {
         if !seen.insert((row.key.clone(), row.timestamp)) {
             return Err(anyhow!(
-                "duplicate upsert identity ({}, {}); shared-key datagen must use unique event-time lanes",
+                "duplicate upsert identity ({}, {}); shared-key timestamps must be unique across tasks",
                 row.key,
                 row.timestamp
             ));
