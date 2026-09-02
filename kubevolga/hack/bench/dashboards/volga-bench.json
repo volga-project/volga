@@ -7,7 +7,7 @@
   ],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 8,
+  "version": 9,
   "refresh": "5s",
   "time": {
     "from": "now-15m",
@@ -79,9 +79,9 @@
   },
   "panels": [
     {
-      "id": 10,
+      "id": 20,
       "type": "row",
-      "title": "Job",
+      "title": "Flow",
       "gridPos": {
         "h": 1,
         "w": 24,
@@ -92,159 +92,15 @@
       "panels": []
     },
     {
-      "id": 11,
-      "type": "timeseries",
-      "title": "Checkpoints",
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 1
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "increase(volga_checkpoint_completed{pipeline_id=~\"$pipeline\"}[5m])",
-          "legendFormat": "{{pipeline_id}} completed",
-          "editorMode": "code",
-          "instant": false,
-          "range": true
-        },
-        {
-          "refId": "B",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "increase(volga_checkpoint_failed{pipeline_id=~\"$pipeline\"}[5m])",
-          "legendFormat": "{{pipeline_id}} failed",
-          "editorMode": "code",
-          "instant": false,
-          "range": true
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "smooth",
-            "fillOpacity": 10,
-            "lineWidth": 2,
-            "pointSize": 5,
-            "showPoints": "never",
-            "spanNulls": true,
-            "stacking": {
-              "mode": "none",
-              "group": "A"
-            }
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "description": "Trailing 5m increase of master counters (not a per-second rate). metrics crate does not add _total. Empty if scrape missed the master."
-    },
-    {
-      "id": 12,
-      "type": "timeseries",
-      "title": "Checkpoint duration p99",
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 1
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(volga_checkpoint_duration_ms_bucket{pipeline_id=~\"$pipeline\"}[1m])))",
-          "legendFormat": "duration p99",
-          "editorMode": "code",
-          "instant": false,
-          "range": true
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "smooth",
-            "fillOpacity": 10,
-            "lineWidth": 2,
-            "pointSize": 5,
-            "showPoints": "never",
-            "spanNulls": true,
-            "stacking": {
-              "mode": "none",
-              "group": "A"
-            }
-          },
-          "unit": "ms"
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "description": "Success-only histogram. Sparse on a 2-minute / 30s-checkpoint run \u2014 expect a flat-ish line."
-    },
-    {
-      "id": 20,
-      "type": "row",
-      "title": "Flow",
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 9
-      },
-      "collapsed": false,
-      "panels": []
-    },
-    {
       "id": 21,
       "type": "timeseries",
       "title": "Throughput",
-      "description": "Per-operator sent rate (subtasks summed). Do not add the series together — each hop counts the same row. Source = ingest, Window sent = WO emit, window recv = WO ingest, sink written = pipeline output. Sink(Count) sent should match sink written.",
+      "description": "Per-operator sent rate (subtasks summed). Do not add the series together \u2014 each hop counts the same row. Source = ingest, Window sent = WO emit, window recv = WO ingest, sink written = pipeline output. Sink(Count) sent should match sink written.",
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 10
+        "y": 1
       },
       "datasource": {
         "type": "prometheus",
@@ -327,7 +183,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 10
+        "y": 1
       },
       "datasource": {
         "type": "prometheus",
@@ -389,7 +245,7 @@
           "sort": "desc"
         }
       },
-      "description": "Gauge: wall_now_ms − watermark, then quantile() across selected tasks (not a histogram). 0 means WM ≥ wall (IncrementalTimestamp flying ahead of wall). Series omitted for WM 0 / MAX."
+      "description": "Gauge: wall_now_ms \u2212 watermark, then quantile() across selected tasks (not a histogram). 0 means WM \u2265 wall (IncrementalTimestamp flying ahead of wall). Series omitted for WM 0 / MAX."
     },
     {
       "id": 30,
@@ -399,7 +255,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 18
+        "y": 9
       },
       "collapsed": false,
       "panels": []
@@ -412,7 +268,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 19
+        "y": 10
       },
       "datasource": {
         "type": "prometheus",
@@ -496,7 +352,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 29
+        "y": 20
       },
       "collapsed": false,
       "panels": []
@@ -509,7 +365,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 30
+        "y": 21
       },
       "datasource": {
         "type": "prometheus",
@@ -595,7 +451,7 @@
           "sort": "desc"
         }
       },
-      "description": "Wall time of insert_batch vs process_due. histogram_quantile over a merged histogram of selected tasks (weighted by call rate, not 'p99 of a typical task'). Buckets 1ms … 5m; +Inf is >5m."
+      "description": "Wall time of insert_batch vs process_due. histogram_quantile over a merged histogram of selected tasks (weighted by call rate, not 'p99 of a typical task'). Buckets 1ms \u2026 5m; +Inf is >5m."
     },
     {
       "id": 43,
@@ -605,7 +461,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 30
+        "y": 21
       },
       "datasource": {
         "type": "prometheus",
@@ -700,7 +556,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 38
+        "y": 29
       },
       "datasource": {
         "type": "prometheus",
@@ -796,7 +652,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 38
+        "y": 29
       },
       "datasource": {
         "type": "prometheus",
@@ -881,7 +737,151 @@
           "sort": "desc"
         }
       },
-      "description": "In-mem backend entry counts (not bytes), summed across selected Window tasks. key_states ≈ distinct keys. Triggers can dwarf raw rows when process_due lags."
+      "description": "In-mem backend entry counts (not bytes), summed across selected Window tasks. key_states \u2248 distinct keys. Triggers can dwarf raw rows when process_due lags."
+    },
+    {
+      "id": 10,
+      "type": "row",
+      "title": "Job",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 37
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Checkpoints",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 38
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "increase(volga_checkpoint_completed{pipeline_id=~\"$pipeline\"}[5m])",
+          "legendFormat": "{{pipeline_id}} completed",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "increase(volga_checkpoint_failed{pipeline_id=~\"$pipeline\"}[5m])",
+          "legendFormat": "{{pipeline_id}} failed",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Trailing 5m increase of master counters (not a per-second rate). metrics crate does not add _total. Empty if scrape missed the master."
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Checkpoint duration p99",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 38
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(volga_checkpoint_duration_ms_bucket{pipeline_id=~\"$pipeline\"}[1m])))",
+          "legendFormat": "duration p99",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Success-only histogram. Sparse on a 2-minute / 30s-checkpoint run \u2014 expect a flat-ish line."
     },
     {
       "id": 60,
@@ -954,7 +954,7 @@
           "sort": "desc"
         }
       },
-      "description": "Kubelet cAdvisor. 1.0 = one full core. Not labeled by pipeline_id — shows every master/worker container still running."
+      "description": "Kubelet cAdvisor. 1.0 = one full core. Not labeled by pipeline_id \u2014 shows every master/worker container still running."
     },
     {
       "id": 62,
@@ -1029,90 +1029,6 @@
       "description": "volga_worker_rss_bytes (process RSS, workers only) vs cAdvisor working set (master + workers). Shapes should match; RSS is often a bit below cgroup."
     },
     {
-      "id": 50,
-      "type": "row",
-      "title": "Operator (poll gauges — cumulative, not rec/s)",
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 55
-      },
-      "collapsed": true,
-      "panels": []
-    },
-    {
-      "id": 51,
-      "type": "timeseries",
-      "title": "Operator records (cumulative counts)",
-      "gridPos": {
-        "h": 8,
-        "w": 24,
-        "x": 0,
-        "y": 56
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "sum by (operator_id) (volga_operator_records_sent{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\"})",
-          "legendFormat": "sent {{operator_id}}",
-          "editorMode": "code",
-          "instant": false,
-          "range": true
-        },
-        {
-          "refId": "B",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "sum by (operator_id) (volga_operator_records_recv{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\"})",
-          "legendFormat": "recv {{operator_id}}",
-          "editorMode": "code",
-          "instant": false,
-          "range": true
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "smooth",
-            "fillOpacity": 10,
-            "lineWidth": 2,
-            "pointSize": 5,
-            "showPoints": "never",
-            "spanNulls": true,
-            "stacking": {
-              "mode": "none",
-              "group": "A"
-            }
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "description": "Worker poll-time gauges of lifetime totals, labeled by operator_id (no task_id; ignores the task dropdown). These are not rec/s — use Throughput for rates."
-    },
-    {
       "id": 70,
       "type": "row",
       "title": "Transport",
@@ -1120,7 +1036,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 64
+        "y": 55
       },
       "collapsed": false,
       "panels": []
@@ -1133,7 +1049,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 65
+        "y": 56
       },
       "datasource": {
         "type": "prometheus",
@@ -1192,7 +1108,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 65
+        "y": 56
       },
       "datasource": {
         "type": "prometheus",
@@ -1251,7 +1167,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 73
+        "y": 64
       },
       "datasource": {
         "type": "prometheus",
@@ -1311,7 +1227,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 73
+        "y": 64
       },
       "datasource": {
         "type": "prometheus",

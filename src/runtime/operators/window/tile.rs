@@ -235,6 +235,11 @@ mod tests {
             TimeGranularity::Minutes(7),
         ])
         .is_err());
+        assert!(TileConfig::new(vec![
+            TimeGranularity::Milliseconds(100),
+            TimeGranularity::Milliseconds(500),
+        ])
+        .is_ok());
     }
 
     #[test]

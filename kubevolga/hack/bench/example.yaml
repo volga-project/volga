@@ -16,6 +16,7 @@ launch:
     retention: 1
   datagen:
     # omit rate → 200/s. `rate: null` → unlimited (no sleep between batches).
+    # Finite rate derives step_ms from num_unique_keys/rate.
     rate: 200
     batch_size: 20
   watermark:

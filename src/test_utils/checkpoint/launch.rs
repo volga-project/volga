@@ -78,7 +78,7 @@ pub(super) fn checkpoint_datagen_parts(
     fields.insert(
         "key".to_string(),
         FieldGenerator::Key {
-            num_unique: parallelism
+            num_unique_keys: parallelism
                 * match workload {
                     CheckpointWorkload::PassThrough => 8,
                     CheckpointWorkload::Window => 4,

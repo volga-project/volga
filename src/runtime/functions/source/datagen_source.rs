@@ -72,7 +72,11 @@ pub enum FieldGenerator {
     IncrementalTimestamp { start_ms: i64, step_ms: i64 },
     ProcessingTimestamp, // Uses current SystemTime
     String { length: usize }, // Simple random string
-    Key { num_unique: usize }, // Key field with unique values
+    Key {
+        // Cluster image still deserializes `num_unique` until volga:latest is rebuilt.
+        #[serde(rename = "num_unique", alias = "num_unique_keys")]
+        num_unique_keys: usize,
+    },
     Increment {
         #[serde_as(as = "utils::ScalarValueAsBytes")]
         start: ScalarValue,
@@ -222,9 +226,9 @@ impl DatagenSourceFunction {
         // Initialize key values
         if let Some(key_idx) = key_field_index {
             let key_field_name = self.schema.fields()[key_idx].name();
-            if let Some(FieldGenerator::Key { num_unique }) = self.config.spec.fields.get(key_field_name) {
+            if let Some(FieldGenerator::Key { num_unique_keys }) = self.config.spec.fields.get(key_field_name) {
                 // Distribute unique keys across all tasks
-                self.key_values = Self::gen_key_values_for_task(parallelism as usize, task_index as usize, *num_unique);
+                self.key_values = Self::gen_key_values_for_task(parallelism as usize, task_index as usize, *num_unique_keys);
                 
                 // Initialize per-key state for distributed keys
                 for key in self.key_values.iter() {
@@ -243,11 +247,11 @@ impl DatagenSourceFunction {
         }
     }
 
-    pub fn gen_key_values_for_task(parallelism: usize, task_index: usize, num_unique: usize) -> Vec<String> {
+    pub fn gen_key_values_for_task(parallelism: usize, task_index: usize, num_unique_keys: usize) -> Vec<String> {
         let mut key_values = Vec::new();
         
-        let keys_per_task = num_unique / parallelism as usize;
-        let remainder = num_unique % parallelism as usize;
+        let keys_per_task = num_unique_keys / parallelism as usize;
+        let remainder = num_unique_keys % parallelism as usize;
         
         // If there's a remainder, give it to the last task
         let num_keys_for_task = if remainder != 0 && task_index == parallelism - 1 {
@@ -692,7 +696,7 @@ mod tests {
                 step_ms: 100 
             }),
             ("key".to_string(), FieldGenerator::Key { 
-                num_unique: 6  // 6 keys total across all tasks
+                num_unique_keys: 6  // 6 keys total across all tasks
             }),
             ("id".to_string(), FieldGenerator::Increment { 
                 start: ScalarValue::Int64(Some(1)), 
@@ -846,7 +850,7 @@ mod tests {
 
         let fields = HashMap::from([
             ("processing_time".to_string(), FieldGenerator::ProcessingTimestamp),
-            ("key".to_string(), FieldGenerator::Key { num_unique: 4 }),
+            ("key".to_string(), FieldGenerator::Key { num_unique_keys: 4 }),
             ("id".to_string(), FieldGenerator::Increment { 
                 start: ScalarValue::Int64(Some(1)), 
                 step: ScalarValue::Int64(Some(1))
@@ -967,7 +971,7 @@ mod tests {
         fields.insert(
             "key".to_string(),
             FieldGenerator::Key {
-                num_unique: num_unique_keys,
+                num_unique_keys,
             },
         );
         fields.insert(

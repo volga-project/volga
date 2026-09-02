@@ -239,7 +239,7 @@ pub async fn run_window_benchmark(config: WindowBenchmarkConfig) -> Result<Bench
         (
             "key".to_string(),
             FieldGenerator::Key {
-                num_unique: config.num_keys,
+                num_unique_keys: config.num_keys,
             },
         ),
         (

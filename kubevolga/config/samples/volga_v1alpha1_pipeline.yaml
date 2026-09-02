@@ -82,7 +82,7 @@ spec:
               "run_for_s": null,
               "batch_size": 5,
               "fields": {
-                "value": { "Key": { "num_unique": 6 } }
+                "value": { "Key": { "num_unique_keys": 6 } }
               },
               "replayable": true
             }
