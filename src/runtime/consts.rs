@@ -40,7 +40,8 @@ pub const TRANSPORT_TCP_CONNECT_MAX_RETRIES: &str = "transport.tcp_connect_max_r
 pub const TRANSPORT_TCP_CONNECT_RETRY_DELAY: &str = "transport.tcp_connect_retry_delay";
 /// Mailbox drain cap for one processor ingest (`drain_ready_after`).
 pub const WINDOW_INGEST_MAX_RECORDS: &str = "window.ingest_max_records";
-pub const WINDOW_PARTITION_IO_CONCURRENCY: &str = "window.partition_io_concurrency";
+/// In-flight keys for ingest `insert_batch` and WRO `process_key`.
+pub const WINDOW_INGEST_KEY_CONCURRENCY: &str = "window.ingest_key_concurrency";
 pub const WINDOW_DUE_PAGE_SIZE: &str = "window.due_page_size";
 pub const WINDOW_PROCESS_DUE_CONCURRENCY: &str = "window.process_due_concurrency";
 
@@ -82,7 +83,7 @@ const U64_KEYS: &[&str] = &[
     WORKER_REGISTER_MAX_RETRIES,
     TRANSPORT_TCP_CONNECT_MAX_RETRIES,
     WINDOW_INGEST_MAX_RECORDS,
-    WINDOW_PARTITION_IO_CONCURRENCY,
+    WINDOW_INGEST_KEY_CONCURRENCY,
     WINDOW_DUE_PAGE_SIZE,
     WINDOW_PROCESS_DUE_CONCURRENCY,
 ];
@@ -386,7 +387,7 @@ mod tests {
 
         for profile in [&prod, &kube, &local] {
             assert_eq!(profile.u64(WINDOW_INGEST_MAX_RECORDS), 65536);
-            assert_eq!(profile.u64(WINDOW_PARTITION_IO_CONCURRENCY), 32);
+            assert_eq!(profile.u64(WINDOW_INGEST_KEY_CONCURRENCY), 32);
             assert_eq!(profile.u64(WINDOW_DUE_PAGE_SIZE), 256);
             assert_eq!(profile.u64(WINDOW_PROCESS_DUE_CONCURRENCY), 16);
         }

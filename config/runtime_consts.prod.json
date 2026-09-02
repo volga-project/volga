@@ -24,7 +24,7 @@
   "transport.tcp_connect_max_retries": 10,
   "transport.tcp_connect_retry_delay": "1s",
   "window.ingest_max_records": 65536,
-  "window.partition_io_concurrency": 32,
+  "window.ingest_key_concurrency": 32,
   "window.due_page_size": 256,
   "window.process_due_concurrency": 16
 }

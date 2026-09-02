@@ -16,7 +16,7 @@ use crate::common::message::{Message, WatermarkMessage};
 use crate::common::MAX_WATERMARK_VALUE;
 use crate::runtime::checkpoint::{SerializedCheckpoint, SerializedRestore};
 use crate::runtime::consts::{
-    runtime_consts, WINDOW_PARTITION_IO_CONCURRENCY, WINDOW_PROCESS_DUE_CONCURRENCY,
+    runtime_consts, WINDOW_INGEST_KEY_CONCURRENCY, WINDOW_PROCESS_DUE_CONCURRENCY,
 };
 use crate::runtime::functions::key_by::pack::split_by_key_exprs;
 use crate::runtime::metrics::MetricsLabels;
@@ -251,7 +251,7 @@ impl WindowOperator {
                 let state = state.clone();
                 async move { state.insert_batch(&key, payload, emit).await }
             })
-            .buffer_unordered(runtime_consts().u64(WINDOW_PARTITION_IO_CONCURRENCY).max(1) as usize)
+            .buffer_unordered(runtime_consts().u64(WINDOW_INGEST_KEY_CONCURRENCY).max(1) as usize)
             .fold(0usize, |acc, n| async move { acc + n })
             .await;
         debug_assert!(dropped <= input_rows);

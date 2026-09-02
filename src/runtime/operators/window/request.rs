@@ -13,7 +13,7 @@ use futures::{stream, StreamExt};
 
 use crate::common::message::Message;
 use crate::common::Key;
-use crate::runtime::consts::{runtime_consts, WINDOW_PARTITION_IO_CONCURRENCY};
+use crate::runtime::consts::{runtime_consts, WINDOW_INGEST_KEY_CONCURRENCY};
 use crate::runtime::functions::key_by::pack::split_by_key_exprs;
 use crate::runtime::operators::operator::{
     OperatorBase, OperatorConfig, OperatorTrait, OperatorType, Output, StreamOperator,
@@ -164,7 +164,7 @@ impl WindowRequestOperator {
     async fn process_groups(&self, groups: Vec<(Key, RecordBatch)>) -> RecordBatch {
         let mut batches: Vec<(usize, RecordBatch)> = stream::iter(groups.into_iter().enumerate())
             .map(|(i, (key, payload))| async move { (i, self.process_key(&key, &payload).await) })
-            .buffer_unordered(runtime_consts().u64(WINDOW_PARTITION_IO_CONCURRENCY).max(1) as usize)
+            .buffer_unordered(runtime_consts().u64(WINDOW_INGEST_KEY_CONCURRENCY).max(1) as usize)
             .collect()
             .await;
         batches.sort_by_key(|(i, _)| *i);
