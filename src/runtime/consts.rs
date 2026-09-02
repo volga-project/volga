@@ -42,8 +42,10 @@ pub const TRANSPORT_TCP_CONNECT_RETRY_DELAY: &str = "transport.tcp_connect_retry
 pub const WINDOW_INGEST_MAX_RECORDS: &str = "window.ingest_max_records";
 /// In-flight keys for ingest `insert_batch` and WRO `process_key`.
 pub const WINDOW_INGEST_KEY_CONCURRENCY: &str = "window.ingest_key_concurrency";
-pub const WINDOW_DUE_PAGE_SIZE: &str = "window.due_page_size";
-pub const WINDOW_PROCESS_DUE_CONCURRENCY: &str = "window.process_due_concurrency";
+/// Triggers per `stream_due` page (eval + emit before the next page).
+pub const WINDOW_PROCESS_PAGE_SIZE: &str = "window.process_page_size";
+/// In-flight keys evaluating one process page.
+pub const WINDOW_PROCESS_KEY_CONCURRENCY: &str = "window.process_key_concurrency";
 
 /// Explicit profile: `local_test` | `kube_test` | `prod`.
 pub const VOLGA_RUNTIME_CONSTS_PROFILE_ENV: &str = "VOLGA_RUNTIME_CONSTS_PROFILE";
@@ -84,8 +86,8 @@ const U64_KEYS: &[&str] = &[
     TRANSPORT_TCP_CONNECT_MAX_RETRIES,
     WINDOW_INGEST_MAX_RECORDS,
     WINDOW_INGEST_KEY_CONCURRENCY,
-    WINDOW_DUE_PAGE_SIZE,
-    WINDOW_PROCESS_DUE_CONCURRENCY,
+    WINDOW_PROCESS_PAGE_SIZE,
+    WINDOW_PROCESS_KEY_CONCURRENCY,
 ];
 
 const EMBEDDED_LOCAL_TEST: &str = include_str!("../../config/runtime_consts.local_test.json");
@@ -388,8 +390,8 @@ mod tests {
         for profile in [&prod, &kube, &local] {
             assert_eq!(profile.u64(WINDOW_INGEST_MAX_RECORDS), 65536);
             assert_eq!(profile.u64(WINDOW_INGEST_KEY_CONCURRENCY), 32);
-            assert_eq!(profile.u64(WINDOW_DUE_PAGE_SIZE), 256);
-            assert_eq!(profile.u64(WINDOW_PROCESS_DUE_CONCURRENCY), 16);
+            assert_eq!(profile.u64(WINDOW_PROCESS_PAGE_SIZE), 256);
+            assert_eq!(profile.u64(WINDOW_PROCESS_KEY_CONCURRENCY), 16);
         }
     }
 

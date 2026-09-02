@@ -16,7 +16,7 @@ use crate::common::message::{Message, WatermarkMessage};
 use crate::common::MAX_WATERMARK_VALUE;
 use crate::runtime::checkpoint::{SerializedCheckpoint, SerializedRestore};
 use crate::runtime::consts::{
-    runtime_consts, WINDOW_INGEST_KEY_CONCURRENCY, WINDOW_PROCESS_DUE_CONCURRENCY,
+    runtime_consts, WINDOW_INGEST_KEY_CONCURRENCY, WINDOW_PROCESS_KEY_CONCURRENCY,
 };
 use crate::runtime::functions::key_by::pack::split_by_key_exprs;
 use crate::runtime::metrics::MetricsLabels;
@@ -191,7 +191,7 @@ impl WindowOperator {
     }
 
     async fn emit_due_pages(&self, through: Cursor, out: &mut dyn Output) -> Result<()> {
-        let concurrency = runtime_consts().u64(WINDOW_PROCESS_DUE_CONCURRENCY).max(1) as usize;
+        let concurrency = runtime_consts().u64(WINDOW_PROCESS_KEY_CONCURRENCY).max(1) as usize;
         let state = self.state_ref();
         let after = state
             .watermark_frontier()

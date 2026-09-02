@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use std::any::Any;
 
-use crate::runtime::consts::{runtime_consts, WINDOW_DUE_PAGE_SIZE};
+use crate::runtime::consts::{runtime_consts, WINDOW_PROCESS_PAGE_SIZE};
 use crate::runtime::metrics::MetricsLabels;
 use crate::runtime::operators::window::metrics;
 use crate::runtime::operators::window::model::{Cursor, RawRun, TileRun, WindowTrigger};
@@ -372,7 +372,7 @@ impl WindowOperatorStore for InMemWindowStore {
         after: Option<Cursor>,
         through: Cursor,
     ) -> DueWorkStream<'a> {
-        let page_size = runtime_consts().u64(WINDOW_DUE_PAGE_SIZE).max(1) as usize;
+        let page_size = runtime_consts().u64(WINDOW_PROCESS_PAGE_SIZE).max(1) as usize;
 
         let store = self.clone();
         let namespace = namespace.bytes.clone();
@@ -596,7 +596,7 @@ impl OperatorStore for InMemWindowStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::consts::{runtime_consts, WINDOW_DUE_PAGE_SIZE};
+    use crate::runtime::consts::{runtime_consts, WINDOW_PROCESS_PAGE_SIZE};
     use futures::TryStreamExt;
 
     use crate::runtime::operators::window::model::{
@@ -1007,7 +1007,7 @@ mod tests {
         let first = due.try_next().await.unwrap().unwrap();
         assert_eq!(
             first[0].triggers.len(),
-            runtime_consts().u64(WINDOW_DUE_PAGE_SIZE) as usize
+            runtime_consts().u64(WINDOW_PROCESS_PAGE_SIZE) as usize
         );
         let second = due.try_next().await.unwrap().unwrap();
         assert_eq!(second[0].triggers.len(), 34);

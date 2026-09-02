@@ -25,6 +25,6 @@
   "transport.tcp_connect_retry_delay": "1s",
   "window.ingest_max_records": 65536,
   "window.ingest_key_concurrency": 32,
-  "window.due_page_size": 256,
-  "window.process_due_concurrency": 16
+  "window.process_page_size": 256,
+  "window.process_key_concurrency": 16
 }
