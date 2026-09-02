@@ -14,7 +14,7 @@ use crate::api::spec::operators::{OperatorOverride, OperatorTuningSpec};
 use crate::api::spec::pipeline::ExecutionProfile;
 use crate::api::{DatagenSpec, PipelineSpecBuilder, TaskWorkerAssignmentStrategyType};
 use crate::runtime::consts::RuntimeConstsProfile;
-use crate::runtime::functions::source::datagen_source::FieldGenerator;
+use crate::runtime::functions::source::datagen_source::{FieldGenerator, KeyDistribution};
 use crate::runtime::operators::window::model::TimeGranularity;
 use crate::runtime::operators::window::spec::WindowSpec;
 use crate::runtime::operators::window::tile::TileConfig;
@@ -336,7 +336,10 @@ fn datagen_from_file(file: Option<&DatagenFile>, parallelism: usize) -> Result<D
     );
     fields.insert(
         "key".to_string(),
-        FieldGenerator::key(num_unique_keys),
+        FieldGenerator::Key {
+            num_unique_keys,
+            distribution: KeyDistribution::Partitioned,
+        },
     );
     fields.insert(
         "value".to_string(),

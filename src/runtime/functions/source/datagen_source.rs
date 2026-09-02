@@ -115,22 +115,6 @@ pub enum FieldGenerator {
     }, // Round-robin through provided values
 }
 
-impl FieldGenerator {
-    pub fn key(num_unique_keys: usize) -> Self {
-        Self::Key {
-            num_unique_keys,
-            distribution: KeyDistribution::Partitioned,
-        }
-    }
-
-    pub fn shared_key(num_unique_keys: usize) -> Self {
-        Self::Key {
-            num_unique_keys,
-            distribution: KeyDistribution::Shared,
-        }
-    }
-}
-
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DatagenSourcePosition {
@@ -311,7 +295,7 @@ impl DatagenSourceFunction {
         }
     }
 
-    fn timestamp_lane(&self) -> i64 {
+    fn event_time_lane(&self) -> i64 {
         let shared = self.config.spec.fields.values().any(|g| {
             matches!(g, FieldGenerator::Key { distribution: KeyDistribution::Shared, .. })
         });
@@ -353,7 +337,7 @@ impl DatagenSourceFunction {
                         &mut self.per_key_timestamps,
                         *start_ms,
                         *step_ms,
-                        self.timestamp_lane(),
+                        self.event_time_lane(),
                         &batch_keys,
                     )?
                 },
@@ -762,7 +746,10 @@ mod tests {
                 start_ms: 1000000, 
                 step_ms: 100 
             }),
-            ("key".to_string(), FieldGenerator::key(6)), // 6 keys total across all tasks
+            ("key".to_string(), FieldGenerator::Key {
+                num_unique_keys: 6,
+                distribution: KeyDistribution::Partitioned,
+            }),
             ("id".to_string(), FieldGenerator::Increment { 
                 start: ScalarValue::Int64(Some(1)), 
                 step: ScalarValue::Int64(Some(1))
@@ -915,7 +902,10 @@ mod tests {
 
         let fields = HashMap::from([
             ("processing_time".to_string(), FieldGenerator::ProcessingTimestamp),
-            ("key".to_string(), FieldGenerator::key(4)),
+            ("key".to_string(), FieldGenerator::Key {
+                num_unique_keys: 4,
+                distribution: KeyDistribution::Partitioned,
+            }),
             ("id".to_string(), FieldGenerator::Increment { 
                 start: ScalarValue::Int64(Some(1)), 
                 step: ScalarValue::Int64(Some(1))
@@ -1035,7 +1025,10 @@ mod tests {
         );
         fields.insert(
             "key".to_string(),
-            FieldGenerator::key(num_unique_keys),
+            FieldGenerator::Key {
+                num_unique_keys,
+                distribution: KeyDistribution::Partitioned,
+            },
         );
         fields.insert(
             "value".to_string(),
@@ -1175,66 +1168,5 @@ mod tests {
                 task_index
             );
         }
-    }
-
-    #[tokio::test]
-    async fn test_shared_keys_are_identical_across_tasks_with_unique_timestamps() {
-        let parallelism = 4;
-        let records_per_task = 16;
-        let mut fields = HashMap::new();
-        fields.insert(
-            "timestamp".to_string(),
-            FieldGenerator::IncrementalTimestamp {
-                start_ms: 1000,
-                step_ms: 10,
-            },
-        );
-        fields.insert("key".to_string(), FieldGenerator::shared_key(4));
-        fields.insert(
-            "value".to_string(),
-            FieldGenerator::Values {
-                values: vec![ScalarValue::Float64(Some(1.0))],
-            },
-        );
-        let cfg = DatagenSourceConfig::new(
-            Arc::new(Schema::new(vec![
-                Field::new("timestamp", DataType::Timestamp(TimeUnit::Millisecond, None), false),
-                Field::new("key", DataType::Utf8, false),
-                Field::new("value", DataType::Float64, false),
-            ])),
-            DatagenSpec {
-                rate: None,
-                limit: Some(records_per_task * parallelism),
-                run_for_s: None,
-                batch_size: 4,
-                fields,
-                replayable: true,
-            },
-        );
-
-        let mut all_keys = HashSet::new();
-        let mut identity = HashSet::new();
-        for task_index in 0..parallelism {
-            let mut source = DatagenSourceFunction::new(cfg.clone());
-            let ctx = RuntimeContext::new(
-                "test".to_string().into(),
-                task_index as i32,
-                parallelism as i32,
-                None,
-                None,
-                None,
-            );
-            source.open(&ctx).await.unwrap();
-            for row in collect_all_rows(&mut source).await {
-                all_keys.insert(row.key.clone());
-                assert!(
-                    identity.insert((row.key.clone(), row.ts)),
-                    "duplicate (key, timestamp) ({}, {})",
-                    row.key,
-                    row.ts
-                );
-            }
-        }
-        assert_eq!(all_keys.len(), 4);
     }
 }

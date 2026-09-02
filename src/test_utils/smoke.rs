@@ -3,7 +3,7 @@
 use anyhow::Result;
 
 use crate::api::TaskWorkerAssignmentStrategyType;
-use crate::runtime::functions::source::datagen_source::FieldGenerator;
+use crate::runtime::functions::source::datagen_source::{FieldGenerator, KeyDistribution};
 use crate::test_utils::harness::{
     OutputOracle, PipelineLaunchSpec, RuntimeEnv, VolgaCluster,
 };
@@ -68,7 +68,10 @@ pub fn docker_smoke_launch_spec() -> PipelineLaunchSpec {
 }
 
 pub fn kube_smoke_launch_spec() -> PipelineLaunchSpec {
-    deployment_smoke_launch_spec(FieldGenerator::key(6))
+    deployment_smoke_launch_spec(FieldGenerator::Key {
+        num_unique_keys: 6,
+        distribution: KeyDistribution::Partitioned,
+    })
         .with_kube_worker_health_poll(true)
         .with_state_maintenance(true, 100)
 }

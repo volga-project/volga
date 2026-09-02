@@ -11,7 +11,7 @@ use crate::api::spec::pipeline::ExecutionProfile;
 use crate::api::{compile_logical_graph, ExecutionMode, PipelineSpecBuilder};
 use crate::common::ports::gen_unique_grpc_port;
 use crate::common::types::PipelineId;
-use crate::runtime::functions::source::datagen_source::{DatagenSpec, FieldGenerator};
+use crate::runtime::functions::source::datagen_source::{DatagenSpec, FieldGenerator, KeyDistribution};
 use crate::runtime::observability::snapshot_types::StreamTaskStatus;
 use crate::runtime::operators::operator::OperatorConfig;
 use crate::test_utils::support::{
@@ -66,7 +66,10 @@ pub(crate) async fn run_watermark_window_pipeline(
     );
     fields.insert(
         "partition_key".to_string(),
-        FieldGenerator::key(num_unique_keys),
+        FieldGenerator::Key {
+            num_unique_keys,
+            distribution: KeyDistribution::Partitioned,
+        },
     );
     fields.insert(
         "value".to_string(),

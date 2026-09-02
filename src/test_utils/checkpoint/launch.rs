@@ -10,7 +10,9 @@ use crate::api::spec::connectors::{SinkSpec, SourceSpec, SourceSpecKind};
 use crate::api::spec::operators::{OperatorOverride, OperatorTuningSpec};
 use crate::api::spec::pipeline::ExecutionProfile;
 use crate::api::{CheckpointSpec, PipelineSpecBuilder, TaskWorkerAssignmentStrategyType};
-use crate::runtime::functions::source::datagen_source::{DatagenSpec, FieldGenerator};
+use crate::runtime::functions::source::datagen_source::{
+    DatagenSpec, FieldGenerator, KeyDistribution,
+};
 use crate::runtime::operators::window::spec::WindowSpec;
 use crate::runtime::operators::window::{TileConfig, TimeGranularity};
 use crate::test_utils::harness::PipelineLaunchSpec;
@@ -68,9 +70,18 @@ impl CheckpointWorkload {
 
     fn key_generator(self, parallelism: usize) -> FieldGenerator {
         match self {
-            Self::PassThrough => FieldGenerator::key(parallelism * 8),
-            Self::Window => FieldGenerator::key(parallelism * 4),
-            Self::WindowSharedKeys => FieldGenerator::shared_key(SHARED_WINDOW_KEYS),
+            Self::PassThrough => FieldGenerator::Key {
+                num_unique_keys: parallelism * 8,
+                distribution: KeyDistribution::Partitioned,
+            },
+            Self::Window => FieldGenerator::Key {
+                num_unique_keys: parallelism * 4,
+                distribution: KeyDistribution::Partitioned,
+            },
+            Self::WindowSharedKeys => FieldGenerator::Key {
+                num_unique_keys: SHARED_WINDOW_KEYS,
+                distribution: KeyDistribution::Shared,
+            },
         }
     }
 }
