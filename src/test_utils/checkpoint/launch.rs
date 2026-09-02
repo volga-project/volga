@@ -28,8 +28,7 @@ pub const MULTI_FAILURE_COUNT: usize = 2;
 const SAFETY_DATAGEN_RUN_FOR_S: f64 = 300.0;
 const DATAGEN_RATE: f32 = 200.0;
 pub const WINDOW_RANGE_MS: i64 = 10_000;
-/// Shared-key window workload: every source task emits this many keys (`key-0`..).
-pub const SHARED_WINDOW_KEYS: usize = 4;
+const SHARED_WINDOW_KEYS: usize = 4;
 
 pub fn local_checkpoint_spec() -> CheckpointSpec {
     CheckpointSpec {
@@ -51,7 +50,7 @@ pub fn kube_checkpoint_spec() -> CheckpointSpec {
 pub enum CheckpointWorkload {
     PassThrough,
     Window,
-    /// Same window SQL as `Window`, but all source tasks share `key-0`..`key-{SHARED_WINDOW_KEYS-1}`.
+    /// Same window SQL as `Window`, but every source task emits `key-0`..`key-3`.
     WindowSharedKeys,
 }
 
@@ -71,7 +70,10 @@ impl CheckpointWorkload {
         match self {
             Self::PassThrough => FieldGenerator::key(parallelism * 8),
             Self::Window => FieldGenerator::key(parallelism * 4),
-            Self::WindowSharedKeys => FieldGenerator::shared_key(SHARED_WINDOW_KEYS),
+            Self::WindowSharedKeys => FieldGenerator::Key {
+                num_unique_keys: SHARED_WINDOW_KEYS,
+                shared: true,
+            },
         }
     }
 }
@@ -193,9 +195,4 @@ pub fn checkpoint_recovery_launch_spec(
 /// Multi-worker launch for sequential multi-failure stress (same indefinite datagen).
 pub fn checkpoint_multi_failure_launch_spec() -> PipelineLaunchSpec {
     checkpoint_recovery_launch_spec(MULTI_WORKER_PARALLELISM, CheckpointWorkload::PassThrough)
-}
-
-/// Window recovery with shared keys across source tasks (hash repartition + multi-input WM merge).
-pub fn checkpoint_shared_key_window_launch_spec(parallelism: usize) -> PipelineLaunchSpec {
-    checkpoint_recovery_launch_spec(parallelism, CheckpointWorkload::WindowSharedKeys)
 }
