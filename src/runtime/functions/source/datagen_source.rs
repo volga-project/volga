@@ -65,6 +65,24 @@ impl DatagenSourceConfig {
     // replayable is part of DatagenSpec
 }
 
+/// How `FieldGenerator::Key` values are assigned across source tasks.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyDistribution {
+    /// Disjoint keys: `key-{task_index}-{key_id}`.
+    #[default]
+    Partitioned,
+    /// Every task emits `key-0` .. `key-{num_unique_keys-1}`.
+    /// Timestamps are offset by `task_index` so `(key, timestamp)` stays unique.
+    Shared,
+}
+
+impl KeyDistribution {
+    fn is_partitioned(self) -> bool {
+        matches!(self, Self::Partitioned)
+    }
+}
+
 /// Data generation strategies
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,9 +94,8 @@ pub enum FieldGenerator {
         // Cluster image still deserializes `num_unique` until volga:latest is rebuilt.
         #[serde(rename = "num_unique", alias = "num_unique_keys")]
         num_unique_keys: usize,
-        /// When true, every task emits `key-0`..`key-{n-1}` and offsets timestamps by task_index.
-        #[serde(default)]
-        shared: bool,
+        #[serde(default, skip_serializing_if = "KeyDistribution::is_partitioned")]
+        distribution: KeyDistribution,
     },
     Increment {
         #[serde_as(as = "utils::ScalarValueAsBytes")]
@@ -102,7 +119,14 @@ impl FieldGenerator {
     pub fn key(num_unique_keys: usize) -> Self {
         Self::Key {
             num_unique_keys,
-            shared: false,
+            distribution: KeyDistribution::Partitioned,
+        }
+    }
+
+    pub fn shared_key(num_unique_keys: usize) -> Self {
+        Self::Key {
+            num_unique_keys,
+            distribution: KeyDistribution::Shared,
         }
     }
 }
@@ -238,12 +262,12 @@ impl DatagenSourceFunction {
         // Initialize key values
         if let Some(key_idx) = key_field_index {
             let key_field_name = self.schema.fields()[key_idx].name();
-            if let Some(FieldGenerator::Key { num_unique_keys, shared }) = self.config.spec.fields.get(key_field_name) {
+            if let Some(FieldGenerator::Key { num_unique_keys, distribution }) = self.config.spec.fields.get(key_field_name) {
                 self.key_values = Self::gen_key_values_for_task(
                     parallelism as usize,
                     task_index as usize,
                     *num_unique_keys,
-                    *shared,
+                    *distribution,
                 );
 
                 for key in self.key_values.iter() {
@@ -266,27 +290,30 @@ impl DatagenSourceFunction {
         parallelism: usize,
         task_index: usize,
         num_unique_keys: usize,
-        shared: bool,
+        distribution: KeyDistribution,
     ) -> Vec<String> {
-        if shared {
-            return (0..num_unique_keys).map(|id| format!("key-{id}")).collect();
+        match distribution {
+            KeyDistribution::Shared => {
+                (0..num_unique_keys).map(|id| format!("key-{id}")).collect()
+            }
+            KeyDistribution::Partitioned => {
+                let keys_per_task = num_unique_keys / parallelism;
+                let remainder = num_unique_keys % parallelism;
+                let num_keys_for_task = if remainder != 0 && task_index == parallelism - 1 {
+                    keys_per_task + remainder
+                } else {
+                    keys_per_task
+                };
+                (0..num_keys_for_task)
+                    .map(|key_id| format!("key-{task_index}-{key_id}"))
+                    .collect()
+            }
         }
-
-        let keys_per_task = num_unique_keys / parallelism;
-        let remainder = num_unique_keys % parallelism;
-        let num_keys_for_task = if remainder != 0 && task_index == parallelism - 1 {
-            keys_per_task + remainder
-        } else {
-            keys_per_task
-        };
-        (0..num_keys_for_task)
-            .map(|key_id| format!("key-{task_index}-{key_id}"))
-            .collect()
     }
 
     fn timestamp_lane(&self) -> i64 {
         let shared = self.config.spec.fields.values().any(|g| {
-            matches!(g, FieldGenerator::Key { shared: true, .. })
+            matches!(g, FieldGenerator::Key { distribution: KeyDistribution::Shared, .. })
         });
         if shared {
             self.task_index.unwrap_or(0) as i64
@@ -1162,13 +1189,7 @@ mod tests {
                 step_ms: 10,
             },
         );
-        fields.insert(
-            "key".to_string(),
-            FieldGenerator::Key {
-                num_unique_keys: 4,
-                shared: true,
-            },
-        );
+        fields.insert("key".to_string(), FieldGenerator::shared_key(4));
         fields.insert(
             "value".to_string(),
             FieldGenerator::Values {

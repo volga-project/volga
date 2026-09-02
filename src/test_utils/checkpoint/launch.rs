@@ -70,10 +70,7 @@ impl CheckpointWorkload {
         match self {
             Self::PassThrough => FieldGenerator::key(parallelism * 8),
             Self::Window => FieldGenerator::key(parallelism * 4),
-            Self::WindowSharedKeys => FieldGenerator::Key {
-                num_unique_keys: SHARED_WINDOW_KEYS,
-                shared: true,
-            },
+            Self::WindowSharedKeys => FieldGenerator::shared_key(SHARED_WINDOW_KEYS),
         }
     }
 }
