@@ -30,7 +30,7 @@
           "fields": {
             "value": {
               "Key": {
-                "num_unique": 1
+                "num_unique_keys": 1
               }
             }
           },

@@ -12,25 +12,27 @@ use async_trait::async_trait;
 use futures::{stream, StreamExt, TryStreamExt};
 
 use crate::common::key::Key;
-use crate::common::message::Message;
+use crate::common::message::{Message, WatermarkMessage};
 use crate::common::MAX_WATERMARK_VALUE;
-use crate::runtime::functions::key_by::pack::split_by_key_exprs;
 use crate::runtime::checkpoint::{SerializedCheckpoint, SerializedRestore};
+use crate::runtime::consts::{
+    runtime_consts, WINDOW_INGEST_KEY_CONCURRENCY, WINDOW_PROCESS_KEY_CONCURRENCY,
+};
+use crate::runtime::functions::key_by::pack::split_by_key_exprs;
+use crate::runtime::metrics::MetricsLabels;
+use crate::runtime::observability::TaskMetadata;
 use crate::runtime::operators::operator::{
     OperatorBase, OperatorConfig, OperatorTrait, OperatorType, Output, StreamOperator,
 };
 use crate::runtime::operators::window::config::{BuiltWindows, WindowConfig};
 use crate::runtime::operators::window::eval::advance_key;
 use crate::runtime::operators::window::frame_utils::{get_window_length_ms, require_range_frame};
-use crate::runtime::metrics::MetricsLabels;
 use crate::runtime::operators::window::metrics;
 use crate::runtime::operators::window::model::{Cursor, WindowId};
 use crate::runtime::operators::window::spec::WindowSpec;
 use crate::runtime::operators::window::state::{WindowOperatorState, WindowStateSnapshot};
 use crate::runtime::operators::window::store::{open_window_operator_store, StateNamespace};
 use crate::runtime::operators::window::TileConfig;
-use crate::runtime::operators::window::PARTITION_IO_CONCURRENCY;
-use crate::runtime::observability::TaskMetadata;
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::state::{OperatorTaskState, StateRegistry};
 use crate::runtime::VertexId;
@@ -177,27 +179,25 @@ impl WindowOperator {
         self.state_ref().clone()
     }
 
+    #[cfg(test)]
+    pub(crate) fn output_schema(&self) -> SchemaRef {
+        self.output_schema.clone()
+    }
+
     fn state_ref(&self) -> &Arc<WindowOperatorState> {
         self.state
             .as_ref()
             .expect("WindowOperator must be opened first")
     }
 
-    async fn process_due(&self, through: Cursor) -> RecordBatch {
-        const PROCESS_DUE_CONCURRENCY: usize = 8;
+    async fn emit_due_pages(&self, through: Cursor, out: &mut dyn Output) -> Result<()> {
+        let concurrency = runtime_consts().u64(WINDOW_PROCESS_KEY_CONCURRENCY).max(1) as usize;
         let state = self.state_ref();
         let after = state
             .watermark_frontier()
             .map(|timestamp| Cursor::new(timestamp, u64::MAX));
-        let mut pages = state
-            .store()
-            .stream_due(state.namespace(), after, through);
-        let mut batches = Vec::new();
-        while let Some(work) = pages
-            .try_next()
-            .await
-            .expect("stream due window triggers")
-        {
+        let mut pages = state.store().stream_due(state.namespace(), after, through);
+        while let Some(work) = pages.try_next().await.expect("stream due window triggers") {
             let page = stream::iter(work)
                 .map(|work| {
                     advance_key(
@@ -209,16 +209,18 @@ impl WindowOperator {
                         &self.input_schema,
                     )
                 })
-                .buffered(PROCESS_DUE_CONCURRENCY)
+                .buffered(concurrency)
                 .try_collect::<Vec<_>>()
                 .await
                 .expect("advance due window triggers");
-            batches.extend(page);
+            let batch = if page.is_empty() {
+                RecordBatch::new_empty(self.output_schema.clone())
+            } else {
+                concat_batches(&self.output_schema, &page).expect("concat")
+            };
+            out.emit(Message::new(None, batch, None, None)).await?;
         }
-        if batches.is_empty() {
-            return RecordBatch::new_empty(self.output_schema.clone());
-        }
-        arrow::compute::concat_batches(&self.output_schema, &batches).expect("concat")
+        Ok(())
     }
 
     async fn ingest_data(&mut self, messages: Vec<Message>) {
@@ -249,14 +251,12 @@ impl WindowOperator {
                 let state = state.clone();
                 async move { state.insert_batch(&key, payload, emit).await }
             })
-            .buffer_unordered(PARTITION_IO_CONCURRENCY)
+            .buffer_unordered(runtime_consts().u64(WINDOW_INGEST_KEY_CONCURRENCY).max(1) as usize)
             .fold(0usize, |acc, n| async move { acc + n })
             .await;
         debug_assert!(dropped <= input_rows);
-        self.task_metadata.increment_u64(
-            TASK_METADATA_ROWS_ACCEPTED,
-            (input_rows - dropped) as u64,
-        );
+        self.task_metadata
+            .increment_u64(TASK_METADATA_ROWS_ACCEPTED, (input_rows - dropped) as u64);
         self.task_metadata
             .increment_u64(TASK_METADATA_ROWS_DROPPED_LATE, dropped as u64);
         if let Some((task_id, labels)) = self.metrics_target() {
@@ -271,7 +271,7 @@ impl WindowOperator {
 
     async fn handle_watermark_inner(
         &mut self,
-        watermark: crate::common::message::WatermarkMessage,
+        watermark: WatermarkMessage,
         out: &mut dyn Output,
     ) -> Result<()> {
         let wm_ts = if watermark.watermark_value == MAX_WATERMARK_VALUE {
@@ -279,15 +279,14 @@ impl WindowOperator {
         } else {
             watermark.watermark_value as i64
         };
-        let advance_to = Cursor::new(wm_ts, u64::MAX);
-        let state = self.state_ref();
-
-        let advances_frontier = state
+        let advances_frontier = self
+            .state_ref()
             .watermark_frontier()
             .map_or(true, |frontier| wm_ts > frontier);
-        let result = if advances_frontier && self.output_mode == WindowOutputMode::Emit {
+        if advances_frontier && self.output_mode == WindowOutputMode::Emit {
             let started = Instant::now();
-            let batch = self.process_due(advance_to).await;
+            self.emit_due_pages(Cursor::new(wm_ts, u64::MAX), out)
+                .await?;
             if let Some((task_id, labels)) = self.metrics_target() {
                 metrics::record_wm_process_ms(
                     task_id,
@@ -295,16 +294,11 @@ impl WindowOperator {
                     started.elapsed().as_secs_f64() * 1000.0,
                 );
             }
-            batch
-        } else {
-            RecordBatch::new_empty(self.output_schema.clone())
-        };
-        if advances_frontier {
-            state.watermark_frontier.store(wm_ts, Ordering::Release);
         }
-
-        if self.output_mode == WindowOutputMode::Emit {
-            out.emit(Message::new(None, result, None, None)).await?;
+        if advances_frontier {
+            self.state_ref()
+                .watermark_frontier
+                .store(wm_ts, Ordering::Release);
         }
         out.emit(Message::Watermark(watermark)).await
     }
@@ -316,8 +310,7 @@ impl OperatorTrait for WindowOperator {
         self.base.open(context).await?;
         self.task_metadata = context.task_metadata();
         self.task_metadata.set(TASK_METADATA_ROWS_ACCEPTED, 0);
-        self.task_metadata
-            .set(TASK_METADATA_ROWS_DROPPED_LATE, 0);
+        self.task_metadata.set(TASK_METADATA_ROWS_DROPPED_LATE, 0);
 
         if self.state.is_none() {
             let backend = context
@@ -346,10 +339,8 @@ impl OperatorTrait for WindowOperator {
                 self.lateness_ms,
                 self.max_window_length_ms,
             ));
-            registry.insert_task_state(
-                task_id.clone(),
-                state.clone() as Arc<dyn OperatorTaskState>,
-            );
+            registry
+                .insert_task_state(task_id.clone(), state.clone() as Arc<dyn OperatorTaskState>);
             self.state_registry = Some(registry.clone());
             self.vertex_id = Some(task_id);
             self.metrics_labels = context.metrics_labels();

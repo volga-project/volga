@@ -14,6 +14,7 @@ use crate::api::planner::{Planner, PlanningContext};
 use crate::common::message::Message;
 use crate::common::{Key, WatermarkMessage};
 use crate::runtime::functions::key_by::key_by_function::extract_datafusion_window_exec;
+use crate::runtime::observability::TaskMetadata;
 use crate::runtime::operators::operator::{
     OperatorConfig, OperatorTrait, StreamOperator, VecOutput,
 };
@@ -30,7 +31,6 @@ use crate::runtime::operators::window::store::{
 };
 use crate::runtime::operators::window::TileConfig;
 use crate::runtime::runtime_context::RuntimeContext;
-use crate::runtime::observability::TaskMetadata;
 use crate::runtime::state::{OperatorStore, OperatorTaskState};
 
 pub fn test_input_schema() -> SchemaRef {
@@ -168,18 +168,21 @@ impl Harness {
             )
             .await
             .expect("watermark");
-        let mut batch = None;
+        let mut pages = Vec::new();
         for msg in out.messages {
             match msg {
-                Message::Regular(base) => {
-                    assert!(batch.is_none(), "multiple emit batches");
-                    batch = Some(base.record_batch);
-                }
+                Message::Regular(base) => pages.push(base.record_batch),
                 other => self.pending.push(other),
             }
         }
         self.run_maintenance().await;
-        batch.expect("expected output on watermark")
+        if pages.is_empty() {
+            RecordBatch::new_empty(self.op.output_schema())
+        } else if pages.len() == 1 {
+            pages.pop().unwrap()
+        } else {
+            concat_batches(&pages)
+        }
     }
 
     pub async fn drain_passthrough_watermark(&mut self) -> u64 {

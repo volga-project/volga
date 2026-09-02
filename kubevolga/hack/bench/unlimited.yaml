@@ -1,5 +1,5 @@
 # Unlimited datagen, no kill / interval checkpoint / restore.
-# IncrementalTimestamp step_ms=1 (event-time density, not wall).
+# IncrementalTimestamp step_ms is event-time density (not wall).
 # Lag oracles disabled: watermark sits ahead of wall, lag gauge saturates at 0.
 
 env: kube
@@ -17,8 +17,9 @@ launch:
   datagen:
     rate: null
     batch_size: 20
+    step_ms: 1
   watermark:
-    out_of_orderness_ms: 0
+    out_of_orderness_ms: 1
     emit_interval_ms: 200
   window:
     tiling: [1s, 5s]

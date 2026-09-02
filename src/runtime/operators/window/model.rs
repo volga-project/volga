@@ -117,6 +117,7 @@ pub struct WindowTrigger {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum TimeGranularity {
+    Milliseconds(u32),
     Seconds(u32),
     Minutes(u32),
     Hours(u32),
@@ -127,6 +128,7 @@ pub enum TimeGranularity {
 impl TimeGranularity {
     pub fn to_millis(&self) -> i64 {
         match self {
+            TimeGranularity::Milliseconds(ms) => *ms as i64,
             TimeGranularity::Seconds(s) => *s as i64 * 1000,
             TimeGranularity::Minutes(m) => *m as i64 * 60 * 1000,
             TimeGranularity::Hours(h) => *h as i64 * 60 * 60 * 1000,

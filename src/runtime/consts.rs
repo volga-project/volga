@@ -31,14 +31,21 @@ pub const KUBE_WORKER_HEALTH_POLL_INTERVAL: &str = "kube.worker_health_poll_inte
 pub const KUBE_WORKER_HEALTH_UNHEALTHY_GRACE_TICKS: &str =
     "kube.worker_health_unhealthy_grace_ticks";
 pub const WORKER_HEARTBEAT_SEND_INTERVAL: &str = "worker.heartbeat_send_interval";
-pub const WORKER_HEARTBEAT_MASTER_SILENCE_TIMEOUT: &str =
-    "worker.heartbeat_master_silence_timeout";
+pub const WORKER_HEARTBEAT_MASTER_SILENCE_TIMEOUT: &str = "worker.heartbeat_master_silence_timeout";
 pub const WORKER_REGISTER_MAX_RETRIES: &str = "worker.register_max_retries";
 pub const WORKER_REGISTER_RETRY_DELAY: &str = "worker.register_retry_delay";
 pub const WORKER_REGISTER_CONNECT_TIMEOUT: &str = "worker.register_connect_timeout";
 pub const WORKER_REGISTER_RPC_TIMEOUT: &str = "worker.register_rpc_timeout";
 pub const TRANSPORT_TCP_CONNECT_MAX_RETRIES: &str = "transport.tcp_connect_max_retries";
 pub const TRANSPORT_TCP_CONNECT_RETRY_DELAY: &str = "transport.tcp_connect_retry_delay";
+/// Mailbox drain cap for one processor ingest (`drain_ready_after`).
+pub const WINDOW_INGEST_MAX_RECORDS: &str = "window.ingest_max_records";
+/// In-flight keys for ingest `insert_batch` and WRO `process_key`.
+pub const WINDOW_INGEST_KEY_CONCURRENCY: &str = "window.ingest_key_concurrency";
+/// Triggers per `stream_due` page (eval + emit before the next page).
+pub const WINDOW_PROCESS_PAGE_SIZE: &str = "window.process_page_size";
+/// In-flight keys evaluating one process page.
+pub const WINDOW_PROCESS_KEY_CONCURRENCY: &str = "window.process_key_concurrency";
 
 /// Explicit profile: `local_test` | `kube_test` | `prod`.
 pub const VOLGA_RUNTIME_CONSTS_PROFILE_ENV: &str = "VOLGA_RUNTIME_CONSTS_PROFILE";
@@ -77,6 +84,10 @@ const U64_KEYS: &[&str] = &[
     KUBE_WORKER_HEALTH_UNHEALTHY_GRACE_TICKS,
     WORKER_REGISTER_MAX_RETRIES,
     TRANSPORT_TCP_CONNECT_MAX_RETRIES,
+    WINDOW_INGEST_MAX_RECORDS,
+    WINDOW_INGEST_KEY_CONCURRENCY,
+    WINDOW_PROCESS_PAGE_SIZE,
+    WINDOW_PROCESS_KEY_CONCURRENCY,
 ];
 
 const EMBEDDED_LOCAL_TEST: &str = include_str!("../../config/runtime_consts.local_test.json");
@@ -209,14 +220,17 @@ fn resolve_consts_path(profile: RuntimeConstsProfile) -> Option<PathBuf> {
 }
 
 fn parse_consts_json(raw: &str) -> RuntimeConsts {
-    let map: HashMap<String, serde_json::Value> = serde_json::from_str(raw)
-        .unwrap_or_else(|e| panic!("invalid runtime consts JSON: {e}"));
+    let map: HashMap<String, serde_json::Value> =
+        serde_json::from_str(raw).unwrap_or_else(|e| panic!("invalid runtime consts JSON: {e}"));
     let mut values = HashMap::new();
     for &key in DURATION_KEYS {
         let value = map
             .get(key)
             .unwrap_or_else(|| panic!("runtime consts missing duration key {key}"));
-        values.insert(key.to_string(), RuntimeValue::Duration(json_duration(key, value)));
+        values.insert(
+            key.to_string(),
+            RuntimeValue::Duration(json_duration(key, value)),
+        );
     }
     for &key in U64_KEYS {
         let value = map
@@ -229,12 +243,13 @@ fn parse_consts_json(raw: &str) -> RuntimeConsts {
 
 fn json_duration(key: &str, value: &serde_json::Value) -> Duration {
     match value {
-        serde_json::Value::String(s) => parse_duration(s)
-            .unwrap_or_else(|e| panic!("runtime consts {key}: {e}")),
+        serde_json::Value::String(s) => {
+            parse_duration(s).unwrap_or_else(|e| panic!("runtime consts {key}: {e}"))
+        }
         serde_json::Value::Number(n) => {
-            let ms = n
-                .as_u64()
-                .unwrap_or_else(|| panic!("runtime consts {key}: expected non-negative integer ms"));
+            let ms = n.as_u64().unwrap_or_else(|| {
+                panic!("runtime consts {key}: expected non-negative integer ms")
+            });
             Duration::from_millis(ms)
         }
         _ => panic!("runtime consts {key}: expected duration string or integer ms"),
@@ -270,9 +285,7 @@ fn parse_duration(s: &str) -> Result<Duration, String> {
             .map_err(|_| format!("invalid duration '{s}'"))?;
         return Ok(Duration::from_secs(n));
     }
-    Err(format!(
-        "invalid duration '{s}' (use Ns, Nms, or Nus)"
-    ))
+    Err(format!("invalid duration '{s}' (use Ns, Nms, or Nus)"))
 }
 
 static RUNTIME_CONSTS: OnceLock<RuntimeConsts> = OnceLock::new();
@@ -302,10 +315,7 @@ fn select_runtime_consts() -> RuntimeConsts {
             RuntimeConstsProfile::Prod
         }
     });
-    println!(
-        "[MASTER] using {} runtime consts",
-        profile.as_str()
-    );
+    println!("[MASTER] using {} runtime consts", profile.as_str());
     RuntimeConsts::for_profile(profile)
 }
 
@@ -349,7 +359,10 @@ mod tests {
     #[test]
     fn parses_embedded_profiles() {
         let prod = parse_consts_json(EMBEDDED_PROD);
-        assert_eq!(prod.duration(MASTER_DISCOVERY_TIMEOUT), Duration::from_secs(30));
+        assert_eq!(
+            prod.duration(MASTER_DISCOVERY_TIMEOUT),
+            Duration::from_secs(30)
+        );
         assert_eq!(prod.u64(MASTER_RECOVERY_BUDGET), 20);
         assert_eq!(
             prod.duration(MASTER_FAILURE_AGGREGATION_WINDOW),
@@ -364,12 +377,22 @@ mod tests {
         assert_eq!(kube.u64(KUBE_WORKER_HEALTH_UNHEALTHY_GRACE_TICKS), 2);
 
         let local = parse_consts_json(EMBEDDED_LOCAL_TEST);
-        assert_eq!(local.duration(MASTER_DISCOVERY_TIMEOUT), Duration::from_secs(2));
+        assert_eq!(
+            local.duration(MASTER_DISCOVERY_TIMEOUT),
+            Duration::from_secs(2)
+        );
         assert_eq!(
             local.duration(MASTER_WORKER_CONNECT_TIMEOUT),
             Duration::from_millis(200)
         );
         assert_eq!(local.u64(MASTER_RECOVERY_BUDGET), 5);
+
+        for profile in [&prod, &kube, &local] {
+            assert_eq!(profile.u64(WINDOW_INGEST_MAX_RECORDS), 65536);
+            assert_eq!(profile.u64(WINDOW_INGEST_KEY_CONCURRENCY), 32);
+            assert_eq!(profile.u64(WINDOW_PROCESS_PAGE_SIZE), 256);
+            assert_eq!(profile.u64(WINDOW_PROCESS_KEY_CONCURRENCY), 16);
+        }
     }
 
     #[test]

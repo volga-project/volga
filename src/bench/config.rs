@@ -21,7 +21,7 @@ use crate::runtime::operators::window::tile::TileConfig;
 use crate::test_utils::harness::{PipelineLaunchSpec, RuntimeEnv};
 
 use super::dump::extra_prom_queries;
-use super::spec::{OracleConfig, Scenario, BenchSpec};
+use super::spec::{BenchSpec, OracleConfig, Scenario};
 
 const DEFAULT_PARALLELISM: usize = 4;
 const DEFAULT_SLOTS_PER_NODE: usize = 2;
@@ -87,16 +87,21 @@ pub struct DatagenFile {
     #[serde(default, deserialize_with = "deserialize_optional_rate")]
     pub rate: Option<Option<f32>>,
     pub batch_size: Option<usize>,
-    pub num_unique: Option<usize>,
+    pub num_unique_keys: Option<usize>,
+    /// Per-key IncrementalTimestamp step. Only valid when `rate` is `null`
+    /// (unlimited); omit → 1. Finite rate always derives
+    /// `num_unique_keys/rate` seconds in ms so event time tracks wall.
+    pub step_ms: Option<u64>,
 }
 
 /// Pipeline-wide watermark assigner knobs (`event_time.watermark`).
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WatermarkFile {
+    /// Omit → 0. Independent of `datagen.step_ms`.
     pub out_of_orderness_ms: Option<u64>,
     pub idle_timeout_ms: Option<u64>,
-    /// Processing-time coalesce. Omit → planner default (200ms).
+    /// Event-time emit period and wall-clock cap. Omit → planner default (200ms).
     pub emit_interval_ms: Option<u64>,
 }
 
@@ -195,9 +200,16 @@ pub fn apply_file(file: &BenchFile) -> Result<BenchSpec> {
 
 fn compile_launch(launch: Option<&LaunchFile>) -> Result<PipelineLaunchSpec> {
     let launch = launch.cloned().unwrap_or_default();
-    let parallelism = nonzero_usize(launch.parallelism, DEFAULT_PARALLELISM, "launch.parallelism")?;
-    let slots_per_node =
-        nonzero_usize(launch.slots_per_node, DEFAULT_SLOTS_PER_NODE, "launch.slots_per_node")?;
+    let parallelism = nonzero_usize(
+        launch.parallelism,
+        DEFAULT_PARALLELISM,
+        "launch.parallelism",
+    )?;
+    let slots_per_node = nonzero_usize(
+        launch.slots_per_node,
+        DEFAULT_SLOTS_PER_NODE,
+        "launch.slots_per_node",
+    )?;
     if parallelism % slots_per_node != 0 {
         bail!(
             "launch.parallelism {parallelism} is not divisible by slots_per_node {slots_per_node}"
@@ -259,10 +271,8 @@ fn compile_launch(launch: Option<&LaunchFile>) -> Result<PipelineLaunchSpec> {
         .with_checkpoint(Some(interval_ms), Some(timeout_ms), Some(retention))
         .build();
 
-    Ok(
-        PipelineLaunchSpec::new(pipeline, worker_count, None)
-            .with_runtime_consts_profile(RuntimeConstsProfile::Prod),
-    )
+    Ok(PipelineLaunchSpec::new(pipeline, worker_count, None)
+        .with_runtime_consts_profile(RuntimeConstsProfile::Prod))
 }
 
 fn checkpoint_from_file(file: Option<&CheckpointFile>) -> Result<(u64, u64, u64)> {
@@ -305,33 +315,28 @@ fn datagen_from_file(file: Option<&DatagenFile>, parallelism: usize) -> Result<D
         DEFAULT_DATAGEN_BATCH,
         "launch.datagen.batch_size",
     )?;
-    let num_unique = nonzero_usize(
-        file.num_unique,
+    let num_unique_keys = nonzero_usize(
+        file.num_unique_keys,
         parallelism * 4,
-        "launch.datagen.num_unique",
+        "launch.datagen.num_unique_keys",
     )?;
+    let step_ms = resolve_step_ms(file.step_ms, rate, num_unique_keys)?;
     let mut fields = HashMap::new();
     // Incremental from wall-clock now so lag is `now − watermark`, not ~55 years.
-    // Finite `rate`: step ≈ per-key inter-arrival so event time tracks wall.
-    // Unlimited: step is a stub until we pick a replayable wall-aligned heuristic.
     let start_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .context("system clock before UNIX epoch")?
         .as_millis() as i64;
-    let step_ms = match rate {
-        Some(r) => ((num_unique as f64) / f64::from(r) * 1000.0).round() as i64,
-        None => 1,
-    };
     fields.insert(
         "timestamp".to_string(),
         FieldGenerator::IncrementalTimestamp {
             start_ms,
-            step_ms: step_ms.max(1),
+            step_ms: step_ms as i64,
         },
     );
     fields.insert(
         "key".to_string(),
-        FieldGenerator::Key { num_unique },
+        FieldGenerator::Key { num_unique_keys },
     );
     fields.insert(
         "value".to_string(),
@@ -350,6 +355,21 @@ fn datagen_from_file(file: Option<&DatagenFile>, parallelism: usize) -> Result<D
         fields,
         replayable: true,
     })
+}
+
+fn resolve_step_ms(explicit: Option<u64>, rate: Option<f32>, num_unique_keys: usize) -> Result<u64> {
+    match (rate, explicit) {
+        (Some(_), Some(_)) => bail!(
+            "launch.datagen.step_ms is only valid when rate is null (unlimited); \
+             finite rate derives step from num_unique_keys/rate so event time tracks wall"
+        ),
+        (Some(r), None) => {
+            Ok(((num_unique_keys as f64) / f64::from(r) * 1000.0).round().max(1.0) as u64)
+        }
+        (None, None) => Ok(1),
+        (None, Some(0)) => bail!("launch.datagen.step_ms must be >= 1"),
+        (None, Some(n)) => Ok(n),
+    }
 }
 
 fn watermark_from_file(file: Option<&WatermarkFile>) -> Result<(u64, Option<u64>, Option<u64>)> {
@@ -404,10 +424,13 @@ fn parse_granularity(raw: &str) -> Result<TimeGranularity> {
             .trim()
             .parse()
             .map_err(|_| anyhow!("invalid window tiling `{raw}`"))?;
-        if n == 0 || n % 1000 != 0 {
-            bail!("window tiling `{raw}` must be a whole number of seconds");
+        if n == 0 {
+            bail!("window tiling must be > 0: `{raw}`");
         }
-        return Ok(TimeGranularity::Seconds(n / 1000));
+        if n % 1000 == 0 {
+            return Ok(TimeGranularity::Seconds(n / 1000));
+        }
+        return Ok(TimeGranularity::Milliseconds(n));
     }
     if let Some(rest) = raw.strip_suffix('h') {
         let n: u32 = rest
@@ -439,7 +462,7 @@ fn parse_granularity(raw: &str) -> Result<TimeGranularity> {
         }
         return Ok(TimeGranularity::Seconds(n));
     }
-    bail!("invalid window tiling `{raw}` (use Ns, Nm, or Nh)")
+    bail!("invalid window tiling `{raw}` (use Nms, Ns, Nm, or Nh)")
 }
 
 fn apply_oracles(oracles: &mut OracleConfig, file: &OracleFile) -> Result<()> {
@@ -538,7 +561,7 @@ launch:
     retention: 1
   datagen:
     rate: 100
-    num_unique: 32
+    num_unique_keys: 32
   watermark:
     out_of_orderness_ms: 0
     emit_interval_ms: 200
@@ -564,22 +587,25 @@ extra_prom_queries:
         );
         assert_eq!(spec.launch.worker_count, 4);
         assert_eq!(spec.launch.pipeline.parallelism, 8);
-        assert_eq!(spec.launch.pipeline.state.checkpoint.interval_ms, Some(30_000));
+        assert_eq!(
+            spec.launch.pipeline.state.checkpoint.interval_ms,
+            Some(30_000)
+        );
         assert!(matches!(spec.launch.pipeline.sink, Some(SinkSpec::Count)));
         assert_eq!(
             spec.launch.pipeline.sql.as_deref(),
             Some("SELECT timestamp, key, value FROM datagen_source")
         );
         assert_eq!(
+            spec.launch.pipeline.event_time.watermark.emit_interval_ms,
+            Some(200)
+        );
+        assert_eq!(
             spec.launch
                 .pipeline
                 .event_time
                 .watermark
-                .emit_interval_ms,
-            Some(200)
-        );
-        assert_eq!(
-            spec.launch.pipeline.event_time.watermark.out_of_orderness_ms,
+                .out_of_orderness_ms,
             0
         );
         assert_eq!(spec.oracles.lag_p99, Duration::from_secs(15));
