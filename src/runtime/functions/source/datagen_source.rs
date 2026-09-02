@@ -78,7 +78,7 @@ pub enum KeyDistribution {
 }
 
 impl KeyDistribution {
-    fn is_partitioned(self) -> bool {
+    fn is_partitioned(&self) -> bool {
         matches!(self, Self::Partitioned)
     }
 }
