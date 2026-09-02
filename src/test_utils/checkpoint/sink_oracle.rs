@@ -3,8 +3,12 @@
 use anyhow::{anyhow, Result};
 use arrow::array::{Array, Float64Array, Int64Array, StringArray, TimestampMillisecondArray};
 use arrow::record_batch::RecordBatch;
+use arrow_integration_test::schema_from_json;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 
+use crate::api::spec::connectors::SourceSpecKind;
+use crate::api::PipelineSpec;
 use crate::runtime::functions::source::datagen_source::{
     DatagenSourceConfig, DatagenSourceFunction,
 };
@@ -13,10 +17,10 @@ use crate::runtime::operators::source::TASK_METADATA_RECORDS_GENERATED;
 use crate::runtime::operators::window::{
     TASK_METADATA_ROWS_ACCEPTED, TASK_METADATA_ROWS_DROPPED_LATE,
 };
-use crate::test_utils::harness::{MasterHandle, RuntimeEnv};
 use crate::storage::InMemoryStorageSnapshot;
+use crate::test_utils::harness::{MasterHandle, RuntimeEnv};
 
-use super::launch::{checkpoint_datagen_parts, CheckpointWorkload, WINDOW_RANGE_MS};
+use super::launch::{CheckpointWorkload, WINDOW_RANGE_MS};
 
 /// Logical sink row identity for upsert-key `(key, timestamp)` plus value for content checks.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -97,9 +101,24 @@ fn materialize_datagen_for_task(
     Ok(out)
 }
 
+fn datagen_config_from_pipeline(pipeline: &PipelineSpec) -> Result<DatagenSourceConfig> {
+    let src = pipeline
+        .sources
+        .first()
+        .ok_or_else(|| anyhow!("pipeline has no sources"))?;
+    let schema = Arc::new(
+        schema_from_json(&src.schema_json)
+            .map_err(|e| anyhow!("failed to parse source.schema_json: {e}"))?,
+    );
+    match &src.source {
+        SourceSpecKind::Datagen(spec) => Ok(DatagenSourceConfig::new(schema, spec.clone())),
+        _ => Err(anyhow!("checkpoint oracle expects a datagen source")),
+    }
+}
+
 fn materialize_input_rows(
     task_counts: &[(i32, u64)],
-    workload: CheckpointWorkload,
+    config: &DatagenSourceConfig,
 ) -> Result<Vec<InputRow>> {
     let parallelism = task_counts
         .iter()
@@ -107,9 +126,6 @@ fn materialize_input_rows(
         .max()
         .ok_or_else(|| anyhow!("empty task_counts"))?
         + 1;
-    // run_for unused for offline materialization (counts come from task metadata).
-    let (schema, spec) = checkpoint_datagen_parts(parallelism as usize, workload);
-    let config = DatagenSourceConfig::new(schema, spec);
     let mut rows = Vec::new();
     for &(task_index, num_records) in task_counts {
         let batches = materialize_datagen_for_task(
@@ -425,6 +441,7 @@ pub(super) async fn assert_sink_matches_offline_datagen(
     storage: &InMemoryStorageSnapshot,
     env: RuntimeEnv,
     workload: CheckpointWorkload,
+    pipeline: &PipelineSpec,
 ) -> Result<()> {
     let snapshot = master
         .latest_pipeline_snapshot()
@@ -432,9 +449,10 @@ pub(super) async fn assert_sink_matches_offline_datagen(
         .ok_or_else(|| anyhow!("missing pipeline snapshot after PipelineFinished"))?;
     let task_counts = task_record_counts(&snapshot)?;
     let total: u64 = task_counts.iter().map(|(_, n)| n).sum();
-    let input_rows = materialize_input_rows(&task_counts, workload)?;
+    let config = datagen_config_from_pipeline(pipeline)?;
+    let input_rows = materialize_input_rows(&task_counts, &config)?;
 
-    if workload.is_window() {
+    if workload == CheckpointWorkload::Window {
         assert_no_window_late_drops(&snapshot)?;
         let expected = expected_window_rows(input_rows);
         let actual = window_sink_rows(storage)?;
