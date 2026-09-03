@@ -65,6 +65,11 @@ pub(super) async fn processor_loop(
                             Ok(Some((checkpoint_id, inject_stamp, wms))) => {
                                 ctx.emit_watermarks(wms, false, Some(operator)).await?;
                                 let aligned = ctx.new_barrier(checkpoint_id, inject_stamp);
+                                // handle_barrier first: sink flush must finish before Aligned
+                                {
+                                    let mut out = ctx.output();
+                                    operator.handle_barrier(aligned.clone(), &mut out).await?;
+                                }
                                 on_checkpoint_barrier(
                                     operator,
                                     &mut ctx,
@@ -73,8 +78,6 @@ pub(super) async fn processor_loop(
                                     Some(&reader_control),
                                 )
                                 .await?;
-                                let mut out = ctx.output();
-                                operator.handle_barrier(aligned, &mut out).await?;
                             }
                             Err(error) => {
                                 panic!(

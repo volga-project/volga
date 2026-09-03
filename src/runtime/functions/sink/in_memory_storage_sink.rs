@@ -115,17 +115,19 @@ impl InMemoryStorageSinkFunction {
         buffer: &Arc<Mutex<Vec<Message>>>,
         keyed_buffer: &Arc<Mutex<HashMap<String, Message>>>,
     ) -> Result<()> {
+        // Client first so barrier flush waits out an in-flight ticker RPC.
+        let mut client = storage_client.lock().await;
         let mut regular_batches = buffer.lock().await;
         if !regular_batches.is_empty() {
             let batches: Vec<Message> = regular_batches.drain(..).collect();
-            let mut client = storage_client.lock().await;
+            drop(regular_batches);
             client.append_many(batches).await?;
         }
 
         let mut keyed_batches = keyed_buffer.lock().await;
         if !keyed_batches.is_empty() {
             let batches: HashMap<String, Message> = keyed_batches.drain().collect();
-            let mut client = storage_client.lock().await;
+            drop(keyed_batches);
             client.insert_keyed_many(batches).await?;
         }
 
