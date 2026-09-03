@@ -154,15 +154,16 @@ for the attempt:
 
 ```text
 StateNamespace  = (pipeline, owner operator)
+max_parallelism = job-wide, bound on the client
 KeyGroupRange   = groups for this task_index at (p, max_p)
 WriterId        = this task execution
 AttemptToken    = job-level execution attempt
 ```
 
-`stream_due` / `checkpoint` / `restore` use that bound range. They do not take
-`owned` or `namespace` — the client is the task's store. Per-key calls derive
-`key_group` from the business key and must land in the bound range (routing
-bug otherwise).
+The client derives `key_group` from `Key.hash` and bound `max_p`. It never
+trusts a caller-supplied group. `stream_due` / `checkpoint` / `restore` use
+the bound range and do not take `owned` or `namespace`. Per-key calls must
+land in the bound range (routing bug otherwise).
 
 WRO reuses the WO owner namespace. It addresses rows by `PartitionKey`
 (namespace + business key). Request routing still sends a lookup to the WRO
@@ -239,7 +240,9 @@ pub trait WindowRequestStore: Send + Sync + Debug {
 
 - Missing partitions and empty runs return empty/default results.
 - Raw rows are restricted to the requested runs, deduplicated, and globally
-  ordered by `Cursor`. Their Arrow schema includes `__seq_no: UInt64`.
+  ordered by `Cursor`. Their Arrow schema includes `__seq_no: UInt64`. The
+  Scylla backend stores **one CQL row per event**, clustered by time; it does
+  not pack events into a serialized batch blob.
 - Tiles are unique by `(granularity, tile_start)` and restricted to requested
   runs. Missing tiles mean empty intervals.
 - `commit_events` atomically publishes raw rows, replacement tiles, key state,
@@ -270,6 +273,13 @@ state and triggers for that range. The shared backend implements
 `OperatorStore::maintain` and prunes eagerly under the same retention contract
 as Scylla (control flow identical; lag ~0), reading the range from
 `OperatorTaskState` rather than a task-suffixed namespace blob.
+
+**Land the engine contract and InMem before any Scylla backend.** Today
+`StateNamespace` still includes `task_index`, and restore/maintain key on that
+blob. Operator-scoped namespace plus range isolation must ship on the traits
+and InMem first (two tasks, one worker: restore/maintain of task 0 must not
+clobber task 1). Otherwise the same type has two meanings and shared-worker
+restore wipes sibling keys. Scylla implements that already-landed contract.
 
 ## Runtime flows
 
@@ -404,6 +414,28 @@ watermark remain in the operator's `WindowStateSnapshot` envelope.
 
 ### Tables
 
+`attempt` is **not** in any data partition key. It is clustering (or a
+column) so recovery overlay is a visibility filter on one `LOCAL_QUORUM`
+read, not a second partition hop. Restore still does not copy rows.
+`maintain` drops unreachable generations so the filter stays one or two
+attempt clauses.
+
+**GC default: skinny index + per-key data PK. Do not cluster `business_key`
+under `(namespace, key_group, bucket)`.** `load_raw` is per-key; a key group
+is unbounded, so that clustering would make one partition (compaction,
+repair, hot token) hold every key in the group+bucket. Keep `business_key`
+in the data partition key so each key+bucket stays small.
+
+That data layout cannot list “this key group” or `bucket_start < data_floor`,
+so `commit_events` also writes a payload-free index
+`(namespace, key_group, bucket_start) → business_key`. `maintain` walks
+event-time `bucket_start` values below `data_floor` (configured bucket width;
+empty index partitions are skipped), pages each partition, and deletes the
+per-key data partitions. If the key count per group+bucket grows large, shard
+the index (`index_shard = hash(business_key) % N`) so each index partition
+stays bounded. TWCS/TTL on write-time cannot replace this: event-time buckets
+≠ write time, and replay rewrites old buckets.
+
 ```sql
 CREATE TABLE window_head (
     namespace blob,
@@ -428,32 +460,43 @@ CREATE TABLE window_recovery_bases (
     PRIMARY KEY ((namespace, recovery_attempt), range_start)
 );
 
+-- Skinny GC index only: no payloads. v1: one partition per group+bucket.
+-- If that partition grows too wide, add index_shard to the partition key
+-- (hash(business_key) % N) and page all shards in maintain.
+CREATE TABLE window_kg_buckets (
+    namespace blob,
+    key_group int,
+    bucket_start bigint,
+    business_key blob,
+    PRIMARY KEY ((namespace, key_group, bucket_start), business_key)
+);
+
 CREATE TABLE window_raw (
     namespace blob,
     key_group int,
     business_key blob,
-    attempt blob,
     bucket_start bigint,
     event_ts bigint,
     seq_no bigint,
+    attempt blob,
     epoch bigint,
     payload blob,
     PRIMARY KEY (
-        (namespace, key_group, business_key, attempt, bucket_start),
-        event_ts, seq_no, epoch
+        (namespace, key_group, business_key, bucket_start),
+        event_ts, seq_no, attempt, epoch
     )
 ) WITH CLUSTERING ORDER BY (
-    event_ts ASC, seq_no ASC, epoch DESC
+    event_ts ASC, seq_no ASC, attempt ASC, epoch DESC
 );
 
 CREATE TABLE window_tiles (
     namespace blob,
     key_group int,
     business_key blob,
-    attempt blob,
     granularity_ms bigint,
     bucket_start bigint,
     tile_start bigint,
+    attempt blob,
     epoch bigint,
     payload blob,
     PRIMARY KEY (
@@ -461,13 +504,12 @@ CREATE TABLE window_tiles (
             namespace,
             key_group,
             business_key,
-            attempt,
             granularity_ms,
             bucket_start
         ),
-        tile_start, epoch
+        tile_start, attempt, epoch
     )
-) WITH CLUSTERING ORDER BY (tile_start ASC, epoch DESC);
+) WITH CLUSTERING ORDER BY (tile_start ASC, attempt ASC, epoch DESC);
 
 CREATE TABLE window_key_states (
     namespace blob,
@@ -477,81 +519,85 @@ CREATE TABLE window_key_states (
     epoch bigint,
     key_state blob,
     PRIMARY KEY (
-        (namespace, key_group, business_key, attempt),
-        epoch
+        (namespace, key_group, business_key),
+        attempt, epoch
     )
-) WITH CLUSTERING ORDER BY (epoch DESC);
+) WITH CLUSTERING ORDER BY (attempt ASC, epoch DESC);
 
 CREATE TABLE window_triggers (
     namespace blob,
-    attempt blob,
     bucket_start bigint,
     kg_shard int,
-    key_group int,
     fire_ts bigint,
     fire_seq bigint,
     business_key blob,
     trigger_kind tinyint,
     window_id bigint,
+    key_group int,
+    attempt blob,
     epoch bigint,
     PRIMARY KEY (
-        (namespace, attempt, bucket_start, kg_shard),
-        key_group,
+        (namespace, bucket_start, kg_shard),
         fire_ts,
         fire_seq,
         business_key,
         trigger_kind,
         window_id,
+        attempt,
         epoch
     )
 ) WITH CLUSTERING ORDER BY (
-    key_group ASC,
     fire_ts ASC,
     fire_seq ASC,
     business_key ASC,
     trigger_kind ASC,
     window_id ASC,
+    attempt ASC,
     epoch DESC
 );
 ```
 
 - `window_head`: per-key writer fence plus writer and WRO-visible version
   pointers; the LWT publication boundary. `owner_writer` is `WriterId`.
-  `writer_*` / `serving_*` are job-level `StateVersion`. `key_group` is in the
-  partition key so point gets (WO already has the hash) stay single-partition
-  and a key group cannot collapse into one unbounded Scylla partition.
+  `writer_*` / `serving_*` are job-level `StateVersion`. Point get by
+  `(namespace, key_group, business_key)`.
 - `window_recovery_bases`: immutable rows mapping a new job `recovery_attempt`
   to restored checkpoint cutoffs at **key-group range** granularity. Lookup for
   a key: find the row with `range_start <= key_group < range_end`. This lets a
   new execution inherit unchanged state without copying raw rows, tiles, or
   `KeyState`, and lets a later rescale inherit different cutoffs from different
   source tasks.
-- `window_raw`: cursor-ordered event rows, physically split into time buckets
-  and versioned by job attempt and epoch.
-- `window_tiles`: versioned aggregate tiles, partitioned by time bucket and
-  granularity.
-- `window_key_states`: versioned `KeyState` history used by current WO reads and
-  checkpoint recovery.
-- `window_triggers`: immutable due work ordered by event time. Time buckets and
-  `kg_shard` bound each Scylla partition. Shard with the **same range formula
-  as routing**, not `hash(business_key) % N`:
+- `window_kg_buckets`: skinny GC index, not a source of truth for reads.
+  `commit_events` upserts `business_key` under
+  `(namespace, key_group, bucket_start)` — no payload columns. `maintain`
+  pages each owned group’s buckets below `data_floor` (by event-time bucket
+  id, not a cross-bucket clustering scan) and deletes the matching **per-key**
+  raw/tile partitions, then the index rows. Shard the index partition key if
+  one group+bucket has too many keys.
+- `window_raw`: **one CQL row per event**, clustered by event time. `payload`
+  is that event only (Arrow-IPC including `__seq_no`). Do not pack a batch
+  into one blob — that breaks time clustering, overlay, and per-event GC.
+- `window_tiles`: versioned aggregate tiles, partitioned by key, granularity,
+  and time bucket. Overlay filters `attempt` / `epoch` in the same partition.
+- `window_key_states`: versioned `KeyState` in one partition per key. Overlay
+  is a clustering filter, not another hop.
+- `window_triggers`: immutable due work. Locality is
+  `(namespace, bucket_start, kg_shard)`. Cluster by `fire_ts` first so
+  `stream_due` can slice `(after, through]` without `ALLOW FILTERING`.
+  `key_group` is a regular column; the client drops rows outside the bound
+  range (`kg_shard` already limits how many groups share a partition).
+  Shard with the **same range formula as routing**, not
+  `hash(business_key) % N`:
 
   ```text
   kg_shard = key_group * SHARD_COUNT / max_parallelism
   ```
 
-  A task's contiguous groups map to a small number of shards, so `stream_due`
-  queries those shards and restricts clustering to the client's bound range.
-  `SHARD_COUNT` is a
-  store constant (e.g. 32 or 64), not `p` (changes on rescale) and not
-  `max_parallelism` (too fine: `p=4`, `max_p=32768` would otherwise mean 8192
-  queries per time bucket). `SHARD_COUNT` and `max_parallelism` are immutable
-  for the namespace. Hash-mod sharding would scatter one task across every
-  shard and is not used. Row triggers use a sentinel `window_id`; scheduled
-  windows retain their actual `WindowId`. Job-level `attempt` stays in the
-  trigger PK as the MVCC branch (recovery overlay), not as a task id.
-
-Raw payloads are Arrow-IPC `RecordBatch` values including `__seq_no`.
+  `SHARD_COUNT` is a store constant (e.g. 32 or 64), not `p` (changes on
+  rescale) and not `max_parallelism` (too fine: `p=4`, `max_p=32768` would
+  otherwise mean 8192 queries per time bucket). `SHARD_COUNT` and
+  `max_parallelism` are immutable for the namespace. Row triggers use a
+  sentinel `window_id`; scheduled windows retain their actual `WindowId`.
 
 ### Head semantics
 
@@ -577,52 +623,72 @@ For one key:
 
 1. Load writer `KeyState`.
 2. Allocate writer epoch `E`.
-3. Write changed raw rows, tiles, `KeyState`, and triggers under
-   `(job attempt, E)` with the derived `key_group`.
-4. LWT-update the head, requiring the current `owner_writer` and previous
+3. Derive `key_group` from the key hash and the client's `max_p`.
+4. Write changed raw rows, tiles, `KeyState`, triggers, and `window_kg_buckets`
+   under `(job attempt, E)`.
+5. LWT-update the head, requiring the current `owner_writer` and previous
    writer version.
-5. During normal operation, set both writer and serving versions to
+6. During normal operation, set both writer and serving versions to
    `(job attempt, E)`. During recovery, advance only writer until catch-up.
-6. Update or invalidate affected WO cache entries.
+7. Update or invalidate affected WO cache entries.
 
-The head update is the visibility boundary. Data written before a failed head
-update is orphaned. A new epoch starts only after the previous publication
-outcome is known. On success, advance the epoch; on failure, safely retry the
-same publication or abort the attempt. An ownership CAS failure stops the WO as
-fenced. Trigger rows from an unpublished attempt/epoch are orphaned with its
-other data and are not returned by `stream_due`.
+Each `(key, bucket)` (and each tile partition) is one Scylla partition.
+`commit_events` issues one **UNLOGGED BATCH** per such partition — one
+mutation per event/tile row, one RTT per partition, not one RTT per event.
+Do not use logged BATCH. Do not batch across partitions (no cross-partition
+atomicity, coordinator penalty). Tiles, triggers, and other buckets are
+separate requests. The head LWT is the visibility boundary after those
+writes complete.
 
-`store_key_state` follows the same protocol but writes no raw, tile, or trigger
-versions.
+Data written before a failed head update is orphaned. A new epoch starts only
+after the previous publication outcome is known. On success, advance the
+epoch; on failure, safely retry the same publication or abort the attempt.
+An ownership CAS failure stops the WO as fenced. Trigger rows from an
+unpublished attempt/epoch are orphaned with its other data and are not
+returned by `stream_due`.
+
+`store_key_state` follows the same protocol but writes no raw, tile, trigger,
+or bucket-index rows.
 
 ### WO reads
 
 WO reads the writer snapshot. A fresh execution attempt reads only its own
 versions. A recovery attempt overlays its versions over the immutable
-checkpoint base from `window_recovery_bases`: read the newest value from the
-recovery attempt first, then fall back to the base version for that key's
-range (`epoch <= base_epoch`) for data not replaced by recovery writes.
+checkpoint base from `window_recovery_bases`. Because `attempt` is clustering,
+that overlay is one `LOCAL_QUORUM` read per data partition: keep the newest
+row that matches the recovery attempt, else the base attempt with
+`epoch <= base_epoch`. No extra partition hop, and restore still does not
+copy rows.
 
 Logical runs are mapped to time buckets, loaded, merged, and filtered back to
 the exact requested ranges. Raw rows are deduplicated by `Cursor`; current
 tiles replace matching base tiles.
 
 `stream_due` maps its stable watermark range to trigger buckets and the
-`kg_shard`s that overlap the client's bound range, overlays the recovery
-attempt over each inherited base range, and filters trigger versions through
-each key's writer head. It batch-loads writer `KeyState`, groups triggers into
-`DueWindowWork`, and owns page sizing and continuation state for the lifetime
-of the stream.
+`kg_shard`s that overlap the client's bound range. Each query is
+
+```text
+WHERE namespace = ? AND bucket_start = ? AND kg_shard = ?
+  AND fire_ts > ? AND fire_ts <= ?
+```
+
+then the client drops `key_group` outside the bound range and applies the
+same attempt/epoch visibility filter as raw overlay. It batch-loads writer
+`KeyState`, groups triggers into `DueWindowWork`, and owns page sizing and
+continuation state for the lifetime of the stream.
 
 ### WRO reads
 
 WRO:
 
-1. Reads and retains the key's serving version for the request.
+1. Reads and retains the key's serving version for the request (the pin
+   `maintain` must honor).
 2. Builds exact raw/tile plans.
-3. Loads serving-attempt buckets. If that attempt has a recovery-base row
-   covering this `key_group`, loads unchanged data from its base checkpoint as
-   well. This may repeat when checkpoints span several recovery attempts.
+3. Loads serving-attempt data from the same partitions, filtering clustering
+   `attempt` / `epoch`. If that attempt has a recovery-base covering this
+   `key_group`, the base generation is visible in those same partitions.
+   Chain only as many recovery-base generations as `maintain` has not yet
+   dropped (target: 1–2 clauses).
 4. Selects visible versions, then merges, orders, deduplicates, and rebuilds.
 
 WRO does not read writer state, use Foyer, contact the master, or consume
@@ -736,29 +802,38 @@ Not on the master; not inside WO `poll_next`. The window impl reads cutoff and
 owned range from `OperatorTaskState`.
 
 **Window `maintain` body:**
-- drop consumed triggers (`fire_at.ts ≤ W`) in shards overlapping the task's
-  key-group range (from `OperatorTaskState`);
-- prune raw rows with `ts < data_floor` and tiles fully below the floor
-  (Scylla: time-bucket drop / TWCS / TTL aligned with `data_floor`; per-key
-  partitions are not listed by scan);
-- Scylla additionally: MVCC cleanup of versions unreachable from writer heads,
-  serving heads, recovery bases, and retained checkpoints; orphan/zombie
-  cleanup for failed writes.
+- drop consumed triggers (`fire_at.ts ≤ W`) with a `fire_ts` clustering
+  range delete on shards overlapping the task's key-group range;
+- from `window_kg_buckets`, for each owned group and each event-time
+  `bucket_start` fully below `data_floor`, page `business_key`s (and index
+  shards if enabled); delete each per-key raw/tile partition; drop the
+  index rows. Do not rely on TWCS/TTL for this (write-time ≠ event-time;
+  replay rewrites old buckets);
+- drop unreachable MVCC generations (`attempt` / `epoch` not reachable
+  from writer heads, serving heads, recovery bases, or retained
+  checkpoints; orphan/zombie writes). After this, overlay filters stay
+  one or two attempt clauses.
+
+**In-flight WRO:** `load_window_data` pins the key's serving version at
+start. `maintain` must not drop that version while the request can still
+read it. v1: never delete the current serving pointer; delay dropping a
+just-superseded serving version by at least the maximum WRO request
+budget (grace). No pin table.
 
 TTL/TWCS may expire physical SSTables only when consistent with logical
-`data_floor`. InMem applies the same logical rules immediately inside
-`maintain`, iterating in-memory partitions whose namespace matches and whose
-`key_group` is in the task state's range.
+`data_floor` **and** the serving-pin grace. InMem applies the same logical
+rules immediately inside `maintain`, iterating in-memory partitions whose
+namespace matches and whose `key_group` is in the task state's range.
 
 ## Future next steps
 
+**Prerequisite:** operator-scoped `StateNamespace`, per-task store client
+(`max_p`, key-group range), and InMem restore/maintain isolation (two tasks
+on one worker, no clobber). Then Scylla.
+
 Worker maintenance **orchestration** (`OperatorStore::maintain`, cleaner loop,
 `StateSpec.maintenance_*`) is decided in the runtime; Scylla's `maintain`
-implementation remains TODO.
-
-Engine `StateNamespace`, per-task store client bound to the assigned
-`KeyGroupRange`, InMem filter-by-range, and the Scylla schemas above should
-land together. v1 `RestorePlanner` may keep identity mapping.
+implementation remains TODO. v1 `RestorePlanner` may keep identity mapping.
 
 ### Namespaced cache quota
 
