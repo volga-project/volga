@@ -66,7 +66,6 @@ pub(super) async fn processor_loop(
                                 ctx.emit_watermarks(wms, false, Some(operator)).await?;
                                 let aligned = ctx.new_barrier(checkpoint_id, inject_stamp);
                                 // handle_barrier first: sink flush must finish before Aligned
-                                // (sink has no state ack; kill-after-complete can drop a buffered batch).
                                 {
                                     let mut out = ctx.output();
                                     operator.handle_barrier(aligned.clone(), &mut out).await?;
