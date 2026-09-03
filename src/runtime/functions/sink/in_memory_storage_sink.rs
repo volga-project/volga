@@ -22,8 +22,6 @@ pub struct InMemoryStorageSinkFunction {
     buffer: Arc<Mutex<Vec<Message>>>,
     keyed_buffer: Arc<Mutex<HashMap<String, Message>>>,
     flush_handle: Option<tokio::task::JoinHandle<()>>,
-    /// Serializes drain+RPC so barrier flush waits for an in-flight ticker flush.
-    flush_gate: Arc<Mutex<()>>,
     running: Arc<AtomicBool>,
     runtime_context: Option<RuntimeContext>,
     server_addr: String,
@@ -38,7 +36,6 @@ impl InMemoryStorageSinkFunction {
             buffer: Arc::new(Mutex::new(Vec::new())),
             keyed_buffer: Arc::new(Mutex::new(HashMap::new())),
             flush_handle: None,
-            flush_gate: Arc::new(Mutex::new(())),
             running: Arc::new(AtomicBool::new(false)),
             runtime_context: None,
             server_addr,
@@ -117,20 +114,20 @@ impl InMemoryStorageSinkFunction {
         storage_client: &Arc<Mutex<InMemoryStorageClient>>,
         buffer: &Arc<Mutex<Vec<Message>>>,
         keyed_buffer: &Arc<Mutex<HashMap<String, Message>>>,
-        flush_gate: &Arc<Mutex<()>>,
     ) -> Result<()> {
-        let _gate = flush_gate.lock().await;
+        // Client first so barrier flush waits out an in-flight ticker RPC.
+        let mut client = storage_client.lock().await;
         let mut regular_batches = buffer.lock().await;
         if !regular_batches.is_empty() {
             let batches: Vec<Message> = regular_batches.drain(..).collect();
-            let mut client = storage_client.lock().await;
+            drop(regular_batches);
             client.append_many(batches).await?;
         }
 
         let mut keyed_batches = keyed_buffer.lock().await;
         if !keyed_batches.is_empty() {
             let batches: HashMap<String, Message> = keyed_batches.drain().collect();
-            let mut client = storage_client.lock().await;
+            drop(keyed_batches);
             client.insert_keyed_many(batches).await?;
         }
 
@@ -159,7 +156,7 @@ impl SinkFunctionTrait for InMemoryStorageSinkFunction {
         let Some(client) = &self.storage_client else {
             return Ok(());
         };
-        Self::flush_buffers(client, &self.buffer, &self.keyed_buffer, &self.flush_gate).await
+        Self::flush_buffers(client, &self.buffer, &self.keyed_buffer).await
     }
 }
 
@@ -176,19 +173,14 @@ impl FunctionTrait for InMemoryStorageSinkFunction {
 
         let buffer = self.buffer.clone();
         let keyed_buffer = self.keyed_buffer.clone();
-        let flush_gate = self.flush_gate.clone();
         let running = self.running.clone();
         self.flush_handle = Some(tokio::spawn(async move {
             let mut ticker = interval(Duration::from_millis(BUFFER_FLUSH_INTERVAL_MS));
             while running.load(Ordering::SeqCst) {
                 ticker.tick().await;
-                if let Err(e) = InMemoryStorageSinkFunction::flush_buffers(
-                    &shared_client,
-                    &buffer,
-                    &keyed_buffer,
-                    &flush_gate,
-                )
-                .await
+                if let Err(e) =
+                    InMemoryStorageSinkFunction::flush_buffers(&shared_client, &buffer, &keyed_buffer)
+                        .await
                 {
                     eprintln!("[IN_MEMORY_SINK] flush error: {e}");
                 }
@@ -204,8 +196,7 @@ impl FunctionTrait for InMemoryStorageSinkFunction {
             let _ = handle.await;
         }
         if let Some(client) = &self.storage_client {
-            Self::flush_buffers(client, &self.buffer, &self.keyed_buffer, &self.flush_gate)
-                .await?;
+            Self::flush_buffers(client, &self.buffer, &self.keyed_buffer).await?;
         }
         Ok(())
     }

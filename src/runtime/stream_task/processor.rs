@@ -5,9 +5,7 @@ use futures::StreamExt;
 
 use crate::common::message::Message;
 use crate::runtime::consts::{runtime_consts, WINDOW_INGEST_MAX_RECORDS};
-use crate::runtime::operators::operator::{
-    drain_ready_after, MessageStream, OperatorType, StreamOperator,
-};
+use crate::runtime::operators::operator::{drain_ready_after, MessageStream, StreamOperator};
 use crate::transport::transport_client::DataReaderControl;
 
 use super::checkpoint::on_checkpoint_barrier;
@@ -67,10 +65,9 @@ pub(super) async fn processor_loop(
                             Ok(Some((checkpoint_id, inject_stamp, wms))) => {
                                 ctx.emit_watermarks(wms, false, Some(operator)).await?;
                                 let aligned = ctx.new_barrier(checkpoint_id, inject_stamp);
-                                // Sink is not checkpointable (no state ack). Aligned is its
-                                // only CP signal, so flush must finish before that report.
-                                // Otherwise kill-after-complete can drop the last buffered batch.
-                                if operator.operator_type() == OperatorType::Sink {
+                                // handle_barrier first: sink flush must finish before Aligned
+                                // (sink has no state ack; kill-after-complete can drop a buffered batch).
+                                {
                                     let mut out = ctx.output();
                                     operator.handle_barrier(aligned.clone(), &mut out).await?;
                                 }
@@ -82,10 +79,6 @@ pub(super) async fn processor_loop(
                                     Some(&reader_control),
                                 )
                                 .await?;
-                                if operator.operator_type() != OperatorType::Sink {
-                                    let mut out = ctx.output();
-                                    operator.handle_barrier(aligned, &mut out).await?;
-                                }
                             }
                             Err(error) => {
                                 panic!(
