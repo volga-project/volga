@@ -9,20 +9,37 @@ see the [window operator README](README.md). This document focuses on store
 contracts and the proposed Scylla backend.
 
 The current data contract is append-only. CDC and late-event correction will
-require explicit mutation semantics rather than implicit delete markers - this is future work
+require explicit mutation semantics rather than implicit delete markers — this
+is future work.
 
 ## Contract types
 
-These are the logical models; backend serialization may differ.
+These are the logical models; backend serialization may differ. They are an
+**engine contract** (WO, WRO, InMem, Scylla). Physical layout may add columns
+such as `key_group`; it must not change what `StateNamespace` means.
 
 ```rust
+/// Operator state space. Shared by every WO task and by WRO.
+/// Bytes encode (pipeline, owner operator) only — not task_index.
 pub struct StateNamespace {
     pub bytes: Vec<u8>,
 }
+
+/// Collision-safe logical identity. Backends derive `key_group` from the
+/// business-key hash and job `max_parallelism`; they do not hash-mod `p`.
 pub struct PartitionKey {
     pub namespace: Vec<u8>,
     pub business_key: Vec<u8>,
 }
+
+/// Contiguous Flink-style assignment: `subtask = key_group * p / max_p`.
+/// `start` inclusive, `end` exclusive. `max_parallelism` is immutable for a
+/// pipeline incarnation.
+pub struct KeyGroupRange {
+    pub start: usize,
+    pub end: usize,
+}
+
 pub struct Cursor {
     pub ts: i64,
     pub seq_no: u64,
@@ -37,6 +54,7 @@ pub struct TileRun {
     pub end_ts_exclusive: i64,
 }
 pub enum TimeGranularity {
+    Milliseconds(u32),
     Seconds(u32),
     Minutes(u32),
     Hours(u32),
@@ -86,17 +104,34 @@ pub struct WindowStateSnapshot {
 }
 ```
 
+Routing (already landed):
+
+```text
+key_group = hash % max_parallelism
+subtask   = key_group * p / max_parallelism
+```
+
+Each WO/WRO task owns a contiguous `KeyGroupRange`. `max_parallelism` is
+job-wide and must not change for a pipeline incarnation.
+
+- `StateNamespace` is the operator state space, not a task. Task isolation is
+  the owned key-group range, bound on the per-task store client at open (see
+  below). Changing only Scylla to strip `task_index` while InMem still keys on
+  `for_operator_task(..., task_index)` would give the same type two meanings;
+  both backends follow this contract.
 - `PartitionKey` must remain collision-safe; hashes alone are insufficient.
-  In practice, persist the serialized business-key bytes directly, as in the
-  schemas below. Scylla hashes the complete partition key for distribution.
+  Persist the serialized business-key bytes. Derive `key_group` from `Key.hash`
+  (first 8 bytes of `Key::to_bytes`) and `max_parallelism`. Scylla hashes the
+  complete partition key for distribution.
 - `Cursor` is raw event identity and total order within a partition.
 - `RawRun` and `TileRun` are half-open. Calls contain merged logical runs, and
   backends must return exactly their union.
 - `next_seq` allocates per-key sequence IDs. Optional `evaluation` keeps the
   last fired trigger together with retractable accumulator state. State-only WO
   does not keep evaluation state.
-- `watermark_frontier` is the task-level late-data boundary. Logical retention
-  is derived from it, the largest window, and configured lateness.
+- `watermark_frontier` is the **task-level** late-data boundary (each task
+  advances its own watermark over the keys it owns). Logical retention is
+  derived from it, the largest window, and configured lateness.
 - `WindowTrigger` is durable event-time work. Current RANGE windows create one
   `RowEmit` trigger per accepted row; `WindowEnd` is reserved for scheduled
   windows.
@@ -107,20 +142,44 @@ pub struct WindowStateSnapshot {
 
 ## Worker state topology
 
-Physical stores are worker-scoped and shared by `OperatorKind` (one backend
-instance per kind). Logical isolation is `StateNamespace` (pipeline + owner
-operator + task). WRO reuses the WO owner namespace.
+Two layers:
 
-`OperatorStore` is the generic maintenance port (same `Arc` as the window
-backend). The worker cleaner runs one tick:
+```text
+physical backend     worker + OperatorKind (one InMem map / Scylla session)
+WindowOperatorStore  per-task client wrapping that backend
+```
+
+The client is created at WO `open` from the task's assignment and is stable
+for the attempt:
+
+```text
+StateNamespace  = (pipeline, owner operator)
+KeyGroupRange   = groups for this task_index at (p, max_p)
+WriterId        = this task execution
+AttemptToken    = job-level execution attempt
+```
+
+`stream_due` / `checkpoint` / `restore` use that bound range. They do not take
+`owned` or `namespace` — the client is the task's store. Per-key calls derive
+`key_group` from the business key and must land in the bound range (routing
+bug otherwise).
+
+WRO reuses the WO owner namespace. It addresses rows by `PartitionKey`
+(namespace + business key). Request routing still sends a lookup to the WRO
+task that owns that key (locality); the namespace no longer encodes
+`task_index`.
+
+`OperatorStore` is the generic maintenance port on the **shared** physical
+backend (registry: one store per kind). The worker cleaner runs one tick:
 
 1. for each registered kind in parallel,
 2. `try_join_all` over that kind's task states,
 3. `store.maintain(ns, task_state)`.
 
 Window eligibility is read from `OperatorTaskState` (watermark →
-`retention_cutoff`); there is no separate cut/meta publish on the data-plane
-trait. Pipeline `StateSpec.maintenance_*` (default on) enables the cleaner.
+`retention_cutoff`, plus the same key-group range the WO client was bound to).
+There is no separate cut/meta publish on the data-plane trait. Pipeline
+`StateSpec.maintenance_*` (default on) enables the cleaner.
 
 See the [window operator README](README.md) for the runtime retention contract
 and how InMem implements `maintain` today. Scylla's `maintain` body is still
@@ -153,7 +212,6 @@ pub trait WindowOperatorStore: Send + Sync + Debug {
     ) -> Result<()>;
     fn stream_due<'a>(
         &'a self,
-        namespace: &'a StateNamespace,
         after: Option<Cursor>,
         through: Cursor,
     ) -> BoxStream<'a, Result<Vec<DueWindowWork>>>;
@@ -163,15 +221,8 @@ pub trait WindowOperatorStore: Send + Sync + Debug {
         state: &KeyState,
     ) -> Result<()>;
     /// Complete pending writes before capturing the returned snapshot.
-    async fn checkpoint(
-        &self,
-        namespace: &StateNamespace,
-    ) -> Result<WindowBackendSnapshot>;
-    async fn restore(
-        &self,
-        namespace: &StateNamespace,
-        snapshot: &WindowBackendSnapshot,
-    ) -> Result<()>;
+    async fn checkpoint(&self) -> Result<WindowBackendSnapshot>;
+    async fn restore(&self, snapshot: &WindowBackendSnapshot) -> Result<()>;
 }
 #[async_trait]
 pub trait WindowRequestStore: Send + Sync + Debug {
@@ -193,16 +244,18 @@ pub trait WindowRequestStore: Send + Sync + Debug {
   runs. Missing tiles mean empty intervals.
 - `commit_events` atomically publishes raw rows, replacement tiles, key state,
   and triggers. `ts_column_index` plus `__seq_no` identifies each raw cursor.
-  Retries are idempotent.
+  Retries are idempotent. The backend derives `key_group` from the partition's
+  business key; it does not trust a caller-supplied group.
 - `stream_due` owns backend pagination for one stable watermark range and
-  returns bounded trigger groups with their corresponding key state.
+  returns bounded trigger groups with their corresponding key state. It only
+  returns work for the client's bound key-group range.
 - `store_key_state` publishes only sequence/evaluation state.
 - `checkpoint` completes pending writes and returns a backend-specific
-  snapshot. Scylla returns only the aligned backend version.
-- `restore` starts store access from the supplied checkpoint base. For Scylla,
-  the current fenced attempt inherits reads from that immutable version.
-- The namespace argument scopes checkpoint and restore when one store instance
-  is shared by multiple window operators.
+  snapshot of the client's bound range only. Scylla returns this writer's
+  `StateVersion`; InMem serializes partitions in that range.
+- `restore` starts store access from the supplied checkpoint base and must
+  not clobber keys outside the bound range (the physical InMem/Scylla backend
+  is shared by all tasks of the kind).
 - WO reads observe their latest publication. One fenced WO owns a partition, so
   its historical raw and tile reads need not share a snapshot and can run
   concurrently.
@@ -210,10 +263,13 @@ pub trait WindowRequestStore: Send + Sync + Debug {
   physical buckets and pages.
 - Methods must not broaden ranges or return partial results.
 
-`InMemWindowStore` is the reference backend. One lock provides the WRO snapshot
-boundary, and its checkpoint embeds serialized partition state and triggers.
-It implements `OperatorStore::maintain` and prunes eagerly under the same
-retention contract as Scylla (control flow identical; lag ~0).
+`InMemWindowStore` is the reference physical backend. One lock provides the
+WRO snapshot boundary. Each WO task holds a client over that shared map,
+bound to namespace + key-group range; checkpoint embeds serialized partition
+state and triggers for that range. The shared backend implements
+`OperatorStore::maintain` and prunes eagerly under the same retention contract
+as Scylla (control flow identical; lag ~0), reading the range from
+`OperatorTaskState` rather than a task-suffixed namespace blob.
 
 ## Runtime flows
 
@@ -229,7 +285,8 @@ WO ingest:
 WO advance:
 
 1. Stream backend-sized trigger pages for
-   `(watermark_frontier, incoming_watermark]`.
+   `(watermark_frontier, incoming_watermark]` (client already scoped to this
+   task's key groups).
 2. Group each page by key and use every trigger cursor as an exact emit point.
 3. Build per-cursor plans. Sliding aggregates plan leave bands; rebuild
    aggregates plan raw edges plus interior tiles.
@@ -255,70 +312,125 @@ WRO lookup:
 3. Call `load_window_data` once for one coherent snapshot.
 4. Evaluate per-window request arguments and rebuild every answer.
 
-WRO is read-only
+WRO is read-only.
 
 ## Scylla backend
 
 Scylla does not provide one snapshot spanning multiple partitions, CQL queries,
 or result pages. A logical window read may cross several physical ranges, so
 concurrent writes could otherwise make those pieces represent different
-moments. We us application-level MVCC to pin every piece to one published version and
-provide a coherent logical snapshot. We also use time buckets to keep physical partitions
-and individual range reads bounded instead of storing a key's entire history
-in one ever-growing partition.
+moments. We use application-level MVCC to pin every piece to one published
+version and provide a coherent logical snapshot. We also use time buckets to
+keep physical partitions and individual range reads bounded instead of storing
+a key's entire history in one ever-growing partition.
 
-The initial backend assumes append-only input and stable task parallelism.
-(rescaling is future work)
+v1 restore still assumes **same task assignment** (`RestorePlanner` identity
+map). The physical model is key-group-native from the start so later rescaling
+is a remap of ranges between checkpoints, not a data rewrite. `task_index`
+does not appear in PRIMARY KEYs.
 
 ### Versions and checkpoints
 
 ```rust
+/// Job-level recovery branch. Not a task id.
+/// Example: pipeline incarnation + execution_attempt_id.
+pub struct AttemptToken(Vec<u8>);
+
+/// Unique WO task execution. Head fence only, not part of data PKs.
+/// Example: AttemptToken + vertex/task identity.
+pub struct WriterId(Vec<u8>);
+
 pub struct StateVersion {
     pub attempt: AttemptToken,
     pub epoch: u64,
 }
 
+/// Restore/remap only. Not stored in the checkpoint blob.
+/// Planner output, then rows in `window_recovery_bases`.
+pub struct VersionedRange {
+    pub range: KeyGroupRange,
+    pub version: StateVersion,
+}
+
 pub enum WindowBackendSnapshot {
-    InMemory { snapshot: Vec<u8> }, // in mem uses whole snapshot
-    Versioned { version: StateVersion }, // this is for scylla
+    InMemory { snapshot: Vec<u8> },
+    /// This writer's cutoff. Range is not stored: it is the client's bound
+    /// assignment, and on the master the payload is already keyed by task.
+    Versioned { version: StateVersion },
 }
 ```
 
-`AttemptToken` must uniquely identify a WO task execution across master
-restarts, for example pipeline incarnation + execution_attempt_id + task identity.
-It is both the writer fence and the recovery branch ID.
+There is **one epoch**: a per-writer monotonic publish id. Each successful
+`commit_events` / `store_key_state` does `E += 1` and stamps that `E` on the
+write. It is not a per-key or per-key-group clock.
 
-Epoch is one task-wide counter within an attempt. Every publication, regardless
-of key, gets the next epoch. A new attempt may restart at zero because
-`(attempt, epoch)` remains unique. Scylla stores the two fields separately.
-Scylla uses `WindowBackendSnapshot::Versioned`; the in-memory backend uses
-`InMemory` with a serialized namespace snapshot. Namespace and the last fully
-processed watermark remain in the operator's `WindowStateSnapshot` envelope.
+| Place | Role |
+| --- | --- |
+| Writer allocator | produces `E` |
+| Data rows | MVCC: this cell belongs to publish `E` |
+| Head `writer_(attempt, epoch)` | this key's latest publish |
+| Head `serving_(attempt, epoch)` | WRO pin; same number line, equal to writer except during recovery |
+| Checkpoint cutoff | include versions with `epoch <= E` for keys in this range |
+
+Head `writer_epoch=5` on key A and `7` on key B means A and B were last
+published at those points on the **same** writer counter. Checkpoint `E=7`
+means “every owned key, newest row with `epoch <= 7`.”
+
+`AttemptToken` in table keys and in `StateVersion` is job-level. All WO tasks
+of one execution share it and write different key groups. Numeric epochs may
+repeat across writers (`E=3` on task 0 and task 1); that is fine because they
+are different keys. A cutoff is applied only to the groups that writer owned —
+the master already stores one checkpoint payload per task, so the blob does
+not need to repeat the range.
+
+`WriterId` is stored only on the head (`owner_writer`). It is the lock holder
+for zombie fencing, not a data address.
+
+A new execution attempt may restart writers at epoch zero because
+`(attempt, epoch)` is unique. Scylla stores the two fields separately.
+
+`VersionedRange` is not a checkpoint record. Checkpoint persists one
+`StateVersion` for this writer. The owned `KeyGroupRange` is already known
+from the client's assignment (and, on the master, from `TaskKey` + graph
+`p` / `max_p`). After a future rescale, `RestorePlanner` intersects old task
+ranges with the new assignment and produces a `Vec<VersionedRange>` as the
+**restore instruction**. `restore()` writes those slices into
+`window_recovery_bases`. v1 same-assignment is the trivial case: one slice =
+bound range + the checkpoint's `StateVersion`.
+
+Scylla uses `WindowBackendSnapshot::Versioned`. InMem uses `InMemory` with a
+serialized snapshot of the owned range. Namespace and the last fully processed
+watermark remain in the operator's `WindowStateSnapshot` envelope.
 
 ### Tables
 
 ```sql
 CREATE TABLE window_head (
     namespace blob,
+    key_group int,
     business_key blob,
-    owner_attempt blob,
+    owner_writer blob,
     writer_attempt blob,
     writer_epoch bigint,
     serving_attempt blob,
     serving_epoch bigint,
-    PRIMARY KEY ((namespace, business_key))
+    PRIMARY KEY ((namespace, key_group, business_key))
 );
 
+-- One row per inherited range (usually one at same assignment).
 CREATE TABLE window_recovery_bases (
     namespace blob,
     recovery_attempt blob,
+    range_start int,
+    range_end int,
     base_attempt blob,
     base_epoch bigint,
-    PRIMARY KEY ((namespace, recovery_attempt))
+    PRIMARY KEY ((namespace, recovery_attempt), range_start)
 );
 
 CREATE TABLE window_raw (
     namespace blob,
+    key_group int,
     business_key blob,
     attempt blob,
     bucket_start bigint,
@@ -327,7 +439,7 @@ CREATE TABLE window_raw (
     epoch bigint,
     payload blob,
     PRIMARY KEY (
-        (namespace, business_key, attempt, bucket_start),
+        (namespace, key_group, business_key, attempt, bucket_start),
         event_ts, seq_no, epoch
     )
 ) WITH CLUSTERING ORDER BY (
@@ -336,6 +448,7 @@ CREATE TABLE window_raw (
 
 CREATE TABLE window_tiles (
     namespace blob,
+    key_group int,
     business_key blob,
     attempt blob,
     granularity_ms bigint,
@@ -346,6 +459,7 @@ CREATE TABLE window_tiles (
     PRIMARY KEY (
         (
             namespace,
+            key_group,
             business_key,
             attempt,
             granularity_ms,
@@ -357,12 +471,13 @@ CREATE TABLE window_tiles (
 
 CREATE TABLE window_key_states (
     namespace blob,
+    key_group int,
     business_key blob,
     attempt blob,
     epoch bigint,
     key_state blob,
     PRIMARY KEY (
-        (namespace, business_key, attempt),
+        (namespace, key_group, business_key, attempt),
         epoch
     )
 ) WITH CLUSTERING ORDER BY (epoch DESC);
@@ -371,7 +486,8 @@ CREATE TABLE window_triggers (
     namespace blob,
     attempt blob,
     bucket_start bigint,
-    trigger_shard int,
+    kg_shard int,
+    key_group int,
     fire_ts bigint,
     fire_seq bigint,
     business_key blob,
@@ -379,7 +495,8 @@ CREATE TABLE window_triggers (
     window_id bigint,
     epoch bigint,
     PRIMARY KEY (
-        (namespace, attempt, bucket_start, trigger_shard),
+        (namespace, attempt, bucket_start, kg_shard),
+        key_group,
         fire_ts,
         fire_seq,
         business_key,
@@ -388,6 +505,7 @@ CREATE TABLE window_triggers (
         epoch
     )
 ) WITH CLUSTERING ORDER BY (
+    key_group ASC,
     fire_ts ASC,
     fire_seq ASC,
     business_key ASC,
@@ -397,43 +515,58 @@ CREATE TABLE window_triggers (
 );
 ```
 
-- `window_head`: per-key ownership fence plus writer and WRO-visible version
-  pointers; the LWT publication boundary.
-- `window_recovery_bases`: one immutable row per recovery attempt. It maps the
-  new `recovery_attempt` to the restored checkpoint version
-  `(base_attempt, base_epoch)`. This lets the new attempt inherit unchanged
-  state without copying every raw row, tile, and `KeyState`.
+- `window_head`: per-key writer fence plus writer and WRO-visible version
+  pointers; the LWT publication boundary. `owner_writer` is `WriterId`.
+  `writer_*` / `serving_*` are job-level `StateVersion`. `key_group` is in the
+  partition key so point gets (WO already has the hash) stay single-partition
+  and a key group cannot collapse into one unbounded Scylla partition.
+- `window_recovery_bases`: immutable rows mapping a new job `recovery_attempt`
+  to restored checkpoint cutoffs at **key-group range** granularity. Lookup for
+  a key: find the row with `range_start <= key_group < range_end`. This lets a
+  new execution inherit unchanged state without copying raw rows, tiles, or
+  `KeyState`, and lets a later rescale inherit different cutoffs from different
+  source tasks.
 - `window_raw`: cursor-ordered event rows, physically split into time buckets
-  and versioned by attempt and epoch.
+  and versioned by job attempt and epoch.
 - `window_tiles`: versioned aggregate tiles, partitioned by time bucket and
   granularity.
 - `window_key_states`: versioned `KeyState` history used by current WO reads and
   checkpoint recovery.
 - `window_triggers`: immutable due work ordered by event time. Time buckets and
-  `trigger_shard` bound each Scylla partition:
-  `stable_hash(business_key) % trigger_shard_count`. Without it, every trigger
-  in one namespace, attempt, and time bucket would share one hot, potentially
-  oversized partition. `stream_due` queries all shards for each relevant time
-  bucket and merges their results by trigger cursor. The shard is only a
-  physical storage concern, not a window, task, or rescaling key group; its
-  count must remain stable for the namespace. Row triggers use a sentinel
-  `window_id`; scheduled windows retain their actual `WindowId`.
+  `kg_shard` bound each Scylla partition. Shard with the **same range formula
+  as routing**, not `hash(business_key) % N`:
 
-Raw payloads are Arrow-IPC one-row `RecordBatch` values including `__seq_no`..
+  ```text
+  kg_shard = key_group * SHARD_COUNT / max_parallelism
+  ```
+
+  A task's contiguous groups map to a small number of shards, so `stream_due`
+  queries those shards and restricts clustering to the client's bound range.
+  `SHARD_COUNT` is a
+  store constant (e.g. 32 or 64), not `p` (changes on rescale) and not
+  `max_parallelism` (too fine: `p=4`, `max_p=32768` would otherwise mean 8192
+  queries per time bucket). `SHARD_COUNT` and `max_parallelism` are immutable
+  for the namespace. Hash-mod sharding would scatter one task across every
+  shard and is not used. Row triggers use a sentinel `window_id`; scheduled
+  windows retain their actual `WindowId`. Job-level `attempt` stays in the
+  trigger PK as the MVCC branch (recovery overlay), not as a task id.
+
+Raw payloads are Arrow-IPC `RecordBatch` values including `__seq_no`.
 
 ### Head semantics
 
-- `owner_attempt` is the WO allowed to publish this key.
-- `writer_(attempt, epoch)` is the private WO snapshot.
+- `owner_writer` is the WO task execution allowed to publish this key.
+- `writer_(attempt, epoch)` is the private WO snapshot (job attempt + writer
+  epoch).
 - `serving_(attempt, epoch)` is the complete snapshot visible to WRO.
 - Writer and serving versions are equal normally and may differ during
   recovery.
 
 When a new WO instance (initial or recovery) first writes a key, it
-LWT/CAS-claims `owner_attempt`. Every later head update checks both owner and
+LWT/CAS-claims `owner_writer`. Every later head update checks both owner and
 expected writer version.
 
-Claiming means conditionally setting `owner_attempt`: insert it for a new head,
+Claiming means conditionally setting `owner_writer`: insert it for a new head,
 or replace the expected previous owner. Only one competing WO can succeed.
 Fencing happens when a zombie tries to update a head now owned by the new WO:
 the conditional update fails, so the zombie's data is not published.
@@ -443,11 +576,13 @@ the conditional update fails, so the zombie's data is not published.
 For one key:
 
 1. Load writer `KeyState`.
-2. Allocate task epoch `E`.
-3. Write changed raw rows, tiles, `KeyState`, and triggers under `(attempt, E)`.
-4. LWT-update the head, requiring the current owner and previous writer version.
+2. Allocate writer epoch `E`.
+3. Write changed raw rows, tiles, `KeyState`, and triggers under
+   `(job attempt, E)` with the derived `key_group`.
+4. LWT-update the head, requiring the current `owner_writer` and previous
+   writer version.
 5. During normal operation, set both writer and serving versions to
-   `(attempt, E)`. During recovery, advance only writer until catch-up.
+   `(job attempt, E)`. During recovery, advance only writer until catch-up.
 6. Update or invalidate affected WO cache entries.
 
 The head update is the visibility boundary. Data written before a failed head
@@ -462,20 +597,22 @@ versions.
 
 ### WO reads
 
-WO reads the writer snapshot. A fresh attempt reads only its own versions. A
-recovery attempt overlays its versions over the immutable checkpoint base from
-`window_recovery_bases`: read the newest value from the recovery attempt first,
-then fall back to the base version for data not replaced by recovery writes.
+WO reads the writer snapshot. A fresh execution attempt reads only its own
+versions. A recovery attempt overlays its versions over the immutable
+checkpoint base from `window_recovery_bases`: read the newest value from the
+recovery attempt first, then fall back to the base version for that key's
+range (`epoch <= base_epoch`) for data not replaced by recovery writes.
 
 Logical runs are mapped to time buckets, loaded, merged, and filtered back to
 the exact requested ranges. Raw rows are deduplicated by `Cursor`; current
 tiles replace matching base tiles.
 
-`stream_due` maps its stable watermark range to trigger buckets and shards,
-overlays the recovery attempt over its checkpoint base, and filters trigger
-versions through each key's writer head. It batch-loads writer `KeyState`,
-groups triggers into `DueWindowWork`, and owns page sizing and continuation
-state for the lifetime of the stream.
+`stream_due` maps its stable watermark range to trigger buckets and the
+`kg_shard`s that overlap the client's bound range, overlays the recovery
+attempt over each inherited base range, and filters trigger versions through
+each key's writer head. It batch-loads writer `KeyState`, groups triggers into
+`DueWindowWork`, and owns page sizing and continuation state for the lifetime
+of the stream.
 
 ### WRO reads
 
@@ -483,47 +620,56 @@ WRO:
 
 1. Reads and retains the key's serving version for the request.
 2. Builds exact raw/tile plans.
-3. Loads serving-attempt buckets. If that attempt has a recovery-base row,
-   loads unchanged data from its base checkpoint as well. This may repeat when
-   checkpoints span several recovery attempts.
+3. Loads serving-attempt buckets. If that attempt has a recovery-base row
+   covering this `key_group`, loads unchanged data from its base checkpoint as
+   well. This may repeat when checkpoints span several recovery attempts.
 4. Selects visible versions, then merges, orders, deduplicates, and rebuilds.
 
 WRO does not read writer state, use Foyer, contact the master, or consume
 checkpoint metadata. If WO is unavailable, WRO continues serving the unchanged
-complete serving snapshot.
+complete serving snapshot. Any WRO task can read any key in the operator
+namespace; keyed routing is locality, not identity.
 
 ### Checkpoint
 
 At an aligned barrier:
 
 1. Resolve all in-flight publication outcomes and complete pending writes.
-2. Capture `(current attempt, current task epoch)`.
-3. Return `WindowBackendSnapshot::Versioned`; the operator persists it in its
-   checkpoint envelope.
+2. Capture `(current job attempt, current writer epoch)`.
+3. Return `WindowBackendSnapshot::Versioned { version }`. The operator
+   persists it in its checkpoint envelope. The range is the client's bound
+   assignment and is not copied into the blob.
 4. Continue processing at later epochs.
 
-The checkpoint contains no keys or state payloads. For any key, checkpoint
-state is its newest version from the checkpoint attempt with epoch at or below
-the cutoff. Creating a checkpoint does not insert a recovery-base row; that row
-is created only when a new attempt restores this checkpoint.
+The checkpoint contains no keys, no key-group list, and no state payloads.
+For any key this writer owned, checkpoint state is its newest version from
+that attempt with `epoch <=` the cutoff. Creating a checkpoint does not insert
+a recovery-base row; those rows are created only when a new attempt restores.
 
 The operator stores namespace, its last fully processed watermark, and
 `WindowBackendSnapshot` in `WindowStateSnapshot`. Durable triggers already
 represent work above that watermark, so checkpointing neither drains nor
 serializes an operator-local pending-key set. For unchanged task assignment,
-restore passes the same versioned snapshot back to the store.
+restore passes the same `StateVersion` back; the client applies it to its
+bound range. `RestorePlanner` remapping (producing `Vec<VersionedRange>`) is
+future work.
 
 ### Recovery
 
-1. The replacement worker has the restored version in
-   `WindowBackendSnapshot::Versioned`.
-2. During operator restore, the worker's Scylla store creates the new attempt,
-   inserts `window_recovery_bases(new attempt -> restored checkpoint version)`,
-   and starts its epoch at zero. The row must exist before the attempt
-   publishes data. The master only plans and sends the restore snapshot.
+1. v1: the replacement worker has `WindowBackendSnapshot::Versioned { version }`
+   and the same assignment, so one `VersionedRange` = bound range + that
+   version. After rescale: `RestorePlanner` sends the intersected
+   `Vec<VersionedRange>` (still not a checkpoint format; it is restore input).
+2. During operator restore, the worker's Scylla store uses the new **job**
+   attempt, inserts `window_recovery_bases` rows
+   `(new attempt, range) -> (base_attempt, base_epoch)` for each restore
+   slice, and starts this writer's epoch at zero. The rows must exist before
+   the attempt publishes data. The master only plans and sends the restore
+   payload.
 3. Source restores its checkpoint offset and replays post-checkpoint input.
-4. On first access to a key, retain its old serving version, claim ownership,
-   and restore writer `KeyState` from the checkpoint base.
+4. On first access to a key, retain its old serving version, claim
+   `owner_writer`, and restore writer `KeyState` from the checkpoint base for
+   that key's range.
 5. Resume watermark work by streaming checkpoint-visible triggers above the
    restored watermark while replay advances only writer state.
 6. Once append-only replay catches the old serving state, atomically switch
@@ -547,7 +693,7 @@ meta:
 data:
     (PartitionKey, family, bucket) -> materialized writer-view data
 triggers:
-    (namespace, attempt, bucket, shard) -> immutable due entries
+    (namespace, attempt, bucket, kg_shard) -> immutable due entries
 ```
 
 `family` is raw data or tiles at a specific granularity.
@@ -578,32 +724,41 @@ each publish; still quorum everywhere. Explore it only if LWT latency hurts.
 
 ### State prune / cleanup
 
-**Eligibility (per task / namespace):** after watermark advance to `W`,
+**Eligibility (per task):** after watermark advance to `W`,
 `data_floor = W − max_window_length − lateness` (lateness default `0`).
 `max_window_length` is required because raw/tiles are shared across all window
 expressions on the op — shorter windows over-retain; longer ones must not
-under-retain.
+under-retain. Prune is limited to the task's owned key-group range.
 
 **Executor (per worker):** `StateRegistry::run_maintenance_once` — parallel
 loop per `OperatorKind`, then per-task `OperatorStore::maintain(ns, state)`.
-Not on the master; not inside WO `poll_next`.
+Not on the master; not inside WO `poll_next`. The window impl reads cutoff and
+owned range from `OperatorTaskState`.
 
 **Window `maintain` body:**
-- drop consumed triggers (`fire_at.ts ≤ W`);
-- prune raw rows with `ts < data_floor` and tiles fully below the floor;
+- drop consumed triggers (`fire_at.ts ≤ W`) in shards overlapping the task's
+  key-group range (from `OperatorTaskState`);
+- prune raw rows with `ts < data_floor` and tiles fully below the floor
+  (Scylla: time-bucket drop / TWCS / TTL aligned with `data_floor`; per-key
+  partitions are not listed by scan);
 - Scylla additionally: MVCC cleanup of versions unreachable from writer heads,
   serving heads, recovery bases, and retained checkpoints; orphan/zombie
   cleanup for failed writes.
 
 TTL/TWCS may expire physical SSTables only when consistent with logical
 `data_floor`. InMem applies the same logical rules immediately inside
-`maintain`.
+`maintain`, iterating in-memory partitions whose namespace matches and whose
+`key_group` is in the task state's range.
 
 ## Future next steps
 
 Worker maintenance **orchestration** (`OperatorStore::maintain`, cleaner loop,
 `StateSpec.maintenance_*`) is decided in the runtime; Scylla's `maintain`
 implementation remains TODO.
+
+Engine `StateNamespace`, per-task store client bound to the assigned
+`KeyGroupRange`, InMem filter-by-range, and the Scylla schemas above should
+land together. v1 `RestorePlanner` may keep identity mapping.
 
 ### Namespaced cache quota
 
@@ -639,8 +794,43 @@ only the materialization and merge rules would change.
 
 ### Rescaling
 
-When we introduce key groups, rescaling is simiply re-mapping key-group <->task
-in-between checkpoints. The versioned backend snapshot becomes a
-key-group-to-base-version mapping and `window_recovery_bases` gain key-group
-granularity. The core head, raw, tile, `KeyState`, WO, and WRO contracts remain
-unchanged.
+Rescaling remaps `key_group ↔ task` between checkpoints. Data rows stay put:
+PKs are task-agnostic. `max_parallelism` is fixed for the pipeline incarnation;
+only `p` changes. At any one `p`, `subtask = key_group * p / max_p` **partitions**
+`[0, max_p)` into disjoint contiguous ranges — two live tasks never own the
+same key group, so they never “own an intersection” of each other.
+
+What *does* intersect is **new range ∩ old range** in the planner, when `p`
+changes. Each old task’s checkpoint blob is only a `StateVersion`. The old
+range is recomputed from that task’s index and the checkpoint graph’s
+`(p, max_p)`. `RestorePlanner` intersects the new assignment with every old
+task range and emits a `Vec<VersionedRange>` restore instruction — disjoint
+slices that cover exactly the new task’s groups, each with its source cutoff.
+`restore()` writes those into `window_recovery_bases`. The checkpoint blob
+never stores a range.
+
+Example, `max_p = 128`, rescale `p=3 → p=2`:
+
+```text
+old p=3:  task 0 [0, 43)   task 1 [43, 86)   task 2 [86, 128)
+new p=2:  task 0 [0, 64)   task 1 [64, 128)
+```
+
+```text
+new task 0 ← [0, 43) @ old0 version  +  [43, 64) @ old1 version
+new task 1 ← [64, 86) @ old1 version  +  [86, 128) @ old2 version
+```
+
+Old task 1 is **split** across both new tasks; new task 0 **merges** a suffix
+of old 0 with a prefix of old 1. Each inherited slice keeps its source
+`(attempt, epoch)` because the two old writers had independent epoch clocks.
+The restore instruction is that list of slices — not overlapping ranges for
+the same groups, and not something that was persisted at checkpoint time.
+
+Power-of-two rescale (`2 → 4`, `4 → 2`) is the aligned special case: a new
+range is exactly one old range or a concatenation of whole old ranges, never a
+partial split of an old range.
+
+`RestorePlanner` still needs this intersection; that planner change is separate
+from this store contract. Head fences are re-claimed by the new `WriterId` on
+first write.
