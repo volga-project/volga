@@ -3,8 +3,6 @@ use datafusion::logical_expr::{WindowFrame, WindowFrameBound, WindowFrameUnits};
 use crate::runtime::operators::window::model::TimeGranularity;
 
 /// RANGE window length in milliseconds.
-/// Month components use the same fixed 30-day month as [`TimeGranularity::Months`],
-/// so a month-based frame stays an exact multiple of month tiles.
 pub fn get_window_length_ms(window_frame: &WindowFrame) -> i64 {
     assert_eq!(
         window_frame.units,
