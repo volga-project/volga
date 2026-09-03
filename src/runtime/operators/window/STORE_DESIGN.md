@@ -427,11 +427,15 @@ partition (compaction, repair, hot token) hold every key in the group+bucket.
 Keep `business_key` in the **data** partition key so each key+bucket stays
 small.
 
-That data layout cannot list `bucket_start < data_floor`, so `commit_events`
-also writes one payload-free index. **`bucket_start` is clustering on the
-index, not a partition-key component** — otherwise `maintain` cannot
-`SELECT … AND bucket_start < data_floor` and would have to probe historical
-bucket ids (unbounded). Do not add a second `live_buckets` table.
+That data layout cannot list expired buckets, so `commit_events` also writes
+one payload-free index. **`bucket_start` is clustering on the index, not a
+partition-key component** — otherwise `maintain` cannot range-scan buckets
+and would have to probe historical bucket ids (unbounded). Do not add a
+second `live_buckets` table. Bind `floor_bucket` = first bucket that still
+overlaps `data_floor` (`align_down(data_floor, width)`). Only drop buckets
+whose entire range is below the floor: `bucket_start + width <= data_floor`,
+i.e. `bucket_start < floor_bucket`. Do not bind `data_floor` as if it were a
+`bucket_start`.
 
 After prune, each index partition is one key group and holds only live
 buckets: `keys_in_group × (retention / bucket_width)`, skinny cells. Shard
@@ -579,12 +583,14 @@ CREATE TABLE window_triggers (
   ```cql
   SELECT * FROM window_kg_buckets
    WHERE namespace = ? AND key_group = ?
-     AND bucket_start < ?
+     AND bucket_start < ?   -- floor_bucket, not data_floor
   ```
 
-  then deletes those per-key raw/tile partitions and the matching index
-  rows. After prune, the partition holds only live buckets. `index_shard`
-  on the PK is later, not v1.
+  For each hit, delete that key's `window_raw` partition for the bucket
+  **and** every `window_tiles` partition for the same key+bucket (all
+  `granularity_ms` from task state). Then delete the index row. After prune,
+  the partition holds only live buckets. `index_shard` on the PK is later,
+  not v1.
 - `window_raw`: **one CQL row per event**, clustered by event time. `payload`
   is that event only (Arrow-IPC including `__seq_no`). Do not pack a batch
   into one blob — that breaks time clustering, overlay, and per-event GC.
@@ -771,7 +777,7 @@ meta:
 data:
     (PartitionKey, family, bucket) -> materialized writer-view data
 triggers:
-    (namespace, attempt, bucket, kg_shard) -> immutable due entries
+    (namespace, bucket, kg_shard) -> immutable due entries
 ```
 
 `family` is raw data or tiles at a specific granularity.
@@ -817,15 +823,21 @@ owned range from `OperatorTaskState`.
 - drop consumed triggers (`fire_at.ts ≤ W`) with a `fire_ts` clustering
   range delete on shards overlapping the task's key-group range;
 - from `window_kg_buckets`, per owned `key_group`,
-  `SELECT … WHERE namespace = ? AND key_group = ? AND bucket_start < data_floor`;
-  page the result; delete each per-key raw/tile partition and the matching
-  index rows (including stale rows from a failed head LWT). Do not probe
-  historical bucket ids. Do not rely on TWCS/TTL (write-time ≠ event-time;
-  replay rewrites old buckets);
-- drop unreachable MVCC generations (`attempt` / `epoch` not reachable
-  from writer heads, serving heads, recovery bases, or retained
-  checkpoints; orphan/zombie writes). After this, overlay filters stay
-  one or two attempt clauses.
+  `SELECT … AND bucket_start < floor_bucket` (`floor_bucket =
+  align_down(data_floor, width)`; do not bind `data_floor` — a bucket with
+  `bucket_start < data_floor` can still cover `[data_floor, data_floor +
+  width)`). Page the result. For each `(business_key, bucket_start)`, delete
+  the per-key `window_raw` partition and every `window_tiles` partition for
+  that key+bucket (each `granularity_ms` from task state), then the index
+  row (including stale rows from a failed head LWT). Do not probe historical
+  bucket ids. Do not rely on TWCS/TTL (write-time ≠ event-time; replay
+  rewrites old buckets);
+- drop unreachable MVCC generations for keys still present in **live**
+  `window_kg_buckets` rows for the owned groups (`window_head` is per-key and
+  cannot be scanned). Drop `attempt` / `epoch` not reachable from writer
+  heads, serving heads, recovery bases, or retained checkpoints;
+  orphan/zombie writes. After this, overlay filters stay one or two attempt
+  clauses.
 
 **In-flight WRO:** `load_window_data` pins the key's serving version at
 start. `maintain` must not drop that version while the request can still
