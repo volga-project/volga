@@ -421,20 +421,23 @@ read, not a second partition hop. Restore still does not copy rows.
 attempt clauses.
 
 **GC default: skinny index + per-key data PK. Do not cluster `business_key`
-under `(namespace, key_group, bucket)`.** `load_raw` is per-key; a key group
-is unbounded, so that clustering would make one partition (compaction,
-repair, hot token) hold every key in the group+bucket. Keep `business_key`
-in the data partition key so each key+bucket stays small.
+under `(namespace, key_group, bucket)` on the data tables.** `load_raw` is
+per-key; a key group is unbounded, so that clustering would make one data
+partition (compaction, repair, hot token) hold every key in the group+bucket.
+Keep `business_key` in the **data** partition key so each key+bucket stays
+small.
 
-That data layout cannot list “this key group” or `bucket_start < data_floor`,
-so `commit_events` also writes a payload-free index
-`(namespace, key_group, bucket_start) → business_key`. `maintain` walks
-event-time `bucket_start` values below `data_floor` (configured bucket width;
-empty index partitions are skipped), pages each partition, and deletes the
-per-key data partitions. If the key count per group+bucket grows large, shard
-the index (`index_shard = hash(business_key) % N`) so each index partition
-stays bounded. TWCS/TTL on write-time cannot replace this: event-time buckets
-≠ write time, and replay rewrites old buckets.
+That data layout cannot list `bucket_start < data_floor`, so `commit_events`
+also writes one payload-free index. **`bucket_start` is clustering on the
+index, not a partition-key component** — otherwise `maintain` cannot
+`SELECT … AND bucket_start < data_floor` and would have to probe historical
+bucket ids (unbounded). Do not add a second `live_buckets` table.
+
+After prune, each index partition is one key group and holds only live
+buckets: `keys_in_group × (retention / bucket_width)`, skinny cells. Shard
+with `index_shard` on the PK later if a hot group is too wide — not v1.
+TWCS/TTL on write-time cannot replace this: event-time buckets ≠ write time,
+and replay rewrites old buckets.
 
 ```sql
 CREATE TABLE window_head (
@@ -460,16 +463,17 @@ CREATE TABLE window_recovery_bases (
     PRIMARY KEY ((namespace, recovery_attempt), range_start)
 );
 
--- Skinny GC index only: no payloads. v1: one partition per group+bucket.
--- If that partition grows too wide, add index_shard to the partition key
--- (hash(business_key) % N) and page all shards in maintain.
+-- Skinny GC index only: no payloads, no attempt/epoch.
+-- bucket_start is clustering so maintain can range `< data_floor`.
+-- Do not add a second live_buckets table. Shard with index_shard later
+-- if a hot group is too wide — not v1.
 CREATE TABLE window_kg_buckets (
     namespace blob,
     key_group int,
     bucket_start bigint,
     business_key blob,
-    PRIMARY KEY ((namespace, key_group, bucket_start), business_key)
-);
+    PRIMARY KEY ((namespace, key_group), bucket_start, business_key)
+) WITH CLUSTERING ORDER BY (bucket_start ASC, business_key ASC);
 
 CREATE TABLE window_raw (
     namespace blob,
@@ -568,12 +572,19 @@ CREATE TABLE window_triggers (
   `KeyState`, and lets a later rescale inherit different cutoffs from different
   source tasks.
 - `window_kg_buckets`: skinny GC index, not a source of truth for reads.
-  `commit_events` upserts `business_key` under
-  `(namespace, key_group, bucket_start)` — no payload columns. `maintain`
-  pages each owned group’s buckets below `data_floor` (by event-time bucket
-  id, not a cross-bucket clustering scan) and deletes the matching **per-key**
-  raw/tile partitions, then the index rows. Shard the index partition key if
-  one group+bucket has too many keys.
+  One table. `commit_events` does an unversioned upsert of `business_key`
+  (no `attempt`/`epoch`, no payload). A failed head LWT may leave a stale
+  index row; `maintain` deletes it. `maintain` per owned `key_group`:
+
+  ```cql
+  SELECT * FROM window_kg_buckets
+   WHERE namespace = ? AND key_group = ?
+     AND bucket_start < ?
+  ```
+
+  then deletes those per-key raw/tile partitions and the matching index
+  rows. After prune, the partition holds only live buckets. `index_shard`
+  on the PK is later, not v1.
 - `window_raw`: **one CQL row per event**, clustered by event time. `payload`
   is that event only (Arrow-IPC including `__seq_no`). Do not pack a batch
   into one blob — that breaks time clustering, overlay, and per-event GC.
@@ -624,8 +635,9 @@ For one key:
 1. Load writer `KeyState`.
 2. Allocate writer epoch `E`.
 3. Derive `key_group` from the key hash and the client's `max_p`.
-4. Write changed raw rows, tiles, `KeyState`, triggers, and `window_kg_buckets`
-   under `(job attempt, E)`.
+4. Write changed raw rows, tiles, `KeyState`, and triggers under
+   `(job attempt, E)`. Upsert `window_kg_buckets` unversioned (not under
+   `E`; failed head LWT may leave a stale index row for `maintain` to drop).
 5. LWT-update the head, requiring the current `owner_writer` and previous
    writer version.
 6. During normal operation, set both writer and serving versions to
@@ -804,10 +816,11 @@ owned range from `OperatorTaskState`.
 **Window `maintain` body:**
 - drop consumed triggers (`fire_at.ts ≤ W`) with a `fire_ts` clustering
   range delete on shards overlapping the task's key-group range;
-- from `window_kg_buckets`, for each owned group and each event-time
-  `bucket_start` fully below `data_floor`, page `business_key`s (and index
-  shards if enabled); delete each per-key raw/tile partition; drop the
-  index rows. Do not rely on TWCS/TTL for this (write-time ≠ event-time;
+- from `window_kg_buckets`, per owned `key_group`,
+  `SELECT … WHERE namespace = ? AND key_group = ? AND bucket_start < data_floor`;
+  page the result; delete each per-key raw/tile partition and the matching
+  index rows (including stale rows from a failed head LWT). Do not probe
+  historical bucket ids. Do not rely on TWCS/TTL (write-time ≠ event-time;
   replay rewrites old buckets);
 - drop unreachable MVCC generations (`attempt` / `epoch` not reachable
   from writer heads, serving heads, recovery bases, or retained
