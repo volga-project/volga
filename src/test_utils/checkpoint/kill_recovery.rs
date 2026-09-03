@@ -240,6 +240,11 @@ pub async fn run_checkpoint_sequential_failures(
         )
         .await?;
 
+        // Running does not mean replay reached the sink. Finish immediately and the
+        // oracle sees CP-cut records_generated with a short upsert map (one batch).
+        let sink_rows = cluster.storage().snapshot().await?.row_count();
+        wait_for_sink_progress(&cluster, sink_rows, timeouts.attempt_running).await?;
+
         harness_finish_pipeline(&cluster, &mut cursor, env, failure_count).await?;
 
         let snapshot = cluster.storage().snapshot().await?;
