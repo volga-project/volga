@@ -1,207 +1,156 @@
-<h2 align="center">Volga - Real-time data processing for modern AI/ML systems</h2>
+<h2 align="center">Volga — a unified real-time data engine</h2>
 <p align="center">
-  <img src="https://github.com/volga-project/volga/blob/master/.github/logo_white_bckgr_50_pct.png?raw=true" width="150" height="150">
+  <img src=".github/logo_white_bckgr_50_pct.png" width="150" height="150" alt="Volga">
 </p>
 
 <div align="center">
-  
-  <a href="">![GitHub License](https://img.shields.io/github/license/volga-project/volga)</a>
-  <a href="">![Static Badge](https://img.shields.io/badge/Volga-visit_blog-blue?link=https%3A%2F%2Fvolgaai.substack.com%2F)</a>
-  <a href="">![GitHub Created At](https://img.shields.io/github/created-at/volga-project/volga)</a>
-  <a href="">![GitHub last commit](https://img.shields.io/github/last-commit/volga-project/volga)</a>
-  <a href="">![GitHub top language](https://img.shields.io/github/languages/top/volga-project/volga)</a>
-  <a href="">![GitHub Issues or Pull Requests](https://img.shields.io/github/issues-raw/volga-project/volga)</a>
-  
+  <a href="https://github.com/volga-project/volga/blob/master/LICENSE"><img src="https://img.shields.io/github/license/volga-project/volga" alt="License"></a>
+  <a href="https://volgaai.substack.com/"><img src="https://img.shields.io/badge/Volga-visit_blog-blue" alt="Blog"></a>
+  <a href="https://github.com/volga-project/volga"><img src="https://img.shields.io/github/created-at/volga-project/volga" alt="Created"></a>
+  <a href="https://github.com/volga-project/volga"><img src="https://img.shields.io/github/last-commit/volga-project/volga" alt="Last commit"></a>
+  <a href="https://github.com/volga-project/volga"><img src="https://img.shields.io/github/languages/top/volga-project/volga" alt="Top language"></a>
+  <a href="https://github.com/volga-project/volga/issues"><img src="https://img.shields.io/github/issues-raw/volga-project/volga" alt="Issues"></a>
 </div>
 
-**[Volga](https://volgaai.substack.com/p/volga-a-rust-rewrite-of-a-real-time)** is a data processing engine aiming to be an alternative to general streaming engines like Flink and Spark as well as AI/ML oriented systems like [Chronon](https://github.com/airbnb/chronon) and [OpenMLDB](https://github.com/4paradigm/OpenMLDB). It is built in Rust using [Apache DataFusion](https://github.com/apache/datafusion) and [Apache Arrow](https://arrow.apache.org/). 
+**[Volga](https://volgaai.substack.com/)** is a ***split-path dataflow engine***: one SQL can run in **streaming**, **batch** (regular dataflow), or a serving-optimized **request** mode.
 
-# 🤯 What and why
+**Split-path request mode:** the planner cuts the dataflow graph into a **write path** (streaming workers maintain intermediate results in shared state) and a **read path** (request workers use those intermediate results to produce the final result on demand) — optimized read/write throughput and materialized state size, with a single query and no extra infrastructure.
 
-Modern AI/ML systems (recsys, fraud detection, personalization, search, RAG) rely on features computed from real-time/historical event streams:
-
-- Long continiously sliding window aggregations (`1h`, `7d`, `30d`, `1y`)  
-- Point-in-time correct data for batch and inference  
-- Consistent online + offline pipeline definitions and computation semantics
-- Real-time asynchronous data serving
-
-Today this typically requires combining multiple systems:
-- Streaming engine (Flink/Spark)  
-- Storage (Redis/S3)  
-- Serving layer  
-- Feature platforms (Chronon, OpenMLDB, etc.)  
-
-Volga replaces this with a **single engine**:
-
-- Streaming = write path  
-- Request = read path  
-- Batch = training  
-
+One system ([Rust](https://www.rust-lang.org/), [Apache Arrow](https://arrow.apache.org/), [Apache DataFusion](https://github.com/apache/datafusion)), consistent logic and execution semantics, SQL everywhere — no DSL.
 
 Check the *[blog](https://volgaai.substack.com)*, join *[Slack](https://join.slack.com/t/volga-project/shared_invite/zt-2vqyiyajo-zqgHZKXahQPuqqS~eD~A5w)*.
 
-# 📊 System Comparison
+# The problem
 
-| System          | Execution Model                                   | Storage/State                          | Pipeline Definitions                          | Window Agg Optimization        | Serving                                      |
-|-----------------|---------------------------------------------------|--------------------------------|----------------------------------------------|---------------------------------|----------------------------------------------|
-| **Volga**       | **native (streaming / batch / request); Rust**          | **native remote (S3 + SlateDB) + local cache**| **SQL + ML funcs** (`top`, `_cate`, etc.)    | ✅ **tiling (native in-state, incremental)**  | **native request-mode + queryable state**     |
-| Flink / Spark   | engines (streaming / batch); Java                       | local / checkpointed           | SQL                                          | ❌ none (recompute-heavy)        | external serving layer required              |
-| Chronon         | composition (Flink + Spark + Redis); Java/Scala               | local + external KV store      | DSL (feature pipelines)                      | ✅ tiling (via external materialization)  | external serving layer                       |
-| OpenMLDB        | DB + Spark (no native streaming engine); C++           | local (memory + disk)          | SQL + ML funcs                                          | ⚠️ limited (no tiling)           | built-in DB serving                          |
+Teams that run streaming pipelines almost always also need to **serve** the same logic (keyed lookup, often as-of a time), **backfill** it, and/or **derive offline data over history**. Today that means multiple systems: a stream processor (Flink / Spark Streaming), a serving store (Redis / KV), a batch engine, and often an orchestration layer (Chronon or custom) on top. Definitions and execution drift. Serving is a second product.
 
-# 🌳 Features
+That stitch is most painful on entity-centric workloads — fraud, payments, ads, recsys, search, RAG — long per-key windows where online must match offline, streaming vs point joins, and so on. Volga is one engine for all three: stream, serve, backfill.
 
-### Unified execution
-- Streaming, Batch, Request modes via single SQL query
-- Same operators and semantics  
+# Features
 
-### SQL + ML-oriented aggregations
-- `top(col, k)`  
-- `topn_frequency(col, k)`  
-- `top1_ratio(col)`  
-- `sum_cate`, `count_cate`, `avg_cate`  
-- `_where`, `_cate_where`  
+- **One SQL, three modes.** Streaming, request, and batch share operator logic. SQL compiles to a distributed dataflow graph running on **master + workers**, based on execution mode.
+- **Split-path request mode.** The same query is cut into a live write path (maintain intermediate results in shared remote state) and a live read path (precompiled residual). No Redis, no second pipeline, no second SQL over a materialized view.
+- **Exactly-once event-time processing.** Event-time watermarks and windows; Chandy-Lamport barrier snapshots for recovery.
+- **Stateless workers.** Compute–storage separation: workers do not own operator state. Operators talk to store contracts (load, atomic commit, coherent snapshot, checkpoint). Operator-specific state data structures allow for selective I/O for optimized execution; backends own partitioning, fencing, etc. Lose a worker, attach another to the same store. Checkpoints are small state versions, not a large local RocksDB dump moving over the network.
+- **Pluggable state backends.** Same contracts, different backends:
 
-### Long windows via tiling
-- Efficient long windows (weeks/months)  
-- Incremental tile-based aggregation in-state 
-- No recomputation  
+  | Backend                      | Role                                        |
+  | ---------------------------- | ------------------------------------------- |
+  | **In-memory**                | ships today; tests, local, in-process       |
+  | **Scylla** (Cassandra-class) | latency-sensitive scenarios                 |
+  | **SlateDB + object storage** | latency-tolerant scenarios with large state |
 
-### Request-time execution
-- Dataflow graph optimization to serve poin-in-time correct data
-- Queryable state allows serving data directly
-- No Redis / serving layer  
-- Built-in read/write compute separation  
+- **Optimized continuous sliding windows.** Tiles (window-specific intermediate results) store pre-computed aggregates, allowing for long (days, months, years) read/write-time aggregates without full recompute.
+- **Extended native aggregates.** First-class in SQL, not app UDFs: `top`, `topn_frequency`, `top1_ratio`, plus categorical / conditional forms (`sum_cate`, `count_where`, `sum_cate_where`, …).
+- **Kubernetes-native.** [kubevolga](kubevolga/README.md) Go operator and [`VolgaPipeline` CRD](kubevolga/config/crd/bases/volga.io_volgapipelines.yaml).
+- **Rust + Arrow + DataFusion.** Columnar execution. Runs on Tokio. Actor model with [kameo](https://github.com/tqwewe/kameo).
 
-### Remote state storage
-- Object storage-backed (SlateDB + S3, etc.)  
-- Partial state loading  
-- Cheap checkpointing  
+# Split-path
 
-### High performance
-- Rust + Tokio  
-- Apache Arrow  
-- Apache DataFusion
+Request mode is a **generic SQL write/read cut**: bindings (entity key, as-of T, request row) decide where the graph splits. Streaming and batch keep the full graph.
 
-# 🏠 Architecture
 
-Volga is a **distributed dataflow engine**:
+| Path      | Runtime           | When it runs                   | What it does                                                |
+| --------- | ----------------- | ------------------------------ | ----------------------------------------------------------- |
+| **Write** | streaming workers | continuously, as events arrive | ingest, publish intermediate results into the state backend |
+| **Read**  | request workers   | per request                    | residual eval against a coherent published snapshot         |
 
-- SQL → dataflow graph (via Apache DataFusion)  
-- Operators executed across workers  
-- State stored remotely (object storage via SlateDB)  
-- Columnar execution (Apache Arrow)  
 
-Core principles:
+**Today** the cut is a simple single window: the planner finds the top window, the window operator becomes state-only (write path), a window-request operator does the lookup (read path). **Tiles** are those intermediate results — an I/O and CPU optimization for long `RANGE` frames. Raw rows stay authoritative; tiles are not a second source of truth.
 
-- Consistent streaming, batch and request execution modes
-- SQL first - consistent pipeline definitions across all execution modes
-- Compute–storage separation - Remote State Storage
-- Read Path-Write Path compute separation - Optimal perf for real-time pipelines
-- Queryable state - No external KV stores
-- Request-mode execution - Serve same query as batch without external seving layer
-- Window Agg Optimizations (Tiling)
+![Split-path window query](./docs/readme_window_split.png)
 
-# 🚅 Example SQL Pipeline
+**Joins** are the next candidate. A general cut optimizer for an arbitrary SQL (using query shape, runtime key stats, freshness, and so on) is an area of research.
+
+# Compared with existing systems
+
+
+|                   | Model                                           | State                                                   | Definition                           | Long RANGE windows                              | Serving                                                     |
+| ----------------- | ----------------------------------------------- | ------------------------------------------------------- | ------------------------------------ | ----------------------------------------------- | ----------------------------------------------------------- |
+| **Volga**         | native streaming + request; batch planned; Rust | pluggable remote state, stateless workers               | one SQL                              | tiling in-state (raw + nested granules)         | native request path on the same query                       |
+| **Flink / Spark** | streaming / batch engines                       | local state + checkpoints (Flink ForSt is experimental) | SQL                                  | recompute-heavy for long continuous frames      | usually an external KV / queryable-state sidecar            |
+| **RisingWave**    | streaming DB, incremental MVs                   | cloud-native remote state                               | SQL, then a second query over the MV | incremental MVs, not tile-covered RANGE serving | a separate query over the MV; not a binding-time plan cut   |
+| **Chronon**       | Flink + Spark + KV composition                  | stream local + external KV                              | DSL (GroupBy / Join)                 | tiling via external materialization             | external serving layer                                      |
+| **OpenMLDB**      | memory DB + Spark; no native stream engine      | local tablets                                           | SQL                                  | limited (no tiling)                             | built-in request SQL; more pull than push                   |
+
+
+Volga is a general SQL dataflow (streaming and batch). Request is the same SQL with the plan split, so serving is not a second cluster. Compute–storage split means workers do not own the data.
+
+# Example SQL
+
+Stream it continuously, or serve the same query as point lookups:
 
 ```sql
 SELECT
-  u.user_id,
-
-  -- core aggregations
+  user_id,
   count(*) OVER w_short AS purchases_1h,
-  sum(o.amount) OVER w_long AS spent_30d,
-
-  -- top aggregations
-  top(o.product_id, 3) OVER w_long AS top_products_30d,
-  topn_frequency(o.product_id, 3) OVER w_long AS top_product_freq_30d,
-  top1_ratio(o.product_id) OVER w_long AS top_product_dominance_30d,
-
-  -- categorical aggregation
-  sum_cate(o.amount, o.product_type) OVER w_long AS spent_per_category,
-
-  -- conditional categorical aggregation
-  count_cate_where(o.product_id, o.product_type, o.product_type = 'ON_SALE') OVER w_short AS on_sale_count_1h
-
+  sum(amount) OVER w_long AS spent_30d,
+  top(product_id, 3) OVER w_long AS top_products_30d,
+  topn_frequency(product_id, 3) OVER w_long AS top_product_freq_30d,
+  sum_cate(amount, product_type) OVER w_long AS spent_per_category,
+  count_cate_where(product_id, product_type, product_type = 'ON_SALE')
+    OVER w_short AS on_sale_count_1h
+FROM events
 WINDOW
   w_short AS (
-    PARTITION BY u.user_id 
-    ORDER BY o.event_time 
-    RANGE BETWEEN INTERVAL '1 hour' PRECEDING AND CURRENT ROW 
+    PARTITION BY user_id
+    ORDER BY event_time
+    RANGE BETWEEN INTERVAL '1 hour' PRECEDING AND CURRENT ROW
   ),
   w_long AS (
-    PARTITION BY u.user_id 
-    ORDER BY o.event_time 
-    RANGE BETWEEN INTERVAL '30 day' PRECEDING AND CURRENT ROW 
+    PARTITION BY user_id
+    ORDER BY event_time
+    RANGE BETWEEN INTERVAL '30 day' PRECEDING AND CURRENT ROW
   )
-
-FROM users u
-JOIN orders o
-  ON u.user_id = o.buyer_id
 ```
 
-# 🧩 Running a Pipeline
+Besides standard SQL aggregates, Volga supports `top` / `topn_frequency` / `top1_ratio` and categorical / conditional forms (`sum_cate`, `count_where`, `sum_cate_where`, …).
 
-### Python (JSON spec + client)
+# Running a pipeline
 
-```python
-import json
-from volga.client import Client
+Pipelines are [JSON](docker/pipeline_spec.demo.json) (or a Kubernetes [`VolgaPipeline` CRD](kubevolga/config/samples/volga_v1alpha1_pipeline.yaml)).
 
-pipeline_spec = {
-    "name": "user_features",
-    "execution_mode": "request",
-    "query": """
-        SELECT
-          user_id,
-          count(*) OVER w AS purchases_1h,
-          sum(amount) OVER w AS spent_7d,
-          topn_frequency(category, 3) OVER w
-        WINDOW w as PARTITION BY user_id ORDER BY ts RANGE BETWEEN INTERVAL '1 hour' PRECEDING AND CURRENT ROW 
-        FROM events
-    """,
-    "sources": [
-        {
-            "name": "events",
-            "type": "kafka",
-            "config": {"topic": "events"}
+```json
+{
+  "execution_mode": "Streaming",
+  "parallelism": 2,
+  "sources": [
+    {
+      "table_name": "events",
+      "schema_json": {
+        "fields": [
+          { "name": "user_id", "type": { "name": "utf8" }, "nullable": false, "children": [] },
+          { "name": "event_time", "type": { "name": "timestamp", "unit": "MILLISECOND" }, "nullable": false, "children": [] }
+        ]
+      },
+      "source": {
+        "Kafka": {
+          "bootstrap_servers": "localhost:9092",
+          "topic": "events",
+          "offset": "Latest",
+          "poll_timeout_ms": 100
         }
-    ]
+      }
+    }
+  ],
+  "sql": "SELECT user_id, count(*) OVER w AS n FROM events WINDOW w AS (PARTITION BY user_id ORDER BY event_time RANGE BETWEEN INTERVAL '1 hour' PRECEDING AND CURRENT ROW)"
 }
-
-client = Client()
-client.create_pipeline(json.dumps(pipeline_spec))
-client.start_pipeline("user_features")
 ```
 
-### Rust (embedded)
-
+Embedded Rust uses `PipelineSpec` / `PipelineSpecBuilder` and `compile_logical_graph`:
 
 ```rust
-use volga::api::spec::pipeline::PipelineSpec;
-use volga::api::pipeline_context::PipelineContext;
+use volga::api::{compile_logical_graph, PipelineSpecBuilder};
 
-let spec = PipelineSpec {
-    name: "user_features".to_string(),
-    execution_mode: "batch".to_string(),
-    query: r#"
-        SELECT
-          user_id,
-          count(*) OVER w AS purchases_1h,
-          sum(amount) OVER w AS spent_7d,
-          topn_frequency(category, 3) OVER w
-        WINDOW w as PARTITION BY user_id ORDER BY ts RANGE BETWEEN INTERVAL '1 hour' PRECEDING AND CURRENT ROW
-        FROM events
-    "#.to_string(),
-    sources: vec![],
-    ..Default::default()
-};
+let spec = PipelineSpecBuilder::new()
+    .with_parallelism(2)
+    .sql("SELECT word, COUNT(*) as count FROM events GROUP BY word")
+    .build();
 
-let ctx = PipelineContext::try_from(spec)?;
-ctx.execute()?;
+let graph = compile_logical_graph(&spec, None);
 ```
 
-# 🚢 Installation
+# Installation
 
 ```bash
 git clone https://github.com/volga-project/volga
@@ -209,10 +158,9 @@ cd volga
 cargo build
 ```
 
-# 🧪 Testing
+# Testing
 
-Use [`scripts/test`](scripts/README.md) for the supported test profiles,
-Docker/Kube environment setup, targeted filters, and repeatable stress runs.
+Use [scripts/test](scripts/README.md) for profiles, Docker/Kube setup, filters, and stress runs.
 
 ```bash
 scripts/test default
@@ -220,26 +168,27 @@ scripts/test kube
 scripts/test stress --env kube --all --runs-per-shard 10 --shards 2 --fresh-cluster
 ```
 
-# 🙇 Running Locally
-
-Build the runtime image and start a demo master/worker pipeline:
+# Running locally
 
 ```bash
 docker build -t volga:latest .
 docker compose up
 ```
 
-This uses:
+Uses [`docker-compose.yaml`](docker-compose.yaml) and [`docker/pipeline_spec.demo.json`](docker/pipeline_spec.demo.json). Kubernetes: [kubevolga](kubevolga/README.md) operator + Kind + sample [`VolgaPipeline`](kubevolga/config/samples/volga_v1alpha1_pipeline.yaml) CR.
 
-- `docker-compose.yaml`
-- `docker/pipeline_spec.demo.json`
+# Status
 
-# 🧁 Roadmap
+Volga is in **active development**. Streaming and request execution, RANGE windows, tiling, master/worker, checkpoint failure/restore with in-memory state, Docker, and a Kubernetes operator are real. Scylla and SlateDB backends, batch mode, backfill, regular aggregations (`GROUP BY`), and joins are on the roadmap.
 
-- [ ] Remote state (production-ready)
+# Roadmap
+
+- [ ] Scylla backend
+- [ ] SlateDB + object storage backend
 - [ ] Batch execution mode
-- [ ] Batch Shuffle Service
-- [ ] Join operator
-- [ ] Kubernetes deployment
-- [ ] Python Client 
-- [ ] UI / dashboard
+- [ ] Backfills
+- [ ] Regular aggregations (`GROUP BY`)
+- [ ] Joins (streaming / temporal + request / lookup + cut optimizer)
+- [ ] Python client
+- [ ] UI
+- [ ] Proper testing (correctness via `sqllogictest`, deterministic simulation)
