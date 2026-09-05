@@ -1,4 +1,9 @@
-## Volga — a unified real-time data engine
+<h2 align="center">Volga — a unified real-time data engine</h2>
+<p align="center">
+  <img src=".github/logo_white_bckgr_50_pct.png" width="150" height="150" alt="Volga">
+</p>
+
+<p align="center">
 
 [![GitHub License](https://img.shields.io/github/license/volga-project/volga)](https://github.com/volga-project/volga/blob/master/LICENSE)
 [![Blog](https://img.shields.io/badge/Volga-visit_blog-blue)](https://volgaai.substack.com/)
@@ -6,6 +11,8 @@
 [![GitHub last commit](https://img.shields.io/github/last-commit/volga-project/volga)](https://github.com/volga-project/volga)
 [![GitHub top language](https://img.shields.io/github/languages/top/volga-project/volga)](https://github.com/volga-project/volga)
 [![GitHub Issues](https://img.shields.io/github/issues-raw/volga-project/volga)](https://github.com/volga-project/volga/issues)
+
+</p>
 
 **Volga** is a ***split-path dataflow engine***: one SQL can run in **streaming**, **batch** (regular dataflow), or a serving-optimized **request** mode.
 
