@@ -1,4 +1,4 @@
-<h2 align="center">Volga — a unified real-time data engine</h2>
+<h2 align="center">Volga - a unified real-time data engine</h2>
 <p align="center">
   <img src=".github/logo_white_bckgr_50_pct.png" width="150" height="150" alt="Volga">
 </p>
