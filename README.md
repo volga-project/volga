@@ -3,16 +3,14 @@
   <img src=".github/logo_white_bckgr_50_pct.png" width="150" height="150" alt="Volga">
 </p>
 
-<p align="center">
-
-[![GitHub License](https://img.shields.io/github/license/volga-project/volga)](https://github.com/volga-project/volga/blob/master/LICENSE)
-[![Blog](https://img.shields.io/badge/Volga-visit_blog-blue)](https://volgaai.substack.com/)
-[![GitHub Created At](https://img.shields.io/github/created-at/volga-project/volga)](https://github.com/volga-project/volga)
-[![GitHub last commit](https://img.shields.io/github/last-commit/volga-project/volga)](https://github.com/volga-project/volga)
-[![GitHub top language](https://img.shields.io/github/languages/top/volga-project/volga)](https://github.com/volga-project/volga)
-[![GitHub Issues](https://img.shields.io/github/issues-raw/volga-project/volga)](https://github.com/volga-project/volga/issues)
-
-</p>
+<div align="center">
+  <a href="https://github.com/volga-project/volga/blob/master/LICENSE"><img src="https://img.shields.io/github/license/volga-project/volga" alt="License"></a>
+  <a href="https://volgaai.substack.com/"><img src="https://img.shields.io/badge/Volga-visit_blog-blue" alt="Blog"></a>
+  <a href="https://github.com/volga-project/volga"><img src="https://img.shields.io/github/created-at/volga-project/volga" alt="Created"></a>
+  <a href="https://github.com/volga-project/volga"><img src="https://img.shields.io/github/last-commit/volga-project/volga" alt="Last commit"></a>
+  <a href="https://github.com/volga-project/volga"><img src="https://img.shields.io/github/languages/top/volga-project/volga" alt="Top language"></a>
+  <a href="https://github.com/volga-project/volga/issues"><img src="https://img.shields.io/github/issues-raw/volga-project/volga" alt="Issues"></a>
+</div>
 
 **[Volga](https://volgaai.substack.com/)** is a ***split-path dataflow engine***: one SQL can run in **streaming**, **batch** (regular dataflow), or a serving-optimized **request** mode.
 
