@@ -43,7 +43,7 @@ That stitch is most painful on entity-centric workloads — fraud, payments, ads
 - **Optimized continuous sliding windows.** Tiles (window-specific intermediate results) store pre-computed aggregates, allowing for long (days, months, years) read/write-time aggregates without full recompute.
 - **Extended native aggregates.** First-class in SQL, not app UDFs: `top`, `topn_frequency`, `top1_ratio`, plus categorical / conditional forms (`sum_cate`, `count_where`, `sum_cate_where`, …).
 - **Kubernetes-native.** [kubevolga](kubevolga/README.md) Go operator and [`VolgaPipeline` CRD](kubevolga/config/crd/bases/volga.io_volgapipelines.yaml).
-- **Rust + Arrow + DataFusion.** Columnar execution, Docker.
+- **Rust + Arrow + DataFusion.** Columnar execution.
 
 # Split-path
 
