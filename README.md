@@ -14,7 +14,7 @@
 
 </p>
 
-**Volga** is a ***split-path dataflow engine***: one SQL can run in **streaming**, **batch** (regular dataflow), or a serving-optimized **request** mode.
+**[Volga](https://volgaai.substack.com/)** is a ***split-path dataflow engine***: one SQL can run in **streaming**, **batch** (regular dataflow), or a serving-optimized **request** mode.
 
 **Split-path request mode:** the planner cuts the dataflow graph into a **write path** (streaming workers maintain intermediate results in shared state) and a **read path** (request workers use those intermediate results to produce the final result on demand) — optimized read/write throughput and materialized state size, with a single query and no extra infrastructure.
 
