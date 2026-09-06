@@ -30,9 +30,9 @@ struct RecordingWindowStore {
 }
 
 impl RecordingWindowStore {
-    fn new(inner: Arc<InMemWindowStore>) -> Self {
+    fn new(inner: Arc<InMemWindowStore>, namespace: StateNamespace) -> Self {
         Self {
-            client: inner.bind(StateNamespace::new(b"window_state")),
+            client: inner.bind(namespace),
             inner,
             raw_reads: Mutex::new(Vec::new()),
             tile_reads: Mutex::new(Vec::new()),
@@ -146,12 +146,13 @@ async fn recording_harness(sql: &str) -> (Harness, Arc<RecordingWindowStore>) {
         ..WindowSpec::default()
     };
     let inner = Arc::new(InMemWindowStore::new());
-    let recording = Arc::new(RecordingWindowStore::new(inner.clone()));
+    let namespace = StateNamespace::new(b"io_planning");
+    let recording = Arc::new(RecordingWindowStore::new(inner.clone(), namespace.clone()));
     let harness = Harness::with_operator_store(
         cfg,
         inner,
         recording.clone(),
-        StateNamespace::new(b"io_planning"),
+        namespace,
     )
     .await;
     (harness, recording)
@@ -273,14 +274,18 @@ async fn wro_uses_one_selective_tiled_load() {
   ) AS min_value
 FROM test_table"#;
     let tiling = TileConfig::new(vec![TimeGranularity::Minutes(1)]).unwrap();
-    let recording = Arc::new(RecordingWindowStore::new(Arc::new(InMemWindowStore::new())));
+    let namespace = StateNamespace::new(b"wro_io_planning");
+    let recording = Arc::new(RecordingWindowStore::new(
+        Arc::new(InMemWindowStore::new()),
+        namespace.clone(),
+    ));
     let mut h = WoWroHarness::with_stores(
         sql,
         Some(tiling),
         true,
         recording.clone(),
         recording.clone(),
-        StateNamespace::new(b"wro_io_planning"),
+        namespace,
         0,
     )
     .await;
