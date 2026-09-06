@@ -65,7 +65,7 @@ Request mode is a **generic SQL write/read cut**: bindings (entity key, as-of T,
 # Compared with existing systems
 
 
-|                   | Model                                           | State                                                   | Definition                           | Long RANGE windows                              | Serving                                                     |
+|                   | Model                                           | State                                                   | Definition                           | Long sliding windows                              | Serving                                                     |
 | ----------------- | ----------------------------------------------- | ------------------------------------------------------- | ------------------------------------ | ----------------------------------------------- | ----------------------------------------------------------- |
 | **Volga**         | native streaming + request; batch planned; Rust | pluggable remote state, stateless workers               | one SQL                              | tiling in-state (raw + nested granules)         | native request path on the same query                       |
 | **Flink / Spark** | streaming / batch engines                       | local state + checkpoints (Flink ForSt is experimental) | SQL                                  | recompute-heavy for long continuous frames      | usually an external KV / queryable-state sidecar            |
