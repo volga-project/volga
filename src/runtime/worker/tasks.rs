@@ -423,8 +423,9 @@ impl WorkerInner {
     pub(crate) async fn start_request_source_processor_if_needed(&mut self) {
         let config = self.config.clone();
         if let Some(request_runtime) = &self.request_source_processor_runtime {
-            let request_source_config = extract_request_source_config(&config.graph)
-                .expect("request_source_config should be set");
+            let request_source_config =
+                extract_request_source_config(&config.graph, &config.vertex_ids)
+                    .expect("request_source_config should be set");
             println!("[WORKER] Starting request source processor");
 
             let mut processor = RequestSourceProcessor::new(request_source_config);

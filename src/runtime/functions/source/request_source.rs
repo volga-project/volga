@@ -117,9 +117,17 @@ pub struct RequestSourceProcessor {
 }
 
 
-pub fn extract_request_source_config(graph: &ExecutionGraph) -> Option<RequestSourceConfig> {
-    for (_vertex_id, vertex) in graph.get_vertices() {
-        if let OperatorConfig::SourceConfig(SourceConfig::HttpRequestSourceConfig(config)) = &vertex.operator_config {
+pub fn extract_request_source_config(
+    graph: &ExecutionGraph,
+    vertex_ids: &[crate::runtime::VertexId],
+) -> Option<RequestSourceConfig> {
+    for vertex_id in vertex_ids {
+        let Some(vertex) = graph.get_vertex(vertex_id.as_ref()) else {
+            continue;
+        };
+        if let OperatorConfig::SourceConfig(SourceConfig::HttpRequestSourceConfig(config)) =
+            &vertex.operator_config
+        {
             return Some(config.clone());
         }
     }

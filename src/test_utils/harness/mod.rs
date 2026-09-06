@@ -20,7 +20,7 @@ pub(crate) use local::LocalCluster;
 
 use crate::api::spec::connectors::SinkSpec;
 use crate::api::spec::state::{OperatorStateBackendConfig, RequestStoreConfig};
-use crate::api::PipelineSpec;
+use crate::api::{ExecutionMode, PipelineSpec};
 use crate::runtime::consts::RuntimeConstsProfile;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,7 +138,11 @@ impl PipelineLaunchSpec {
 
 /// Install/replace the in-memory gRPC sink address, preserving any upsert keys already on the pipeline.
 /// Non-InMemory sinks (Count, Parquet, Request) are left unchanged.
+/// Request mode must not get a streaming sink — the planner attaches the request sink later.
 pub(crate) fn install_in_memory_sink(pipeline: &mut PipelineSpec, server_addr: impl Into<String>) {
+    if pipeline.execution_mode == ExecutionMode::Request {
+        return;
+    }
     let server_addr = server_addr.into();
     pipeline.sink = Some(match pipeline.sink.take() {
         Some(sink @ SinkSpec::InMemoryStorageGrpc { .. }) => sink.with_server_addr(server_addr),

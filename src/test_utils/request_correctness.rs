@@ -13,13 +13,13 @@ use serde_json::Value;
 
 use crate::api::spec::connectors::{RequestSourceSinkSpec, SinkSpec, SourceSpec, SourceSpecKind};
 use crate::api::spec::pipeline::ExecutionProfile;
-use crate::api::spec::state::{OperatorStateBackendConfig, RequestStoreConfig};
+use crate::api::spec::state::{OperatorStateBackendConfig, RequestStoreConfig, ScyllaConfig};
 use crate::api::{ExecutionMode, PipelineSpecBuilder, TaskWorkerAssignmentStrategyType};
 use crate::common::ports::gen_unique_grpc_port;
 use crate::runtime::functions::source::datagen_source::{DatagenSpec, FieldGenerator, KeyDistribution};
 use crate::runtime::observability::StreamTaskStatus;
 use crate::test_utils::harness::{
-    FaultAction, PipelineLaunchSpec, RuntimeEnv, VolgaCluster, WorkerKillMode,
+    PipelineLaunchSpec, RuntimeEnv, VolgaCluster, WorkerKillMode,
 };
 
 const WINDOW_SQL: &str = r#"
@@ -28,13 +28,14 @@ FROM events
 WINDOW w AS (
   PARTITION BY key
   ORDER BY event_time
-  RANGE BETWEEN INTERVAL '5000' MILLISECOND PRECEDING AND CURRENT ROW
+  RANGE BETWEEN INTERVAL '1' MINUTE PRECEDING AND CURRENT ROW
 )
 "#;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequestStoreBackend {
     InMemoryGrpc,
+    Scylla,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,7 +107,9 @@ pub async fn run_request_correctness_with_fault(
     let (assignment, worker_count, parallelism) = match env {
         RuntimeEnv::Local | RuntimeEnv::Kube => (
             TaskWorkerAssignmentStrategyType::OperatorPerWorker,
-            8,
+            // 7 groups: write Source/KeyBy/Window + read KeyBy/WRO/Projection
+            // + colocated request source/sink.
+            7,
             1,
         ),
         RuntimeEnv::Docker => (
@@ -159,6 +162,23 @@ pub async fn run_request_correctness_with_fault(
                 endpoint: placeholder,
             },
         ),
+        RequestStoreBackend::Scylla => {
+            let cfg = ScyllaConfig {
+                contact_points: std::env::var("VOLGA_SCYLLA_CONTACT")
+                    .unwrap_or_else(|_| "127.0.0.1:9042".to_string())
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .collect(),
+                keyspace: std::env::var("VOLGA_SCYLLA_KEYSPACE")
+                    .unwrap_or_else(|_| "volga_window".to_string()),
+                datacenter: std::env::var("VOLGA_SCYLLA_DC").ok(),
+                max_parallelism: Some(parallelism),
+            };
+            (
+                OperatorStateBackendConfig::Scylla(cfg.clone()),
+                RequestStoreConfig::Scylla(cfg),
+            )
+        }
     };
 
     let pipeline = PipelineSpecBuilder::new()
@@ -213,7 +233,10 @@ pub async fn run_request_correctness_with_fault(
 
     let expected = expected_sums(workload.num_keys, workload.events_per_key);
     let client = reqwest::Client::new();
-    let request_ts = 1_000 + ((rows as i64) - 1) * workload.step_ms;
+    // Query just after the last per-key event so every committed row is
+    // historical (request value 0 must not replace the last ingest).
+    let last_event_ts = 1_000 + ((workload.events_per_key as i64) - 1) * workload.step_ms;
+    let request_ts = last_event_ts + 1;
     let mut handles = Vec::new();
     for key_idx in 0..workload.num_keys {
         for _ in 0..workload.request_concurrency / workload.num_keys.max(1) {
@@ -277,18 +300,9 @@ fn pick_worker(cluster: &VolgaCluster, fault: RequestFault) -> Result<String> {
 }
 
 fn expected_sums(num_keys: usize, events_per_key: usize) -> Vec<f64> {
-    // Datagen Key+Increment is global increment, not per-key. Oracle is last
-    // committed SUM for the 5s frame at the last event time: all events for that
-    // key fall in-frame. Values are assigned in generation order.
-    let mut sums = vec![0.0; num_keys];
-    let mut value = 1.0;
-    for _ in 0..events_per_key {
-        for key in 0..num_keys {
-            sums[key] += value;
-            value += 1.0;
-        }
-    }
-    sums
+    // Per-key Increment starts at 1. Last per-key event is in-frame for all keys.
+    let per_key: f64 = (events_per_key * (events_per_key + 1)) as f64 / 2.0;
+    vec![per_key; num_keys]
 }
 
 async fn post_sum(client: &reqwest::Client, url: &str, key: &str, ts: i64) -> Result<(String, f64)> {
