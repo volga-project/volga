@@ -24,7 +24,8 @@ WINDOW w AS (
 async fn due_trigger_count(h: &Harness, through: i64) -> usize {
     let mut due = h
         .store
-        .stream_due(&h.namespace, None, Cursor::new(through, u64::MAX));
+        .bind(h.namespace.clone())
+        .stream_due(None, Cursor::new(through, u64::MAX));
     let mut count = 0;
     while let Some(page) = due.try_next().await.expect("due page") {
         count += page.into_iter().map(|work| work.triggers.len()).sum::<usize>();

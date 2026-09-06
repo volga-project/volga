@@ -111,7 +111,8 @@ impl Harness {
         store: Arc<InMemWindowStore>,
         namespace: StateNamespace,
     ) -> Self {
-        Self::with_operator_store(cfg, store.clone(), store, namespace).await
+        let operator_store = Arc::new(store.bind(namespace.clone()));
+        Self::with_operator_store(cfg, store, operator_store, namespace).await
     }
 
     pub async fn with_operator_store(
@@ -246,7 +247,7 @@ impl WoWroHarness {
             sql,
             tiling,
             exclude_current_row,
-            store.clone() as Arc<dyn WindowOperatorStore>,
+            Arc::new(store.bind(namespace.clone())) as Arc<dyn WindowOperatorStore>,
             store as Arc<dyn WindowRequestStore>,
             namespace,
             lateness,

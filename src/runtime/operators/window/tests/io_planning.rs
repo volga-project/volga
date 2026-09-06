@@ -86,29 +86,23 @@ impl WindowOperatorStore for RecordingWindowStore {
             .await
     }
 
-    fn stream_due<'a>(
-        &'a self,
-        namespace: &'a StateNamespace,
-        after: Option<Cursor>,
-        through: Cursor,
-    ) -> DueWorkStream<'a> {
-        self.inner.stream_due(namespace, after, through)
+    fn stream_due<'a>(&'a self, after: Option<Cursor>, through: Cursor) -> DueWorkStream<'a> {
+        self.inner.bind(StateNamespace::new(b"window_state")).stream_due(after, through)
     }
 
     async fn store_key_state(&self, partition: &PartitionKey, state: &KeyState) -> Result<()> {
         self.inner.store_key_state(partition, state).await
     }
 
-    async fn checkpoint(&self, namespace: &StateNamespace) -> Result<WindowBackendSnapshot> {
-        self.inner.checkpoint(namespace).await
+    async fn checkpoint(&self) -> Result<WindowBackendSnapshot> {
+        self.inner.bind(StateNamespace::new(b"window_state")).checkpoint().await
     }
 
-    async fn restore(
-        &self,
-        namespace: &StateNamespace,
-        restore: &WindowBackendSnapshot,
-    ) -> Result<()> {
-        self.inner.restore(namespace, restore).await
+    async fn restore(&self, restore: &WindowBackendSnapshot) -> Result<()> {
+        self.inner
+            .bind(StateNamespace::new(b"window_state"))
+            .restore(restore)
+            .await
     }
 }
 

@@ -166,7 +166,8 @@ async fn state_only_publishes_on_ingest_and_advances_on_watermark() {
     assert!(meta.evaluation.is_none());
     let mut due = h
         .store
-        .stream_due(&h.namespace, None, Cursor::new(2000, u64::MAX));
+        .bind(h.namespace.clone())
+        .stream_due(None, Cursor::new(2000, u64::MAX));
     assert!(due.try_next().await.expect("due page").is_none());
 
     let mut wro = open_wro(h.store.clone(), h.namespace.clone()).await;

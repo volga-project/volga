@@ -7,13 +7,13 @@ use arrow::array::{RecordBatch, TimestampMillisecondArray, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use serde::{Deserialize, Serialize};
 
-use crate::common::Key;
+use crate::common::{Key, KeyGroupRange};
 use crate::runtime::operators::window::config::WindowConfig;
 use crate::runtime::operators::window::metrics::collect_window_operator_snapshot;
 use crate::runtime::operators::window::model::{WindowId, WindowTrigger, WindowTriggerKind};
 use crate::runtime::operators::window::store::data::cursors_from_batch;
 use crate::runtime::operators::window::store::{
-    InMemWindowStore, PartitionKey, StateNamespace, WindowBackendSnapshot, WindowOperatorStore,
+    PartitionKey, StateNamespace, WindowBackendSnapshot, WindowOperatorStore,
 };
 use crate::runtime::operators::window::tile::{apply_batch_to_tiles, plan_update_runs_for_batch};
 use crate::runtime::operators::window::SEQ_NO_COLUMN_NAME;
@@ -31,6 +31,8 @@ pub const WATERMARK_UNSET: i64 = i64::MIN;
 pub struct WindowOperatorState {
     store: Arc<dyn WindowOperatorStore>,
     namespace: StateNamespace,
+    owned: KeyGroupRange,
+    max_parallelism: usize,
     task_id: VertexId,
     ts_column_index: usize,
     window_configs: Arc<BTreeMap<WindowId, WindowConfig>>,
@@ -56,10 +58,14 @@ impl WindowOperatorState {
         window_configs: Arc<BTreeMap<WindowId, WindowConfig>>,
         lateness_ms: i64,
         max_window_length_ms: i64,
+        owned: KeyGroupRange,
+        max_parallelism: usize,
     ) -> Self {
         Self {
             store,
             namespace,
+            owned,
+            max_parallelism,
             task_id,
             ts_column_index,
             window_configs,
@@ -67,6 +73,29 @@ impl WindowOperatorState {
             max_window_length_ms,
             watermark_frontier: AtomicI64::new(WATERMARK_UNSET),
         }
+    }
+
+    #[cfg(test)]
+    pub fn for_test(
+        store: Arc<dyn WindowOperatorStore>,
+        namespace: StateNamespace,
+        task_id: VertexId,
+        ts_column_index: usize,
+        window_configs: Arc<BTreeMap<WindowId, WindowConfig>>,
+        lateness_ms: i64,
+        max_window_length_ms: i64,
+    ) -> Self {
+        Self::new(
+            store,
+            namespace,
+            task_id,
+            ts_column_index,
+            window_configs,
+            lateness_ms,
+            max_window_length_ms,
+            KeyGroupRange::full(1),
+            1,
+        )
     }
 
     pub fn store(&self) -> &dyn WindowOperatorStore {
@@ -105,7 +134,7 @@ impl WindowOperatorState {
         Ok(WindowStateSnapshot {
             namespace: self.namespace.bytes.clone(),
             watermark_frontier: self.watermark_frontier(),
-            backend: self.store.checkpoint(&self.namespace).await?,
+            backend: self.store.checkpoint().await?,
         })
     }
 
@@ -114,7 +143,7 @@ impl WindowOperatorState {
             restore.namespace == self.namespace.bytes,
             "window checkpoint namespace does not match runtime namespace",
         );
-        self.store.restore(&self.namespace, &restore.backend).await?;
+        self.store.restore(&restore.backend).await?;
         self.watermark_frontier.store(
             restore.watermark_frontier.unwrap_or(WATERMARK_UNSET),
             Ordering::Release,
@@ -218,6 +247,14 @@ impl WindowOperatorState {
 impl OperatorTaskState for WindowOperatorState {
     fn state_namespace(&self) -> &StateNamespace {
         &self.namespace
+    }
+
+    fn key_group_range(&self) -> KeyGroupRange {
+        self.owned
+    }
+
+    fn max_parallelism(&self) -> usize {
+        self.max_parallelism
     }
 
     fn kind(&self) -> OperatorKind {

@@ -4,6 +4,7 @@ use datafusion::common::ScalarValue;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
+use crate::common::key_group::key_group_of;
 use crate::common::types::PipelineId;
 use crate::common::Key;
 use crate::runtime::utils;
@@ -43,7 +44,8 @@ impl Cursor {
     }
 }
 
-/// Logical namespace shared by WO and WRO.
+/// Operator state space shared by every WO task and by WRO.
+/// Bytes encode `(pipeline, owner operator)` only — not `task_index`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct StateNamespace {
     pub bytes: Vec<u8>,
@@ -56,13 +58,12 @@ impl StateNamespace {
         }
     }
 
-    pub fn for_operator_task(pipeline_id: &PipelineId, operator_id: &str, task_index: i32) -> Self {
+    pub fn for_operator(pipeline_id: &PipelineId, operator_id: &str) -> Self {
         let mut bytes = Vec::new();
         for component in [pipeline_id.0.as_bytes(), operator_id.as_bytes()] {
             bytes.extend_from_slice(&(component.len() as u64).to_be_bytes());
             bytes.extend_from_slice(component);
         }
-        bytes.extend_from_slice(&task_index.to_be_bytes());
         Self { bytes }
     }
 }
@@ -80,6 +81,18 @@ impl PartitionKey {
             namespace: namespace.bytes.clone(),
             business_key: key.to_bytes(),
         }
+    }
+
+    /// Hash prefix of [`Key::to_bytes`] (first 8 LE bytes).
+    pub fn key_hash(&self) -> u64 {
+        let mut buf = [0u8; 8];
+        let n = self.business_key.len().min(8);
+        buf[..n].copy_from_slice(&self.business_key[..n]);
+        u64::from_le_bytes(buf)
+    }
+
+    pub fn key_group(&self, max_parallelism: usize) -> usize {
+        key_group_of(self.key_hash(), max_parallelism)
     }
 }
 

@@ -208,12 +208,11 @@ impl OperatorTrait for WindowRequestOperator {
                 .state_owner_operator_id
                 .as_deref()
                 .expect("state owner operator id must be configured for WindowRequestOperator");
-            self.namespace = Some(StateNamespace::for_operator_task(
+            self.namespace = Some(StateNamespace::for_operator(
                 context
                     .pipeline_id()
                     .expect("pipeline id must be configured for WindowRequestOperator"),
                 owner_operator_id,
-                context.task_index(),
             ));
         }
         Ok(())

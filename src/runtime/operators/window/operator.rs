@@ -12,6 +12,7 @@ use async_trait::async_trait;
 use futures::{stream, StreamExt, TryStreamExt};
 
 use crate::common::key::Key;
+use crate::common::key_group::range_for_subtask;
 use crate::common::message::{Message, WatermarkMessage};
 use crate::common::MAX_WATERMARK_VALUE;
 use crate::runtime::checkpoint::{SerializedCheckpoint, SerializedRestore};
@@ -31,7 +32,9 @@ use crate::runtime::operators::window::metrics;
 use crate::runtime::operators::window::model::{Cursor, WindowId};
 use crate::runtime::operators::window::spec::WindowSpec;
 use crate::runtime::operators::window::state::{WindowOperatorState, WindowStateSnapshot};
-use crate::runtime::operators::window::store::{open_window_operator_store, StateNamespace};
+use crate::runtime::operators::window::store::{
+    open_window_operator_store, AttemptToken, StateNamespace, WindowStoreBinding, WriterId,
+};
 use crate::runtime::operators::window::TileConfig;
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::state::{OperatorTaskState, StateRegistry};
@@ -163,7 +166,7 @@ impl WindowOperator {
         namespace: StateNamespace,
     ) {
         assert!(self.state.is_none(), "window state is already configured");
-        self.state = Some(Arc::new(WindowOperatorState::new(
+        self.state = Some(Arc::new(WindowOperatorState::for_test(
             store,
             namespace,
             Arc::from("test-task"),
@@ -196,7 +199,7 @@ impl WindowOperator {
         let after = state
             .watermark_frontier()
             .map(|timestamp| Cursor::new(timestamp, u64::MAX));
-        let mut pages = state.store().stream_due(state.namespace(), after, through);
+        let mut pages = state.store().stream_due(after, through);
         while let Some(work) = pages.try_next().await.expect("stream due window triggers") {
             let page = stream::iter(work)
                 .map(|work| {
@@ -319,16 +322,36 @@ impl OperatorTrait for WindowOperator {
             let registry = context
                 .state_registry()
                 .expect("state registry must be configured for WindowOperator");
-            let store = open_window_operator_store(registry, backend)?;
-            let ns = StateNamespace::for_operator_task(
+            let ns = StateNamespace::for_operator(
                 context
                     .pipeline_id()
                     .expect("pipeline id must be configured for WindowOperator"),
                 context
                     .operator_id()
                     .expect("operator id must be configured for WindowOperator"),
-                context.task_index(),
             );
+            let max_parallelism = context.max_parallelism();
+            let parallelism = context.parallelism().max(1) as usize;
+            let task_index = context.task_index();
+            anyhow::ensure!(
+                task_index >= 0,
+                "window operator task_index must be >= 0, got {task_index}"
+            );
+            let owned = range_for_subtask(task_index as usize, parallelism, max_parallelism);
+            let attempt: AttemptToken = context
+                .job_config()
+                .get("execution_attempt_id")
+                .and_then(|v| v.as_u64())
+                .map(|id| id.to_be_bytes().to_vec())
+                .unwrap_or_default();
+            let binding = WindowStoreBinding {
+                namespace: ns.clone(),
+                max_parallelism,
+                owned,
+                writer_id: WriterId(context.vertex_id().as_bytes().to_vec()),
+                attempt,
+            };
+            let store = open_window_operator_store(registry, backend, &binding)?;
             let task_id = context.vertex_id_arc();
             let state = Arc::new(WindowOperatorState::new(
                 store,
@@ -338,6 +361,8 @@ impl OperatorTrait for WindowOperator {
                 self.window_configs.clone(),
                 self.lateness_ms,
                 self.max_window_length_ms,
+                owned,
+                max_parallelism,
             ));
             registry
                 .insert_task_state(task_id.clone(), state.clone() as Arc<dyn OperatorTaskState>);
