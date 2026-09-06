@@ -183,7 +183,7 @@ Volga is in **active development**. Streaming and request execution, RANGE windo
 
 # Roadmap
 
-- [ ] Scylla backend
+- [ ] [Scylla backend](https://github.com/volga-project/volga/pull/157/)
 - [ ] SlateDB + object storage backend
 - [ ] Batch execution mode
 - [ ] Backfills
