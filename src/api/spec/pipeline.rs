@@ -287,8 +287,19 @@ impl PipelineSpec {
                 ));
             }
         }
-        if self.execution_mode == ExecutionMode::Request && self.state.request_store.is_none() {
-            return Err("request mode requires a request store".to_string());
+        if self.execution_mode == ExecutionMode::Request {
+            if self.state.request_store.is_none() {
+                return Err("request mode requires a request store".to_string());
+            }
+            if matches!(
+                self.state.operator_backend,
+                OperatorStateBackendConfig::InMemory
+            ) {
+                return Err(
+                    "request mode cannot use process-local InMemory operator state; use Scylla or another shared backend"
+                        .to_string(),
+                );
+            }
         }
         if self.state.checkpoint.interval_ms.is_none() {
             return Err(

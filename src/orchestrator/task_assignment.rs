@@ -1,9 +1,20 @@
 use crate::api::PipelineSpec;
 use crate::orchestrator::orchestrator::WorkerNode;
 use crate::runtime::execution_graph::ExecutionGraph;
+use crate::runtime::operators::operator::OperatorConfig;
+use crate::runtime::operators::sink::sink_operator::SinkConfig;
+use crate::runtime::operators::source::source_operator::SourceConfig;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+
+fn is_request_io_operator(config: &OperatorConfig) -> bool {
+    matches!(
+        config,
+        OperatorConfig::SourceConfig(SourceConfig::HttpRequestSourceConfig(_))
+            | OperatorConfig::SinkConfig(SinkConfig::RequestSinkConfig)
+    )
+}
 
 /// Mapping from execution vertex ID (task ID) to worker node
 pub type TaskWorkerMapping = HashMap<String, WorkerNode>;
@@ -128,6 +139,25 @@ impl TaskWorkerAssignStrategy for OperatorPerWorkerStrategy {
                 .entry(operator_id)
                 .or_insert_with(Vec::new)
                 .push(vertex_id.as_ref().to_string());
+        }
+
+        // HTTP request source and request sink share a process-local processor.
+        let mut request_io_vertices = Vec::new();
+        operator_to_vertices.retain(|_, vertex_ids| {
+            let request_io = vertex_ids.iter().any(|vid| {
+                execution_graph
+                    .get_vertex(vid)
+                    .is_some_and(|v| is_request_io_operator(&v.operator_config))
+            });
+            if request_io {
+                request_io_vertices.extend(vertex_ids.iter().cloned());
+                false
+            } else {
+                true
+            }
+        });
+        if !request_io_vertices.is_empty() {
+            operator_to_vertices.insert("__request_io__".to_string(), request_io_vertices);
         }
 
         // Check if we have enough nodes for all operators
