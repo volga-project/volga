@@ -16,8 +16,11 @@ use crate::runtime::state::{OperatorStore, StateRegistry};
 
 use super::WindowData;
 
+mod codec;
+mod grpc;
 mod inmem;
 
+pub use grpc::{GrpcWindowStore, InMemoryGrpcStateServer, WindowStoreServiceImpl};
 pub use inmem::{InMemWindowStore, InMemWindowStoreClient};
 
 /// Job-level execution attempt stamped on published versions.
@@ -69,13 +72,29 @@ pub fn open_window_operator_store(
                 .clone();
             Ok(Arc::new(inmem.bind_assignment(binding.clone())) as Arc<dyn WindowOperatorStore>)
         }
+        OperatorStateBackendConfig::InMemoryGrpc { endpoint } => {
+            let endpoint = endpoint.clone();
+            let store = registry.get_or_insert_store(OperatorKind::Window, move |_session| {
+                Arc::new(GrpcWindowStore::connect(endpoint.clone())) as Arc<dyn OperatorStore>
+            });
+            let grpc = store
+                .as_any()
+                .downcast_ref::<GrpcWindowStore>()
+                .expect("window InMemoryGrpc store type")
+                .clone();
+            Ok(Arc::new(grpc.bind_assignment(binding.clone())) as Arc<dyn WindowOperatorStore>)
+        }
     }
 }
 
 pub async fn open_window_request_store(
     config: &RequestStoreConfig,
 ) -> Result<Arc<dyn WindowRequestStore>> {
-    match *config {}
+    match config {
+        RequestStoreConfig::InMemoryGrpc { endpoint } => {
+            Ok(Arc::new(GrpcWindowStore::connect(endpoint)) as Arc<dyn WindowRequestStore>)
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -91,7 +110,7 @@ pub enum WindowBackendSnapshot {
     Versioned { version: StateVersion },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DueWindowWork {
     pub partition: PartitionKey,
     pub key_state: KeyState,

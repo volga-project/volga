@@ -11,3 +11,7 @@ pub mod worker_service {
 pub mod in_memory_storage_service {
     tonic::include_proto!("in_memory_storage_service");
 }
+
+pub mod window_store_service {
+    tonic::include_proto!("window_store_service");
+}

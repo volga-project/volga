@@ -315,6 +315,14 @@ fn write_pipeline_manifest(
                 "upsert_key_columns": upsert_key_columns,
             }
         });
+        if let Some(backend) = pipeline_json.get_mut("state").and_then(|s| s.get_mut("operator_backend")) {
+            if backend.get("in_memory_grpc").is_some() || backend.get("InMemoryGrpc").is_some() {
+                *backend = serde_json::json!({ "in_memory_grpc": { "endpoint": server_addr } });
+            }
+        }
+        if let Some(store) = pipeline_json.get_mut("state").and_then(|s| s.get_mut("request_store")) {
+            *store = serde_json::json!({ "in_memory_grpc": { "endpoint": server_addr } });
+        }
     }
     manifest["spec"]["pipelineSpec"] = pipeline_json;
     manifest["spec"]["workers"]["replicas"] = Value::Number(worker_count.into());

@@ -1,7 +1,7 @@
 use std::env;
 
 use anyhow::Result;
-use volga::storage::InMemoryStorageServer;
+use volga::runtime::operators::window::store::InMemoryGrpcStateServer;
 
 async fn shutdown_signal() {
     #[cfg(unix)]
@@ -24,7 +24,7 @@ async fn shutdown_signal() {
 async fn main() -> Result<()> {
     let bind_addr =
         env::var("VOLGA_TEST_STORAGE_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:50071".to_string());
-    let mut storage_server = InMemoryStorageServer::new();
+    let mut storage_server = InMemoryGrpcStateServer::new();
     storage_server.start(&bind_addr).await?;
     println!("[VOLGA_TEST_STORAGE] listening on {}", bind_addr);
     shutdown_signal().await;

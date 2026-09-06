@@ -1,6 +1,7 @@
 pub mod master;
 pub mod storage;
 pub mod stubs;
+pub mod window_store;
 pub mod worker;
 
 use std::net::SocketAddr;
@@ -84,12 +85,14 @@ impl_client_limits! {
     stubs::master_service::master_service_client::MasterServiceClient<Channel>,
     stubs::worker_service::worker_service_client::WorkerServiceClient<Channel>,
     stubs::in_memory_storage_service::in_memory_storage_service_client::InMemoryStorageServiceClient<Channel>,
+    stubs::window_store_service::window_store_service_client::WindowStoreServiceClient<Channel>,
 }
 
 impl_server_limits! {
     stubs::master_service::master_service_server::MasterServiceServer<T>,
     stubs::worker_service::worker_service_server::WorkerServiceServer<T>,
     stubs::in_memory_storage_service::in_memory_storage_service_server::InMemoryStorageServiceServer<T>,
+    stubs::window_store_service::window_store_service_server::WindowStoreServiceServer<T>,
 }
 
 fn normalize_endpoint(addr: &str) -> String {

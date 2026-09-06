@@ -13,7 +13,8 @@ use crate::orchestrator::orchestrator::{MasterOrchestrator, WorkerOrchestrator};
 use crate::runtime::master::server::MasterServer;
 use crate::test_utils::harness::WorkerKillMode;
 use crate::runtime::worker_server::WorkerServer;
-use crate::storage::{InMemoryStorageClient, InMemoryStorageServer, InMemoryStorageSnapshot};
+use crate::runtime::operators::window::store::InMemoryGrpcStateServer;
+use crate::storage::{InMemoryStorageClient, InMemoryStorageSnapshot};
 
 const WORKER_TASK_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 const WORKER_CRASH_TIMEOUT: Duration = Duration::from_secs(5);
@@ -22,13 +23,13 @@ const WORKER_RUNTIME_THREADS: usize = 2;
 
 pub(super) struct LocalStorage {
     pub(super) addr: String,
-    server: InMemoryStorageServer,
+    server: InMemoryGrpcStateServer,
 }
 
 impl LocalStorage {
     pub(super) async fn start() -> Result<Self> {
         let addr = format!("127.0.0.1:{}", gen_unique_grpc_port());
-        let mut server = InMemoryStorageServer::new();
+        let mut server = InMemoryGrpcStateServer::new();
         server.start(&addr).await?;
         wait_until_addr_listening(&addr, ADDR_WAIT_TIMEOUT)
             .await

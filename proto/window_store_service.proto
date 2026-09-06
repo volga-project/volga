@@ -1,0 +1,104 @@
+syntax = "proto3";
+
+package window_store_service;
+
+service WindowStoreService {
+  rpc LoadKeyState(PartitionMsg) returns (BytesReply);
+  rpc LoadRaw(LoadRawReq) returns (BatchesReply);
+  rpc LoadTiles(LoadTilesReq) returns (BytesReply);
+  rpc CommitEvents(CommitEventsReq) returns (EmptyReply);
+  rpc StreamDuePage(StreamDuePageReq) returns (StreamDuePageReply);
+  rpc StoreKeyState(StoreKeyStateReq) returns (EmptyReply);
+  rpc Checkpoint(BindingMsg) returns (BytesReply);
+  rpc Restore(RestoreReq) returns (EmptyReply);
+  rpc LoadWindowData(LoadWindowDataReq) returns (WindowDataReply);
+  rpc Maintain(MaintainReq) returns (EmptyReply);
+}
+
+message BindingMsg {
+  bytes namespace = 1;
+  uint64 max_parallelism = 2;
+  uint64 range_start = 3;
+  uint64 range_end = 4;
+  bytes writer_id = 5;
+  bytes attempt = 6;
+}
+
+message PartitionMsg {
+  bytes namespace = 1;
+  bytes business_key = 2;
+}
+
+message LoadRawReq {
+  PartitionMsg partition = 1;
+  bytes raw_runs = 2;
+}
+
+message LoadTilesReq {
+  PartitionMsg partition = 1;
+  bytes tile_runs = 2;
+}
+
+message CommitEventsReq {
+  PartitionMsg partition = 1;
+  uint64 ts_column_index = 2;
+  bytes events = 3;
+  bytes tiles = 4;
+  bytes key_state = 5;
+  bytes triggers = 6;
+}
+
+message StreamDuePageReq {
+  BindingMsg binding = 1;
+  bytes after = 2;
+  int64 through_ts = 3;
+  uint64 through_seq = 4;
+  bytes resume_after = 5;
+}
+
+message StreamDuePageReply {
+  bytes work = 1;
+  bytes resume_after = 2;
+  bool done = 3;
+}
+
+message StoreKeyStateReq {
+  PartitionMsg partition = 1;
+  bytes key_state = 2;
+}
+
+message RestoreReq {
+  BindingMsg binding = 1;
+  bytes snapshot = 2;
+}
+
+message LoadWindowDataReq {
+  PartitionMsg partition = 1;
+  bytes raw_runs = 2;
+  bytes tile_runs = 3;
+}
+
+message WindowDataReply {
+  repeated bytes raw_batches = 1;
+  bytes tiles = 2;
+}
+
+message MaintainReq {
+  bytes namespace = 1;
+  uint64 range_start = 2;
+  uint64 range_end = 3;
+  uint64 max_parallelism = 4;
+  int64 watermark = 5;
+  int64 floor = 6;
+  string task_id = 7;
+}
+
+message BatchesReply {
+  repeated bytes batches = 1;
+}
+
+message BytesReply {
+  bytes payload = 1;
+}
+
+message EmptyReply {}

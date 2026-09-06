@@ -158,6 +158,10 @@ impl WindowData {
         &self.raw_batches
     }
 
+    pub fn tile_map(&self) -> &TileMap {
+        &self.tile_map
+    }
+
     pub fn for_window(
         &self,
         window_id: WindowId,

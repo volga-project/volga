@@ -5,6 +5,7 @@ pub mod common;
 pub mod checkpoint;
 pub mod harness;
 pub mod launch_specs;
+pub mod request_correctness;
 #[cfg(test)]
 pub mod many_to_many_harness;
 #[cfg(test)]

@@ -15,11 +15,14 @@ pub enum CheckpointStoreConfig {
 pub enum OperatorStateBackendConfig {
     #[default]
     InMemory,
+    InMemoryGrpc { endpoint: String },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub enum RequestStoreConfig {}
+pub enum RequestStoreConfig {
+    InMemoryGrpc { endpoint: String },
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]

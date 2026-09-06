@@ -19,6 +19,7 @@ pub(crate) use kube::KubeCluster;
 pub(crate) use local::LocalCluster;
 
 use crate::api::spec::connectors::SinkSpec;
+use crate::api::spec::state::{OperatorStateBackendConfig, RequestStoreConfig};
 use crate::api::PipelineSpec;
 use crate::runtime::consts::RuntimeConstsProfile;
 
@@ -152,4 +153,29 @@ pub(crate) fn pipeline_needs_in_memory_store(pipeline: &PipelineSpec) -> bool {
         .as_ref()
         .map(SinkSpec::needs_in_memory_store)
         .unwrap_or(true)
+        || pipeline_needs_inmem_grpc_state(pipeline)
+}
+
+pub(crate) fn pipeline_needs_inmem_grpc_state(pipeline: &PipelineSpec) -> bool {
+    matches!(
+        pipeline.state.operator_backend,
+        OperatorStateBackendConfig::InMemoryGrpc { .. }
+    ) || matches!(
+        pipeline.state.request_store,
+        Some(RequestStoreConfig::InMemoryGrpc { .. })
+    )
+}
+
+pub(crate) fn install_in_memory_grpc_state(pipeline: &mut PipelineSpec, endpoint: impl Into<String>) {
+    let endpoint = endpoint.into();
+    if let OperatorStateBackendConfig::InMemoryGrpc { endpoint: dest } =
+        &mut pipeline.state.operator_backend
+    {
+        *dest = endpoint.clone();
+    }
+    if let Some(RequestStoreConfig::InMemoryGrpc { endpoint: dest }) =
+        &mut pipeline.state.request_store
+    {
+        *dest = endpoint;
+    }
 }

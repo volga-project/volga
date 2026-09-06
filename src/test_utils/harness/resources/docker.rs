@@ -210,6 +210,7 @@ impl DockerClusterResources {
         let mut spec = launch.pipeline;
         if super::pipeline_needs_in_memory_store(&spec) {
             super::install_in_memory_sink(&mut spec, "http://storage:50071");
+            super::install_in_memory_grpc_state(&mut spec, "http://storage:50071");
         }
         Ok(Self {
             resources: Some(DockerResources::start(

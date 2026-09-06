@@ -171,14 +171,14 @@ impl TimeGranularity {
 }
 
 /// Raw segment: half-open `[from, to)`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RawRun {
     pub from: Cursor,
     pub to: Cursor,
 }
 
 /// Coalesced tile range at one granularity: half-open `[start_ts, end_ts_exclusive)`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TileRun {
     pub granularity: TimeGranularity,
     pub start_ts: Timestamp,

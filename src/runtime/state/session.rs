@@ -17,7 +17,9 @@ impl StateSessionHandle {
     /// In-memory backends do not need a session (`Ok(None)`).
     pub fn connect(backend: &OperatorStateBackendConfig) -> Result<Option<Self>> {
         match backend {
-            OperatorStateBackendConfig::InMemory => Ok(None),
+            OperatorStateBackendConfig::InMemory | OperatorStateBackendConfig::InMemoryGrpc { .. } => {
+                Ok(None)
+            }
         }
     }
 }

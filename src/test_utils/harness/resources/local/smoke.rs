@@ -135,6 +135,7 @@ impl LocalClusterResources {
         let storage = if super::super::pipeline_needs_in_memory_store(&spec) {
             let storage = LocalStorage::start().await?;
             super::super::install_in_memory_sink(&mut spec, storage.endpoint());
+            super::super::install_in_memory_grpc_state(&mut spec, storage.endpoint());
             Some(storage)
         } else {
             None
