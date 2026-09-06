@@ -24,7 +24,7 @@ Check the *[blog](https://volgaai.substack.com)*, join *[Slack](https://join.sla
 
 Teams that run streaming pipelines almost always also need to **serve** the same logic (keyed lookup, often as-of a time), **backfill** it, and/or **derive offline data over history**. Today that means multiple systems: a stream processor (Flink / Spark Streaming), a serving store (Redis / KV), a batch engine, and often an orchestration layer (Chronon or custom) on top. Definitions and execution drift. Serving is a second product.
 
-That stitch is most painful on entity-centric workloads — fraud, payments, ads, recsys, search, RAG — long per-key windows where online must match offline, streaming vs point joins, and so on. Volga is one engine for all three: stream, serve, backfill.
+That stitch is most painful on entity-centric workloads — fraud, payments, ads, recsys, search, RAG — long per-key windows where online must match offline, streaming vs point joins, sub-optimal freshness and latency and so on. Volga is one engine for all three: stream, serve, backfill.
 
 # Features
 
