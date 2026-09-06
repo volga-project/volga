@@ -179,7 +179,7 @@ Uses [`docker-compose.yaml`](docker-compose.yaml) and [`docker/pipeline_spec.dem
 
 # Status
 
-Volga is in **active development**. Streaming and request execution, RANGE windows, tiling, master/worker, checkpoint failure/restore with in-memory state, Docker, and a Kubernetes operator are real. Scylla and SlateDB backends, batch mode, backfill, regular aggregations (`GROUP BY`), and joins are on the roadmap.
+Volga is in **active development**. Streaming and request execution, RANGE windows, tiling, master/worker, checkpoint failure/restore with in-memory state, event-time processing with watermarks, Kubernetes operator are real. Scylla and SlateDB backends, batch mode, backfill, regular aggregations (`GROUP BY`) and joins are on the roadmap.
 
 # Roadmap
 
@@ -187,8 +187,9 @@ Volga is in **active development**. Streaming and request execution, RANGE windo
 - [ ] SlateDB + object storage backend
 - [ ] Batch execution mode
 - [ ] Backfills
-- [ ] Regular aggregations (`GROUP BY`)
-- [ ] Joins (streaming / temporal + request / lookup + cut optimizer)
+- [ ] Regular aggregations (`GROUP BY` - streaming + request + split optimizer)
+- [ ] Joins (streaming / temporal + request / lookup + split optimizer)
+- [ ] Generic split optimizer for arbitrary SQL
 - [ ] Python client
 - [ ] UI
 - [ ] Proper testing (correctness via `sqllogictest`, deterministic simulation)
