@@ -1174,7 +1174,8 @@ mod tests {
             .await
             .unwrap();
 
-        let mut due = bound(&store, &namespace).stream_due(
+        let client = bound(&store, &namespace);
+        let mut due = client.stream_due(
             Some(Cursor::new(9, u64::MAX)),
             Cursor::new(299, u64::MAX),
         );
@@ -1326,7 +1327,8 @@ mod tests {
             .unwrap();
 
         assert_meta(&restored.load_key_state(&partition).await.unwrap(), &meta);
-        let mut due = bound(&restored, &namespace).stream_due(
+        let restored_client = bound(&restored, &namespace);
+        let mut due = restored_client.stream_due(
             Some(Cursor::new(1_000, u64::MAX)),
             Cursor::new(2_000, u64::MAX),
         );

@@ -23,6 +23,7 @@ use crate::runtime::operators::window::{TileConfig, TimeGranularity};
 #[derive(Debug)]
 struct RecordingWindowStore {
     inner: Arc<InMemWindowStore>,
+    client: crate::runtime::operators::window::store::InMemWindowStoreClient,
     raw_reads: Mutex<Vec<Vec<RawRun>>>,
     tile_reads: Mutex<Vec<Vec<TileRun>>>,
     request_reads: Mutex<Vec<(Vec<RawRun>, Vec<TileRun>)>>,
@@ -31,6 +32,7 @@ struct RecordingWindowStore {
 impl RecordingWindowStore {
     fn new(inner: Arc<InMemWindowStore>) -> Self {
         Self {
+            client: inner.bind(StateNamespace::new(b"window_state")),
             inner,
             raw_reads: Mutex::new(Vec::new()),
             tile_reads: Mutex::new(Vec::new()),
@@ -87,7 +89,7 @@ impl WindowOperatorStore for RecordingWindowStore {
     }
 
     fn stream_due<'a>(&'a self, after: Option<Cursor>, through: Cursor) -> DueWorkStream<'a> {
-        self.inner.bind(StateNamespace::new(b"window_state")).stream_due(after, through)
+        self.client.stream_due(after, through)
     }
 
     async fn store_key_state(&self, partition: &PartitionKey, state: &KeyState) -> Result<()> {
@@ -95,14 +97,11 @@ impl WindowOperatorStore for RecordingWindowStore {
     }
 
     async fn checkpoint(&self) -> Result<WindowBackendSnapshot> {
-        self.inner.bind(StateNamespace::new(b"window_state")).checkpoint().await
+        self.client.checkpoint().await
     }
 
     async fn restore(&self, restore: &WindowBackendSnapshot) -> Result<()> {
-        self.inner
-            .bind(StateNamespace::new(b"window_state"))
-            .restore(restore)
-            .await
+        self.client.restore(restore).await
     }
 }
 

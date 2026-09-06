@@ -164,10 +164,8 @@ async fn state_only_publishes_on_ingest_and_advances_on_watermark() {
     let partition = PartitionKey::new(&h.namespace, &key("A"));
     let meta = h.store.load_key_state(&partition).await.expect("state");
     assert!(meta.evaluation.is_none());
-    let mut due = h
-        .store
-        .bind(h.namespace.clone())
-        .stream_due(None, Cursor::new(2000, u64::MAX));
+    let client = h.store.bind(h.namespace.clone());
+    let mut due = client.stream_due(None, Cursor::new(2000, u64::MAX));
     assert!(due.try_next().await.expect("due page").is_none());
 
     let mut wro = open_wro(h.store.clone(), h.namespace.clone()).await;
