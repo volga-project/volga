@@ -27,33 +27,33 @@ pub type AttemptToken = Vec<u8>;
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct WriterId(pub Vec<u8>);
 
-/// Per-task binding created at WO `open`. Trait methods do not take namespace or range.
+/// Per-task scope created at WO `open`. Trait methods do not take namespace or range.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WindowStoreBinding {
+pub struct WindowStoreTaskScope {
     pub namespace: StateNamespace,
     pub max_parallelism: usize,
-    pub owned: KeyGroupRange,
+    pub key_group_range: KeyGroupRange,
     pub writer_id: WriterId,
     pub attempt: AttemptToken,
 }
 
-impl WindowStoreBinding {
+impl WindowStoreTaskScope {
     pub fn for_test(namespace: StateNamespace) -> Self {
         Self {
             namespace,
             max_parallelism: 1,
-            owned: KeyGroupRange::full(1),
+            key_group_range: KeyGroupRange::full(1),
             writer_id: WriterId(Vec::new()),
             attempt: Vec::new(),
         }
     }
 }
 
-/// Op-specific open: share the physical backend via [`StateRegistry`], return a bound client.
+/// Op-specific open: share the physical backend via [`StateRegistry`], return a per-task client.
 pub fn open_window_operator_store(
     registry: &StateRegistry,
     config: &OperatorStateBackendConfig,
-    binding: &WindowStoreBinding,
+    scope: &WindowStoreTaskScope,
 ) -> Result<Arc<dyn WindowOperatorStore>> {
     match config {
         OperatorStateBackendConfig::InMemory => {
@@ -67,7 +67,7 @@ pub fn open_window_operator_store(
                 .downcast_ref::<InMemWindowStore>()
                 .expect("window InMem store type")
                 .clone();
-            Ok(Arc::new(inmem.bind_assignment(binding.clone())) as Arc<dyn WindowOperatorStore>)
+            Ok(Arc::new(inmem.client(scope.clone())) as Arc<dyn WindowOperatorStore>)
         }
     }
 }

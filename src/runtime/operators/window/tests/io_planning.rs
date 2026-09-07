@@ -11,6 +11,7 @@ use crate::runtime::operators::window::spec::WindowSpec;
 use crate::runtime::operators::window::store::{
     DueWorkStream, InMemWindowStore, KeyState, PartitionKey, StateNamespace, TileMap,
     WindowBackendSnapshot, WindowData, WindowOperatorStore, WindowRequestStore,
+    WindowStoreTaskScope,
 };
 use std::any::Any;
 
@@ -32,7 +33,7 @@ struct RecordingWindowStore {
 impl RecordingWindowStore {
     fn new(inner: Arc<InMemWindowStore>, namespace: StateNamespace) -> Self {
         Self {
-            client: inner.bind(namespace),
+            client: inner.client(WindowStoreTaskScope::for_test(namespace)),
             inner,
             raw_reads: Mutex::new(Vec::new()),
             tile_reads: Mutex::new(Vec::new()),

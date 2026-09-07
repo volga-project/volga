@@ -7,7 +7,9 @@ use crate::runtime::operators::operator::{OperatorTrait, StreamOperator, VecOutp
 use crate::runtime::operators::window::model::{Cursor, RawRun, TileRun};
 use crate::runtime::operators::window::operator::{WindowOperatorConfig, WindowOutputMode};
 use crate::runtime::operators::window::spec::WindowSpec;
-use crate::runtime::operators::window::store::{PartitionKey, WindowOperatorStore};
+use crate::runtime::operators::window::store::{
+    PartitionKey, WindowOperatorStore, WindowStoreTaskScope,
+};
 use crate::test_utils::window::harness::{
     batch, key, watermark_message, window_exec_from_sql, Harness,
 };
@@ -22,7 +24,7 @@ WINDOW w AS (
 )"#;
 
 async fn due_trigger_count(h: &Harness, through: i64) -> usize {
-    let client = h.store.bind(h.namespace.clone());
+    let client = h.store.client(WindowStoreTaskScope::for_test(h.namespace.clone()));
     let mut due = client.stream_due(None, Cursor::new(through, u64::MAX));
     let mut count = 0;
     while let Some(page) = due.try_next().await.expect("due page") {

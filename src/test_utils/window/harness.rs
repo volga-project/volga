@@ -28,6 +28,7 @@ use crate::runtime::operators::window::request::{
 use crate::runtime::operators::window::spec::WindowSpec;
 use crate::runtime::operators::window::store::{
     InMemWindowStore, StateNamespace, WindowOperatorStore, WindowRequestStore,
+    WindowStoreTaskScope,
 };
 use crate::runtime::operators::window::TileConfig;
 use crate::runtime::runtime_context::RuntimeContext;
@@ -111,7 +112,7 @@ impl Harness {
         store: Arc<InMemWindowStore>,
         namespace: StateNamespace,
     ) -> Self {
-        let operator_store = Arc::new(store.bind(namespace.clone()));
+        let operator_store = Arc::new(store.client(WindowStoreTaskScope::for_test(namespace.clone())));
         Self::with_operator_store(cfg, store, operator_store, namespace).await
     }
 
@@ -247,7 +248,8 @@ impl WoWroHarness {
             sql,
             tiling,
             exclude_current_row,
-            Arc::new(store.bind(namespace.clone())) as Arc<dyn WindowOperatorStore>,
+            Arc::new(store.client(WindowStoreTaskScope::for_test(namespace.clone())))
+                as Arc<dyn WindowOperatorStore>,
             store as Arc<dyn WindowRequestStore>,
             namespace,
             lateness,

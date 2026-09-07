@@ -31,7 +31,7 @@ pub const WATERMARK_UNSET: i64 = i64::MIN;
 pub struct WindowOperatorState {
     store: Arc<dyn WindowOperatorStore>,
     namespace: StateNamespace,
-    owned: KeyGroupRange,
+    key_group_range: KeyGroupRange,
     max_parallelism: usize,
     task_id: VertexId,
     ts_column_index: usize,
@@ -58,13 +58,13 @@ impl WindowOperatorState {
         window_configs: Arc<BTreeMap<WindowId, WindowConfig>>,
         lateness_ms: i64,
         max_window_length_ms: i64,
-        owned: KeyGroupRange,
+        key_group_range: KeyGroupRange,
         max_parallelism: usize,
     ) -> Self {
         Self {
             store,
             namespace,
-            owned,
+            key_group_range,
             max_parallelism,
             task_id,
             ts_column_index,
@@ -250,7 +250,7 @@ impl OperatorTaskState for WindowOperatorState {
     }
 
     fn key_group_range(&self) -> KeyGroupRange {
-        self.owned
+        self.key_group_range
     }
 
     fn max_parallelism(&self) -> usize {

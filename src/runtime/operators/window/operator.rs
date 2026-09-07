@@ -33,7 +33,7 @@ use crate::runtime::operators::window::model::{Cursor, WindowId};
 use crate::runtime::operators::window::spec::WindowSpec;
 use crate::runtime::operators::window::state::{WindowOperatorState, WindowStateSnapshot};
 use crate::runtime::operators::window::store::{
-    open_window_operator_store, AttemptToken, StateNamespace, WindowStoreBinding, WriterId,
+    open_window_operator_store, AttemptToken, StateNamespace, WindowStoreTaskScope, WriterId,
 };
 use crate::runtime::operators::window::TileConfig;
 use crate::runtime::runtime_context::RuntimeContext;
@@ -337,21 +337,22 @@ impl OperatorTrait for WindowOperator {
                 task_index >= 0,
                 "window operator task_index must be >= 0, got {task_index}"
             );
-            let owned = range_for_subtask(task_index as usize, parallelism, max_parallelism);
+            let key_group_range =
+                range_for_subtask(task_index as usize, parallelism, max_parallelism);
             let attempt: AttemptToken = context
                 .job_config()
                 .get("execution_attempt_id")
                 .and_then(|v| v.as_u64())
                 .map(|id| id.to_be_bytes().to_vec())
                 .unwrap_or_default();
-            let binding = WindowStoreBinding {
+            let scope = WindowStoreTaskScope {
                 namespace: ns.clone(),
                 max_parallelism,
-                owned,
+                key_group_range,
                 writer_id: WriterId(context.vertex_id().as_bytes().to_vec()),
                 attempt,
             };
-            let store = open_window_operator_store(registry, backend, &binding)?;
+            let store = open_window_operator_store(registry, backend, &scope)?;
             let task_id = context.vertex_id_arc();
             let state = Arc::new(WindowOperatorState::new(
                 store,
@@ -361,7 +362,7 @@ impl OperatorTrait for WindowOperator {
                 self.window_configs.clone(),
                 self.lateness_ms,
                 self.max_window_length_ms,
-                owned,
+                key_group_range,
                 max_parallelism,
             ));
             registry
