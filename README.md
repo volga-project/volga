@@ -30,8 +30,8 @@ That stitch is most painful on entity-centric workloads — fraud, payments, ads
 
 - **One SQL, three modes.** Streaming, request, and batch share operator logic. SQL compiles to a distributed dataflow graph running on **master + workers**, based on execution mode.
 - **Split-path request mode.** The same query is cut into a live write path (maintain intermediate results in shared remote state) and a live read path (precompiled residual). No Redis, no second pipeline, no second SQL over a materialized view.
-- **Exactly-once event-time processing.** Event-time watermarks and windows; Chandy-Lamport barrier snapshots for recovery.
-- **Stateless workers.** Compute–storage separation: workers do not own operator state. Operators talk to store contracts (load, atomic commit, coherent snapshot, checkpoint). Operator-specific state data structures allow for selective I/O for optimized execution; backends own partitioning, fencing, etc. Lose a worker, attach another to the same store. Checkpoints are small state versions, not a large local RocksDB dump moving over the network.
+- **Exactly-once stateful event-time processing.** Event-time watermarks and windows; Chandy-Lamport barrier snapshots for recovery.
+- **Stateless workers.** Compute–storage separation: workers do not own operator state. Operators talk to store contracts (load, atomic commit, coherent snapshot, checkpoint). Operator-specific state data structures allow for selective I/O for optimized execution; backends own partitioning, fencing, etc. Lose a worker, attach another to the same store. Checkpoints are small state versions, not a large local RocksDB dump moving over the network - fast checkpointing and failover.
 - **Pluggable state backends.** Same contracts, different backends:
 
   | Backend                      | Role                                        |
