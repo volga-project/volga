@@ -758,7 +758,7 @@ mod tests {
     use crate::runtime::state::OperatorStore;
     use crate::test_utils::window_aggs as test_utils;
 
-    fn bound(store: &InMemWindowStore, ns: &StateNamespace) -> InMemWindowStoreClient {
+    fn client(store: &InMemWindowStore, ns: &StateNamespace) -> InMemWindowStoreClient {
         store.client(WindowStoreTaskScope::for_test(ns.clone()))
     }
 
@@ -1170,7 +1170,7 @@ mod tests {
             .await
             .unwrap();
 
-        let client = bound(&store, &namespace);
+        let client = client(&store, &namespace);
         let mut due = client.stream_due(
             Some(Cursor::new(9, u64::MAX)),
             Cursor::new(299, u64::MAX),
@@ -1226,7 +1226,7 @@ mod tests {
             .await
             .unwrap();
 
-        let client = bound(&store, &namespace);
+        let client = client(&store, &namespace);
         let task_state = WindowOperatorState::for_test(
             Arc::new(client.clone()) as Arc<dyn WindowOperatorStore>,
             namespace.clone(),
@@ -1315,15 +1315,15 @@ mod tests {
             .await
             .unwrap();
 
-        let checkpoint = bound(&source, &namespace).checkpoint().await.unwrap();
+        let checkpoint = client(&source, &namespace).checkpoint().await.unwrap();
         let restored = InMemWindowStore::new();
-        bound(&restored, &namespace)
+        client(&restored, &namespace)
             .restore(&checkpoint)
             .await
             .unwrap();
 
         assert_meta(&restored.load_key_state(&partition).await.unwrap(), &meta);
-        let restored_client = bound(&restored, &namespace);
+        let restored_client = client(&restored, &namespace);
         let mut due = restored_client.stream_due(
             Some(Cursor::new(1_000, u64::MAX)),
             Cursor::new(2_000, u64::MAX),
@@ -1373,7 +1373,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let checkpoint = bound(&source, &checkpoint_namespace)
+        let checkpoint = client(&source, &checkpoint_namespace)
             .checkpoint()
             .await
             .unwrap();
@@ -1393,7 +1393,7 @@ mod tests {
             )
             .await
             .unwrap();
-        bound(&restored, &checkpoint_namespace)
+        client(&restored, &checkpoint_namespace)
             .restore(&checkpoint)
             .await
             .unwrap();
@@ -1419,7 +1419,7 @@ mod tests {
     #[tokio::test]
     async fn in_memory_restore_rejects_version_checkpoint() {
         let store = InMemWindowStore::new();
-        let error = bound(&store, &StateNamespace::new("test-namespace"))
+        let error = client(&store, &StateNamespace::new("test-namespace"))
             .restore(&WindowBackendSnapshot::Versioned {
                 version: StateVersion {
                     attempt: b"attempt".to_vec(),
