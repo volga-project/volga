@@ -49,7 +49,7 @@ impl WindowStoreTaskScope {
     }
 }
 
-/// Op-specific open: share the physical backend via [`StateRegistry`], return a per-task client.
+/// Op-specific open: share the store via [`StateRegistry`], return a per-task client.
 pub fn open_window_operator_store(
     registry: &StateRegistry,
     config: &OperatorStateBackendConfig,

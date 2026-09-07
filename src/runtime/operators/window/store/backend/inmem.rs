@@ -621,7 +621,7 @@ impl InMemWindowStoreClient {
         Ok(())
     }
 
-    pub fn physical(&self) -> &InMemWindowStore {
+    pub fn store(&self) -> &InMemWindowStore {
         &self.inner
     }
 }
@@ -1436,12 +1436,12 @@ mod tests {
 
     #[tokio::test]
     async fn restore_and_maintain_do_not_clobber_sibling_task() {
-        let physical = InMemWindowStore::new();
+        let store = InMemWindowStore::new();
         let ns = StateNamespace::new(b"shared-operator");
         let max_parallelism = 4;
         let parallelism = 2;
         let bind = |task_index: usize| {
-            physical.client(WindowStoreTaskScope {
+            store.client(WindowStoreTaskScope {
                 namespace: ns.clone(),
                 max_parallelism,
                 key_group_range: range_for_subtask(task_index, parallelism, max_parallelism),
@@ -1539,7 +1539,7 @@ mod tests {
         task0
             .watermark_frontier
             .store(5_000, std::sync::atomic::Ordering::Release);
-        physical.maintain(&ns, &task0).await.unwrap();
+        store.maintain(&ns, &task0).await.unwrap();
 
         assert!(c0
             .stream_due(None, Cursor::new(10_000, u64::MAX))
