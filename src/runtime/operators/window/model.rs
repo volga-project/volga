@@ -83,12 +83,8 @@ impl PartitionKey {
         }
     }
 
-    /// Hash prefix of [`Key::to_bytes`] (first 8 LE bytes).
     pub fn key_hash(&self) -> u64 {
-        let mut buf = [0u8; 8];
-        let n = self.business_key.len().min(8);
-        buf[..n].copy_from_slice(&self.business_key[..n]);
-        u64::from_le_bytes(buf)
+        Key::hash_from_bytes(&self.business_key)
     }
 
     pub fn key_group(&self, max_parallelism: usize) -> usize {
