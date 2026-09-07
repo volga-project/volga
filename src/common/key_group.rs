@@ -44,28 +44,19 @@ impl KeyGroupRange {
         parallelism: usize,
         max_parallelism: usize,
     ) -> Self {
-        range_for_subtask(task_index, parallelism, max_parallelism)
+        assert!(parallelism >= 1, "parallelism must be >= 1");
+        assert!(
+            max_parallelism >= parallelism,
+            "max_parallelism ({max_parallelism}) must be >= parallelism ({parallelism})"
+        );
+        assert!(
+            task_index < parallelism,
+            "task_index {task_index} must be < parallelism {parallelism}"
+        );
+        let start = (task_index * max_parallelism + parallelism - 1) / parallelism;
+        let end_inclusive = ((task_index + 1) * max_parallelism - 1) / parallelism;
+        Self::new(start, end_inclusive + 1)
     }
-}
-
-/// Contiguous groups owned by `task_index` at `(parallelism, max_parallelism)`.
-pub fn range_for_subtask(
-    task_index: usize,
-    parallelism: usize,
-    max_parallelism: usize,
-) -> KeyGroupRange {
-    assert!(parallelism >= 1, "parallelism must be >= 1");
-    assert!(
-        max_parallelism >= parallelism,
-        "max_parallelism ({max_parallelism}) must be >= parallelism ({parallelism})"
-    );
-    assert!(
-        task_index < parallelism,
-        "task_index {task_index} must be < parallelism {parallelism}"
-    );
-    let start = (task_index * max_parallelism + parallelism - 1) / parallelism;
-    let end_inclusive = ((task_index + 1) * max_parallelism - 1) / parallelism;
-    KeyGroupRange::new(start, end_inclusive + 1)
 }
 
 /// Key group for a job-lifetime hash.
@@ -121,11 +112,11 @@ mod tests {
     }
 
     #[test]
-    fn range_for_subtask_matches_subtask_of() {
+    fn for_subtask_matches_subtask_of() {
         for max_parallelism in [1usize, 2, 3, 4, 7, 16, 128] {
             for parallelism in 1..=max_parallelism.min(16) {
                 for task_index in 0..parallelism {
-                    let range = range_for_subtask(task_index, parallelism, max_parallelism);
+                    let range = KeyGroupRange::for_subtask(task_index, parallelism, max_parallelism);
                     for key_group in 0..max_parallelism {
                         assert_eq!(
                             range.contains(key_group),

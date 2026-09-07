@@ -7,7 +7,7 @@ use arrow::array::{RecordBatch, TimestampMillisecondArray, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use serde::{Deserialize, Serialize};
 
-use crate::common::{Key, KeyGroupRange};
+use crate::common::Key;
 use crate::runtime::operators::window::config::WindowConfig;
 use crate::runtime::operators::window::metrics::collect_window_operator_snapshot;
 use crate::runtime::operators::window::model::{WindowId, WindowTrigger, WindowTriggerKind};
@@ -244,14 +244,6 @@ impl WindowOperatorState {
 impl OperatorTaskState for WindowOperatorState {
     fn state_namespace(&self) -> &StateNamespace {
         &self.scope.namespace
-    }
-
-    fn key_group_range(&self) -> KeyGroupRange {
-        self.scope.key_group_range
-    }
-
-    fn max_parallelism(&self) -> usize {
-        self.scope.max_parallelism
     }
 
     fn kind(&self) -> OperatorKind {

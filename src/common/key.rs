@@ -65,8 +65,9 @@ impl Key {
     /// Routing hash stored as the first 8 LE bytes of [`Self::to_bytes`].
     pub fn hash_from_bytes(bytes: &[u8]) -> u64 {
         u64::from_le_bytes(
-            bytes[..8]
-                .try_into()
+            bytes
+                .get(..8)
+                .and_then(|b| b.try_into().ok())
                 .expect("key bytes start with 8-byte hash"),
         )
     }

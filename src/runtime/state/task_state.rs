@@ -4,7 +4,6 @@ use std::any::Any;
 
 use async_trait::async_trait;
 
-use crate::common::KeyGroupRange;
 use crate::runtime::observability::snapshot_types::TaskOperatorMetrics;
 use crate::runtime::operators::window::model::StateNamespace;
 use crate::runtime::operators::OperatorKind;
@@ -13,8 +12,6 @@ use crate::runtime::operators::OperatorKind;
 #[async_trait]
 pub trait OperatorTaskState: Send + Sync + std::fmt::Debug {
     fn state_namespace(&self) -> &StateNamespace;
-    fn key_group_range(&self) -> KeyGroupRange;
-    fn max_parallelism(&self) -> usize;
     fn kind(&self) -> OperatorKind;
     fn as_any(&self) -> &dyn Any;
 
