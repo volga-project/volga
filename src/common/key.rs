@@ -64,10 +64,11 @@ impl Key {
 
     /// Routing hash stored as the first 8 LE bytes of [`Self::to_bytes`].
     pub fn hash_from_bytes(bytes: &[u8]) -> u64 {
-        let mut hash_bytes = [0u8; 8];
-        let n = bytes.len().min(8);
-        hash_bytes[..n].copy_from_slice(&bytes[..n]);
-        u64::from_le_bytes(hash_bytes)
+        u64::from_le_bytes(
+            bytes[..8]
+                .try_into()
+                .expect("key bytes start with 8-byte hash"),
+        )
     }
 
     /// Serialize the Key to bytes

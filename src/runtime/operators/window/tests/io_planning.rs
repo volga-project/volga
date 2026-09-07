@@ -51,7 +51,7 @@ impl RecordingWindowStore {
 #[async_trait]
 impl WindowOperatorStore for RecordingWindowStore {
     async fn load_key_state(&self, partition: &PartitionKey) -> Result<KeyState> {
-        self.inner.load_key_state(partition).await
+        self.client.load_key_state(partition).await
     }
 
     async fn load_raw(
@@ -60,12 +60,12 @@ impl WindowOperatorStore for RecordingWindowStore {
         runs: &[RawRun],
     ) -> Result<Vec<RecordBatch>> {
         self.raw_reads.lock().unwrap().push(runs.to_vec());
-        self.inner.load_raw(partition, runs).await
+        self.client.load_raw(partition, runs).await
     }
 
     async fn load_tiles(&self, partition: &PartitionKey, runs: &[TileRun]) -> Result<TileMap> {
         self.tile_reads.lock().unwrap().push(runs.to_vec());
-        self.inner.load_tiles(partition, runs).await
+        self.client.load_tiles(partition, runs).await
     }
 
     async fn commit_events(
@@ -77,7 +77,7 @@ impl WindowOperatorStore for RecordingWindowStore {
         meta: &KeyState,
         triggers: &[WindowTrigger],
     ) -> Result<()> {
-        self.inner
+        self.client
             .commit_events(
                 partition,
                 ts_column_index,
@@ -94,7 +94,7 @@ impl WindowOperatorStore for RecordingWindowStore {
     }
 
     async fn store_key_state(&self, partition: &PartitionKey, state: &KeyState) -> Result<()> {
-        self.inner.store_key_state(partition, state).await
+        self.client.store_key_state(partition, state).await
     }
 
     async fn checkpoint(&self) -> Result<WindowBackendSnapshot> {

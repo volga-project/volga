@@ -37,6 +37,15 @@ impl KeyGroupRange {
     pub fn is_empty(self) -> bool {
         self.start == self.end
     }
+
+    /// Contiguous groups owned by `task_index` at `(parallelism, max_parallelism)`.
+    pub fn for_subtask(
+        task_index: usize,
+        parallelism: usize,
+        max_parallelism: usize,
+    ) -> Self {
+        range_for_subtask(task_index, parallelism, max_parallelism)
+    }
 }
 
 /// Contiguous groups owned by `task_index` at `(parallelism, max_parallelism)`.

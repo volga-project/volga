@@ -217,9 +217,7 @@ impl InMemWindowStore {
 
     fn report_metrics(
         &self,
-        namespace: &[u8],
-        key_group_range: KeyGroupRange,
-        max_parallelism: usize,
+        scope: &WindowStoreTaskScope,
         task_id: &str,
         labels: &crate::runtime::metrics::MetricsLabels,
     ) {
@@ -240,11 +238,7 @@ impl InMemWindowStore {
         let slots: Vec<_> = self
             .partitions
             .iter()
-            .filter(|entry| {
-                let partition = entry.key();
-                partition.namespace.as_slice() == namespace
-                    && key_group_range.contains(partition.key_group(max_parallelism))
-            })
+            .filter(|entry| Self::owns_partition(entry.key(), scope))
             .map(|entry| entry.value().clone())
             .collect();
         for slot in slots {
@@ -269,9 +263,7 @@ impl InMemWindowStore {
         let mut triggers_count = 0u64;
         let mut triggers_bytes = 0u64;
         for trigger in self.triggers.read().iter() {
-            if trigger.partition.namespace.as_slice() != namespace
-                || !key_group_range.contains(trigger.partition.key_group(max_parallelism))
-            {
+            if !Self::owns_partition(&trigger.partition, scope) {
                 continue;
             }
             triggers_count += 1;
@@ -518,8 +510,10 @@ impl InMemWindowStore {
         validate_checkpoint_size(snapshot)?;
         let checkpoint: InMemCheckpoint = bincode::deserialize(snapshot)?;
         anyhow::ensure!(
-            checkpoint.namespace.as_slice() == scope.namespace.bytes.as_slice(),
-            "in-memory checkpoint namespace does not match runtime namespace",
+            checkpoint.namespace.as_slice() == scope.namespace.bytes.as_slice()
+                && checkpoint.key_group_range == scope.key_group_range
+                && checkpoint.max_parallelism == scope.max_parallelism,
+            "in-memory restore requires same assignment (namespace, key_group_range, max_parallelism)",
         );
         let restored = checkpoint
             .partitions
@@ -562,26 +556,18 @@ impl InMemWindowStore {
 
     pub fn maintain_cutoff(
         &self,
-        ns: &StateNamespace,
-        key_group_range: KeyGroupRange,
-        max_parallelism: usize,
+        scope: &WindowStoreTaskScope,
         watermark: i64,
         floor: i64,
         task_id: &str,
     ) -> Result<u64> {
         self.triggers.write().retain(|trigger| {
-            trigger.partition.namespace.as_slice() != ns.bytes.as_slice()
-                || !key_group_range.contains(trigger.partition.key_group(max_parallelism))
-                || trigger.fire_at.ts > watermark
+            !Self::owns_partition(&trigger.partition, scope) || trigger.fire_at.ts > watermark
         });
         let slots: Vec<_> = self
             .partitions
             .iter()
-            .filter(|entry| {
-                let partition = entry.key();
-                partition.namespace.as_slice() == ns.bytes.as_slice()
-                    && key_group_range.contains(partition.key_group(max_parallelism))
-            })
+            .filter(|entry| Self::owns_partition(entry.key(), scope))
             .map(|entry| entry.value().clone())
             .collect();
         let mut pruned_rows = 0u64;
@@ -592,13 +578,7 @@ impl InMemWindowStore {
                 .retain(|&(granularity, start_ts), _| start_ts + granularity.to_millis() > floor);
         }
         if let Some(labels) = self.metrics_labels.as_ref() {
-            self.report_metrics(
-                ns.bytes.as_slice(),
-                key_group_range,
-                max_parallelism,
-                task_id,
-                labels,
-            );
+            self.report_metrics(scope, task_id, labels);
             metrics::add_pruned(task_id, labels, pruned_rows);
         }
         Ok(pruned_rows)
@@ -709,7 +689,7 @@ impl OperatorStore for InMemWindowStore {
         self.metrics_labels.as_ref()
     }
 
-    async fn maintain(&self, ns: &StateNamespace, state: &dyn OperatorTaskState) -> Result<()> {
+    async fn maintain(&self, _ns: &StateNamespace, state: &dyn OperatorTaskState) -> Result<()> {
         let Some(wo) = state.as_any().downcast_ref::<WindowOperatorState>() else {
             return Ok(());
         };
@@ -717,9 +697,7 @@ impl OperatorStore for InMemWindowStore {
             return Ok(());
         };
         self.maintain_cutoff(
-            ns,
-            state.key_group_range(),
-            state.max_parallelism(),
+            wo.scope(),
             watermark,
             floor,
             state.task_id(),
@@ -746,7 +724,7 @@ impl OperatorStore for InMemWindowStoreClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::key_group::range_for_subtask;
+    use crate::common::KeyGroupRange;
     use crate::runtime::consts::{runtime_consts, WINDOW_PROCESS_PAGE_SIZE};
     use futures::TryStreamExt;
 
@@ -1444,7 +1422,7 @@ mod tests {
             store.client(WindowStoreTaskScope {
                 namespace: ns.clone(),
                 max_parallelism,
-                key_group_range: range_for_subtask(task_index, parallelism, max_parallelism),
+                key_group_range: KeyGroupRange::for_subtask(task_index, parallelism, max_parallelism),
                 writer_id: WriterId(format!("task-{task_index}").into_bytes()),
                 attempt: vec![0],
             })
@@ -1527,14 +1505,18 @@ mod tests {
 
         let task0 = WindowOperatorState::new(
             Arc::new(c0.clone()) as Arc<dyn WindowOperatorStore>,
-            ns.clone(),
             Arc::from("task-0"),
             0,
             Arc::new(BTreeMap::new()),
             0,
             0,
-            range_for_subtask(0, parallelism, max_parallelism),
-            max_parallelism,
+            WindowStoreTaskScope {
+                namespace: ns.clone(),
+                max_parallelism,
+                key_group_range: KeyGroupRange::for_subtask(0, parallelism, max_parallelism),
+                writer_id: WriterId(b"task-0".to_vec()),
+                attempt: vec![0],
+            },
         );
         task0
             .watermark_frontier
@@ -1560,6 +1542,92 @@ mod tests {
                 .await
                 .unwrap(),
             1,
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_rejects_sibling_snapshot() {
+        let store = InMemWindowStore::new();
+        let ns = StateNamespace::new(b"shared-operator");
+        let max_parallelism = 4;
+        let parallelism = 2;
+        let bind = |task_index: usize| {
+            store.client(WindowStoreTaskScope {
+                namespace: ns.clone(),
+                max_parallelism,
+                key_group_range: KeyGroupRange::for_subtask(
+                    task_index,
+                    parallelism,
+                    max_parallelism,
+                ),
+                writer_id: WriterId(format!("task-{task_index}").into_bytes()),
+                attempt: vec![0],
+            })
+        };
+        let c0 = bind(0);
+        let c1 = bind(1);
+        let part0 = partition_for_group(&ns, 0, max_parallelism, b"k0");
+        let part1 = partition_for_group(&ns, 2, max_parallelism, b"k1");
+
+        c0.store_key_state(
+            &part0,
+            &KeyState {
+                next_seq: 10,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        c1.store_key_state(
+            &part1,
+            &KeyState {
+                next_seq: 20,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let snap0 = c0.checkpoint().await.unwrap();
+        let error = c1.restore(&snap0).await.unwrap_err();
+        assert!(
+            error.to_string().contains("same assignment"),
+            "{error}"
+        );
+        assert_eq!(c1.load_key_state(&part1).await.unwrap().next_seq, 20);
+        assert_eq!(c0.load_key_state(&part0).await.unwrap().next_seq, 10);
+    }
+
+    #[tokio::test]
+    async fn client_rejects_out_of_range_partition() {
+        let store = InMemWindowStore::new();
+        let ns = StateNamespace::new(b"shared-operator");
+        let max_parallelism = 4;
+        let parallelism = 2;
+        let c0 = store.client(WindowStoreTaskScope {
+            namespace: ns.clone(),
+            max_parallelism,
+            key_group_range: KeyGroupRange::for_subtask(0, parallelism, max_parallelism),
+            writer_id: WriterId(b"task-0".to_vec()),
+            attempt: vec![0],
+        });
+        let part1 = partition_for_group(&ns, 2, max_parallelism, b"k1");
+        let error = c0.load_key_state(&part1).await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("outside this task's bound range"),
+            "{error}"
+        );
+        let error = c0
+            .store_key_state(&part1, &KeyState::default())
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("outside this task's bound range"),
+            "{error}"
         );
     }
 }
