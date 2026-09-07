@@ -1,9 +1,22 @@
 use crate::api::PipelineSpec;
 use crate::orchestrator::orchestrator::WorkerNode;
 use crate::runtime::execution_graph::ExecutionGraph;
+use crate::runtime::operators::operator::OperatorConfig;
+use crate::runtime::operators::sink::sink_operator::SinkConfig;
+use crate::runtime::operators::source::source_operator::SourceConfig;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+
+fn graph_has_request_io(graph: &ExecutionGraph) -> bool {
+    graph.get_vertices().values().any(|v| {
+        matches!(
+            v.operator_config,
+            OperatorConfig::SourceConfig(SourceConfig::HttpRequestSourceConfig(_))
+                | OperatorConfig::SinkConfig(SinkConfig::RequestSinkConfig)
+        )
+    })
+}
 
 /// Mapping from execution vertex ID (task ID) to worker node
 pub type TaskWorkerMapping = HashMap<String, WorkerNode>;
@@ -113,6 +126,14 @@ impl TaskWorkerAssignStrategy for OperatorPerWorkerStrategy {
 
         if nodes.is_empty() {
             return mapping;
+        }
+
+        if graph_has_request_io(execution_graph) {
+            panic!(
+                "OperatorPerWorker is streaming assignment; HTTP request source and request sink \
+                 share a process-local processor and must not be split by operator. \
+                 Use SingleWorker or Pipelined until request workers exist (#247)."
+            );
         }
 
         // Group vertices by operator_id

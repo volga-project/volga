@@ -13,7 +13,8 @@ use crate::runtime::operators::window::metrics::collect_window_operator_snapshot
 use crate::runtime::operators::window::model::{WindowId, WindowTrigger, WindowTriggerKind};
 use crate::runtime::operators::window::store::data::cursors_from_batch;
 use crate::runtime::operators::window::store::{
-    InMemWindowStore, PartitionKey, StateNamespace, WindowBackendSnapshot, WindowOperatorStore,
+    PartitionKey, StateNamespace, WindowBackendSnapshot, WindowOperatorStore,
+    WindowStoreTaskScope,
 };
 use crate::runtime::operators::window::tile::{apply_batch_to_tiles, plan_update_runs_for_batch};
 use crate::runtime::operators::window::SEQ_NO_COLUMN_NAME;
@@ -30,7 +31,7 @@ pub const WATERMARK_UNSET: i64 = i64::MIN;
 #[derive(Debug)]
 pub struct WindowOperatorState {
     store: Arc<dyn WindowOperatorStore>,
-    namespace: StateNamespace,
+    scope: WindowStoreTaskScope,
     task_id: VertexId,
     ts_column_index: usize,
     window_configs: Arc<BTreeMap<WindowId, WindowConfig>>,
@@ -50,16 +51,16 @@ pub struct WindowStateSnapshot {
 impl WindowOperatorState {
     pub fn new(
         store: Arc<dyn WindowOperatorStore>,
-        namespace: StateNamespace,
         task_id: VertexId,
         ts_column_index: usize,
         window_configs: Arc<BTreeMap<WindowId, WindowConfig>>,
         lateness_ms: i64,
         max_window_length_ms: i64,
+        scope: WindowStoreTaskScope,
     ) -> Self {
         Self {
             store,
-            namespace,
+            scope,
             task_id,
             ts_column_index,
             window_configs,
@@ -69,12 +70,37 @@ impl WindowOperatorState {
         }
     }
 
+    #[cfg(test)]
+    pub fn for_test(
+        store: Arc<dyn WindowOperatorStore>,
+        namespace: StateNamespace,
+        task_id: VertexId,
+        ts_column_index: usize,
+        window_configs: Arc<BTreeMap<WindowId, WindowConfig>>,
+        lateness_ms: i64,
+        max_window_length_ms: i64,
+    ) -> Self {
+        Self::new(
+            store,
+            task_id,
+            ts_column_index,
+            window_configs,
+            lateness_ms,
+            max_window_length_ms,
+            WindowStoreTaskScope::for_test(namespace),
+        )
+    }
+
     pub fn store(&self) -> &dyn WindowOperatorStore {
         self.store.as_ref()
     }
 
     pub fn namespace(&self) -> &StateNamespace {
-        &self.namespace
+        &self.scope.namespace
+    }
+
+    pub fn scope(&self) -> &WindowStoreTaskScope {
+        &self.scope
     }
 
     pub fn watermark_frontier(&self) -> Option<i64> {
@@ -98,23 +124,23 @@ impl WindowOperatorState {
     }
 
     pub fn partition(&self, key: &Key) -> PartitionKey {
-        PartitionKey::new(&self.namespace, key)
+        PartitionKey::new(&self.scope.namespace, key)
     }
 
     pub async fn checkpoint(&self) -> anyhow::Result<WindowStateSnapshot> {
         Ok(WindowStateSnapshot {
-            namespace: self.namespace.bytes.clone(),
+            namespace: self.scope.namespace.bytes.clone(),
             watermark_frontier: self.watermark_frontier(),
-            backend: self.store.checkpoint(&self.namespace).await?,
+            backend: self.store.checkpoint().await?,
         })
     }
 
     pub async fn restore(&self, restore: WindowStateSnapshot) -> anyhow::Result<()> {
         anyhow::ensure!(
-            restore.namespace == self.namespace.bytes,
+            restore.namespace == self.scope.namespace.bytes,
             "window checkpoint namespace does not match runtime namespace",
         );
-        self.store.restore(&self.namespace, &restore.backend).await?;
+        self.store.restore(&restore.backend).await?;
         self.watermark_frontier.store(
             restore.watermark_frontier.unwrap_or(WATERMARK_UNSET),
             Ordering::Release,
@@ -217,7 +243,7 @@ impl WindowOperatorState {
 #[async_trait]
 impl OperatorTaskState for WindowOperatorState {
     fn state_namespace(&self) -> &StateNamespace {
-        &self.namespace
+        &self.scope.namespace
     }
 
     fn kind(&self) -> OperatorKind {

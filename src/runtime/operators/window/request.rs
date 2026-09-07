@@ -208,12 +208,11 @@ impl OperatorTrait for WindowRequestOperator {
                 .state_owner_operator_id
                 .as_deref()
                 .expect("state owner operator id must be configured for WindowRequestOperator");
-            self.namespace = Some(StateNamespace::for_operator_task(
+            self.namespace = Some(StateNamespace::for_operator(
                 context
                     .pipeline_id()
                     .expect("pipeline id must be configured for WindowRequestOperator"),
                 owner_operator_id,
-                context.task_index(),
             ));
         }
         Ok(())
@@ -236,6 +235,8 @@ impl OperatorTrait for WindowRequestOperator {
 impl StreamOperator for WindowRequestOperator {
     async fn process_data(&mut self, data: Vec<Message>, out: &mut dyn Output) -> Result<()> {
         for message in data {
+            let extras = message.get_extras();
+            let ingest_timestamp = message.ingest_timestamp();
             let Message::Regular(base) = message else {
                 panic!("window request ingest expects data messages, got {message:?}");
             };
@@ -244,14 +245,15 @@ impl StreamOperator for WindowRequestOperator {
                 out.emit(Message::new(
                     None,
                     RecordBatch::new_empty(self.output_schema.clone()),
-                    None,
-                    None,
+                    ingest_timestamp,
+                    extras,
                 ))
                 .await?;
                 continue;
             }
             let batch = self.process_groups(groups).await;
-            out.emit(Message::new(None, batch, None, None)).await?;
+            out.emit(Message::new(None, batch, ingest_timestamp, extras))
+                .await?;
         }
         Ok(())
     }

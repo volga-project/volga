@@ -7,6 +7,58 @@
 //!
 //! Callers must pass `max_parallelism >= parallelism >= 1`.
 
+use serde::{Deserialize, Serialize};
+
+/// Contiguous Flink-style assignment: `start` inclusive, `end` exclusive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct KeyGroupRange {
+    pub start: usize,
+    pub end: usize,
+}
+
+impl KeyGroupRange {
+    pub fn new(start: usize, end: usize) -> Self {
+        assert!(start <= end, "key-group range start {start} must be <= end {end}");
+        Self { start, end }
+    }
+
+    pub fn full(max_parallelism: usize) -> Self {
+        assert!(max_parallelism >= 1, "max_parallelism must be >= 1");
+        Self {
+            start: 0,
+            end: max_parallelism,
+        }
+    }
+
+    pub fn contains(self, key_group: usize) -> bool {
+        key_group >= self.start && key_group < self.end
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.start == self.end
+    }
+
+    /// Contiguous groups owned by `task_index` at `(parallelism, max_parallelism)`.
+    pub fn for_subtask(
+        task_index: usize,
+        parallelism: usize,
+        max_parallelism: usize,
+    ) -> Self {
+        assert!(parallelism >= 1, "parallelism must be >= 1");
+        assert!(
+            max_parallelism >= parallelism,
+            "max_parallelism ({max_parallelism}) must be >= parallelism ({parallelism})"
+        );
+        assert!(
+            task_index < parallelism,
+            "task_index {task_index} must be < parallelism {parallelism}"
+        );
+        let start = (task_index * max_parallelism + parallelism - 1) / parallelism;
+        let end_inclusive = ((task_index + 1) * max_parallelism - 1) / parallelism;
+        Self::new(start, end_inclusive + 1)
+    }
+}
+
 /// Key group for a job-lifetime hash.
 pub fn key_group_of(hash: u64, max_parallelism: usize) -> usize {
     assert!(max_parallelism >= 1, "max_parallelism must be >= 1");
@@ -57,5 +109,23 @@ mod tests {
         assert_eq!(subtask_of(kg, 2, 128), 1);
         assert_eq!(subtask_of(kg, 4, 128), 2);
         assert_ne!(subtask_for_hash(hash, 2, 128), (hash % 2) as usize);
+    }
+
+    #[test]
+    fn for_subtask_matches_subtask_of() {
+        for max_parallelism in [1usize, 2, 3, 4, 7, 16, 128] {
+            for parallelism in 1..=max_parallelism.min(16) {
+                for task_index in 0..parallelism {
+                    let range = KeyGroupRange::for_subtask(task_index, parallelism, max_parallelism);
+                    for key_group in 0..max_parallelism {
+                        assert_eq!(
+                            range.contains(key_group),
+                            subtask_of(key_group, parallelism, max_parallelism) == task_index,
+                            "kg={key_group} task={task_index} p={parallelism} max_p={max_parallelism}"
+                        );
+                    }
+                }
+            }
+        }
     }
 }

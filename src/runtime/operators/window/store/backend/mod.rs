@@ -7,6 +7,7 @@ use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 
 use crate::api::spec::state::{OperatorStateBackendConfig, RequestStoreConfig};
+use crate::common::KeyGroupRange;
 use crate::runtime::operators::window::model::{
     Cursor, KeyState, PartitionKey, RawRun, StateNamespace, TileMap, TileRun, WindowTrigger,
 };
@@ -17,12 +18,42 @@ use super::WindowData;
 
 mod inmem;
 
-pub use inmem::InMemWindowStore;
+pub use inmem::{InMemWindowStore, InMemWindowStoreClient};
 
-/// Op-specific open: share via [`StateRegistry`].
+/// Job-level execution attempt stamped on published versions.
+pub type AttemptToken = Vec<u8>;
+
+/// Task-execution identity stored on the writer head fence (Scylla).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct WriterId(pub Vec<u8>);
+
+/// Per-task scope created at WO `open`. Trait methods do not take namespace or range.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowStoreTaskScope {
+    pub namespace: StateNamespace,
+    pub max_parallelism: usize,
+    pub key_group_range: KeyGroupRange,
+    pub writer_id: WriterId,
+    pub attempt: AttemptToken,
+}
+
+impl WindowStoreTaskScope {
+    pub fn for_test(namespace: StateNamespace) -> Self {
+        Self {
+            namespace,
+            max_parallelism: 1,
+            key_group_range: KeyGroupRange::full(1),
+            writer_id: WriterId(Vec::new()),
+            attempt: Vec::new(),
+        }
+    }
+}
+
+/// Op-specific open: share the store via [`StateRegistry`], return a per-task client.
 pub fn open_window_operator_store(
     registry: &StateRegistry,
     config: &OperatorStateBackendConfig,
+    scope: &WindowStoreTaskScope,
 ) -> Result<Arc<dyn WindowOperatorStore>> {
     match config {
         OperatorStateBackendConfig::InMemory => {
@@ -36,7 +67,7 @@ pub fn open_window_operator_store(
                 .downcast_ref::<InMemWindowStore>()
                 .expect("window InMem store type")
                 .clone();
-            Ok(Arc::new(inmem) as Arc<dyn WindowOperatorStore>)
+            Ok(Arc::new(inmem.client(scope.clone())) as Arc<dyn WindowOperatorStore>)
         }
     }
 }
@@ -46,8 +77,6 @@ pub async fn open_window_request_store(
 ) -> Result<Arc<dyn WindowRequestStore>> {
     match *config {}
 }
-
-pub type AttemptToken = Vec<u8>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StateVersion {
@@ -87,20 +116,11 @@ pub trait WindowOperatorStore: OperatorStore {
         meta: &KeyState,
         triggers: &[WindowTrigger],
     ) -> Result<()>;
-    fn stream_due<'a>(
-        &'a self,
-        namespace: &'a StateNamespace,
-        after: Option<Cursor>,
-        through: Cursor,
-    ) -> DueWorkStream<'a>;
+    fn stream_due<'a>(&'a self, after: Option<Cursor>, through: Cursor) -> DueWorkStream<'a>;
     async fn store_key_state(&self, partition: &PartitionKey, state: &KeyState) -> Result<()>;
     /// Complete all pending writes before capturing the returned snapshot.
-    async fn checkpoint(&self, namespace: &StateNamespace) -> Result<WindowBackendSnapshot>;
-    async fn restore(
-        &self,
-        namespace: &StateNamespace,
-        snapshot: &WindowBackendSnapshot,
-    ) -> Result<()>;
+    async fn checkpoint(&self) -> Result<WindowBackendSnapshot>;
+    async fn restore(&self, snapshot: &WindowBackendSnapshot) -> Result<()>;
 }
 
 /// Coherent point-lookup reads used by the Window Request Operator.

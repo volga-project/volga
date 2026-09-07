@@ -54,7 +54,8 @@ impl WorkerInner {
             task_runtimes.insert(vertex_id.clone(), task_runtime);
         }
 
-        let request_source_config = extract_request_source_config(&config.graph);
+        let request_source_config =
+            extract_request_source_config(&config.graph, &config.vertex_ids);
         let request_source_processor_runtime = if request_source_config.is_some() {
             Some(
                 Builder::new_multi_thread()

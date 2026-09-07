@@ -11,6 +11,7 @@ use crate::runtime::operators::window::spec::WindowSpec;
 use crate::runtime::operators::window::store::{
     DueWorkStream, InMemWindowStore, KeyState, PartitionKey, StateNamespace, TileMap,
     WindowBackendSnapshot, WindowData, WindowOperatorStore, WindowRequestStore,
+    WindowStoreTaskScope,
 };
 use std::any::Any;
 
@@ -23,14 +24,16 @@ use crate::runtime::operators::window::{TileConfig, TimeGranularity};
 #[derive(Debug)]
 struct RecordingWindowStore {
     inner: Arc<InMemWindowStore>,
+    client: crate::runtime::operators::window::store::InMemWindowStoreClient,
     raw_reads: Mutex<Vec<Vec<RawRun>>>,
     tile_reads: Mutex<Vec<Vec<TileRun>>>,
     request_reads: Mutex<Vec<(Vec<RawRun>, Vec<TileRun>)>>,
 }
 
 impl RecordingWindowStore {
-    fn new(inner: Arc<InMemWindowStore>) -> Self {
+    fn new(inner: Arc<InMemWindowStore>, namespace: StateNamespace) -> Self {
         Self {
+            client: inner.client(WindowStoreTaskScope::for_test(namespace)),
             inner,
             raw_reads: Mutex::new(Vec::new()),
             tile_reads: Mutex::new(Vec::new()),
@@ -48,7 +51,7 @@ impl RecordingWindowStore {
 #[async_trait]
 impl WindowOperatorStore for RecordingWindowStore {
     async fn load_key_state(&self, partition: &PartitionKey) -> Result<KeyState> {
-        self.inner.load_key_state(partition).await
+        self.client.load_key_state(partition).await
     }
 
     async fn load_raw(
@@ -57,12 +60,12 @@ impl WindowOperatorStore for RecordingWindowStore {
         runs: &[RawRun],
     ) -> Result<Vec<RecordBatch>> {
         self.raw_reads.lock().unwrap().push(runs.to_vec());
-        self.inner.load_raw(partition, runs).await
+        self.client.load_raw(partition, runs).await
     }
 
     async fn load_tiles(&self, partition: &PartitionKey, runs: &[TileRun]) -> Result<TileMap> {
         self.tile_reads.lock().unwrap().push(runs.to_vec());
-        self.inner.load_tiles(partition, runs).await
+        self.client.load_tiles(partition, runs).await
     }
 
     async fn commit_events(
@@ -74,7 +77,7 @@ impl WindowOperatorStore for RecordingWindowStore {
         meta: &KeyState,
         triggers: &[WindowTrigger],
     ) -> Result<()> {
-        self.inner
+        self.client
             .commit_events(
                 partition,
                 ts_column_index,
@@ -86,29 +89,20 @@ impl WindowOperatorStore for RecordingWindowStore {
             .await
     }
 
-    fn stream_due<'a>(
-        &'a self,
-        namespace: &'a StateNamespace,
-        after: Option<Cursor>,
-        through: Cursor,
-    ) -> DueWorkStream<'a> {
-        self.inner.stream_due(namespace, after, through)
+    fn stream_due<'a>(&'a self, after: Option<Cursor>, through: Cursor) -> DueWorkStream<'a> {
+        self.client.stream_due(after, through)
     }
 
     async fn store_key_state(&self, partition: &PartitionKey, state: &KeyState) -> Result<()> {
-        self.inner.store_key_state(partition, state).await
+        self.client.store_key_state(partition, state).await
     }
 
-    async fn checkpoint(&self, namespace: &StateNamespace) -> Result<WindowBackendSnapshot> {
-        self.inner.checkpoint(namespace).await
+    async fn checkpoint(&self) -> Result<WindowBackendSnapshot> {
+        self.client.checkpoint().await
     }
 
-    async fn restore(
-        &self,
-        namespace: &StateNamespace,
-        restore: &WindowBackendSnapshot,
-    ) -> Result<()> {
-        self.inner.restore(namespace, restore).await
+    async fn restore(&self, restore: &WindowBackendSnapshot) -> Result<()> {
+        self.client.restore(restore).await
     }
 }
 
@@ -153,12 +147,13 @@ async fn recording_harness(sql: &str) -> (Harness, Arc<RecordingWindowStore>) {
         ..WindowSpec::default()
     };
     let inner = Arc::new(InMemWindowStore::new());
-    let recording = Arc::new(RecordingWindowStore::new(inner.clone()));
+    let namespace = StateNamespace::new(b"io_planning");
+    let recording = Arc::new(RecordingWindowStore::new(inner.clone(), namespace.clone()));
     let harness = Harness::with_operator_store(
         cfg,
         inner,
         recording.clone(),
-        StateNamespace::new(b"io_planning"),
+        namespace,
     )
     .await;
     (harness, recording)
@@ -280,14 +275,18 @@ async fn wro_uses_one_selective_tiled_load() {
   ) AS min_value
 FROM test_table"#;
     let tiling = TileConfig::new(vec![TimeGranularity::Minutes(1)]).unwrap();
-    let recording = Arc::new(RecordingWindowStore::new(Arc::new(InMemWindowStore::new())));
+    let namespace = StateNamespace::new(b"wro_io_planning");
+    let recording = Arc::new(RecordingWindowStore::new(
+        Arc::new(InMemWindowStore::new()),
+        namespace.clone(),
+    ));
     let mut h = WoWroHarness::with_stores(
         sql,
         Some(tiling),
         true,
         recording.clone(),
         recording.clone(),
-        StateNamespace::new(b"wro_io_planning"),
+        namespace,
         0,
     )
     .await;

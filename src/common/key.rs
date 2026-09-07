@@ -2,7 +2,7 @@ use ahash::RandomState;
 use anyhow::Result;
 use datafusion::common::hash_utils::create_hashes;
 use std::hash::{Hash, Hasher};
-use std::io::{Cursor, Read, Write};
+use std::io::{Cursor, Write};
 use std::sync::Arc;
 use arrow::array::ArrayRef;
 use arrow::record_batch::RecordBatch;
@@ -62,6 +62,16 @@ impl Key {
         &self.key_record_batch
     }
 
+    /// Routing hash stored as the first 8 LE bytes of [`Self::to_bytes`].
+    pub fn hash_from_bytes(bytes: &[u8]) -> u64 {
+        u64::from_le_bytes(
+            bytes
+                .get(..8)
+                .and_then(|b| b.try_into().ok())
+                .expect("key bytes start with 8-byte hash"),
+        )
+    }
+
     /// Serialize the Key to bytes
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut buffer = Vec::new();
@@ -87,13 +97,7 @@ impl Key {
 
     /// Deserialize Key from bytes
     pub fn from_bytes(bytes: &[u8]) -> Self {
-        let mut cursor = Cursor::new(bytes);
-        
-        // Read hash (u64 is always 8 bytes)
-        let mut hash_bytes = [0u8; 8];
-        cursor.read_exact(&mut hash_bytes).unwrap();
-        let hash = u64::from_le_bytes(hash_bytes);
-        
+        let hash = Self::hash_from_bytes(bytes);
         let remaining_bytes = &bytes[8..];
         let mut reader = arrow::ipc::reader::FileReader::try_new(
             Cursor::new(remaining_bytes),
@@ -170,6 +174,7 @@ mod tests {
 
         // Test serialization and deserialization
         let bytes = original_key.to_bytes();
+        assert_eq!(Key::hash_from_bytes(&bytes), original_key.hash());
         let deserialized_key = Key::from_bytes(&bytes);
         
         // Verify the key was correctly deserialized
