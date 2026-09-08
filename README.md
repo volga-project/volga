@@ -36,9 +36,9 @@ That stitch is most painful on entity-centric workloads — fraud, payments, ads
 
   | Backend                      | Role                                        |
   | ---------------------------- | ------------------------------------------- |
-  | **In-memory**                | ships today; tests, local, in-process       |
-  | **Scylla** (Cassandra-class) | latency-sensitive scenarios                 |
-  | **SlateDB + object storage** | latency-tolerant scenarios with large state |
+  | **In-memory**                | ships today; streaming-only                 |
+  | **Scylla** (Cassandra-class) | latency-sensitive scenarios (streaming + request)                |
+  | **SlateDB + object storage** | latency-tolerant scenarios with large state (streaming + request) |
 
 - **Optimized continuous sliding windows.** Tiles (window-specific intermediate results) store pre-computed aggregates, allowing for long (days, months, years) read/write-time aggregates without full recompute.
 - **Extended native aggregates.** First-class in SQL, not app UDFs: `top`, `topn_frequency`, `top1_ratio`, plus categorical / conditional forms (`sum_cate`, `count_where`, `sum_cate_where`, …).
