@@ -27,7 +27,7 @@ async fn flush_serving(client: &ScyllaWindowStoreClient) -> Result<()> {
     if epoch <= 0 {
         return Ok(());
     }
-    let session = client.inner.session().await?;
+    let session = client.inner.session();
     let keys: Vec<Vec<u8>> = client
         .head_claims
         .iter()
