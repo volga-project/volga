@@ -1,0 +1,55 @@
+execution_mode: Streaming
+execution_profile:
+  MasterWorker:
+    num_threads_per_task: 2
+parallelism: 1
+task_assignment_strategy: OperatorPerWorker
+state:
+  checkpoint_store: in_memory
+  operator_backend:
+    scylla:
+      contact_points:
+        - 127.0.0.1:9042
+      keyspace: volga_window
+      datacenter: datacenter1
+  request_store:
+    scylla:
+      contact_points:
+        - 127.0.0.1:9042
+      keyspace: volga_window
+  checkpoint:
+    interval_ms: 0
+    timeout_ms: 60000
+    retention: 1
+sources:
+  - table_name: test_table
+    schema_json: |
+      {
+        "fields": [
+          {
+            "name": "value",
+            "nullable": false,
+            "type": { "name": "utf8" },
+            "children": []
+          }
+        ]
+      }
+    source:
+      Datagen: |
+        {
+          "rate": 1.0,
+          "limit": 10,
+          "run_for_s": null,
+          "batch_size": 5,
+          "fields": {
+            "value": { "Key": { "num_unique_keys": 1 } }
+          },
+          "replayable": true
+        }
+sink:
+  InMemoryStorageGrpc: |
+    {
+      "create": true,
+      "server_addr": "http://sample-pipeline-storage.default.svc.cluster.local:50071"
+    }
+sql: "SELECT value FROM test_table"
