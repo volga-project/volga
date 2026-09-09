@@ -1,12 +1,20 @@
 //! Worker-scoped shared backend engine handle (not store logic).
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
+use scylla::client::execution_profile::ExecutionProfile;
 use scylla::client::session::Session;
 use scylla::client::session_builder::SessionBuilder;
+use scylla::policies::retry::DefaultRetryPolicy;
+use scylla::statement::{Consistency, SerialConsistency};
 
 use crate::api::spec::state::{OperatorStateBackendConfig, ScyllaConfig};
+
+/// Client-side wait for one request (driver default). Pin it so a driver bump
+/// does not silently wait forever.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 const KEYSPACE_CQL: &str = r#"
 CREATE KEYSPACE IF NOT EXISTS {keyspace}
@@ -52,7 +60,17 @@ impl StateSessionHandle {
 }
 
 async fn connect_scylla(config: &ScyllaConfig) -> Result<Arc<Session>> {
-    let mut builder = SessionBuilder::new();
+    // DefaultRetryPolicy: node failover / safe read timeouts. LWT (SERIAL) is
+    // never retried. No speculative execution (unsafe on writes / LWT).
+    // Statements still need set_is_idempotent(true) for most write retries.
+    let profile = ExecutionProfile::builder()
+        .consistency(Consistency::LocalQuorum)
+        .serial_consistency(Some(SerialConsistency::LocalSerial))
+        .request_timeout(Some(REQUEST_TIMEOUT))
+        .retry_policy(Arc::new(DefaultRetryPolicy::new()))
+        .speculative_execution_policy(None)
+        .build();
+    let mut builder = SessionBuilder::new().default_execution_profile_handle(profile.into_handle());
     for node in &config.contact_points {
         builder = builder.known_node(node);
     }
