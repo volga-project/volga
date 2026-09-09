@@ -1,5 +1,6 @@
 mod checkpoint;
 mod recovery;
+mod request_correctness;
 mod request_source;
 mod smoke;
 pub(crate) mod watermark_streaming;

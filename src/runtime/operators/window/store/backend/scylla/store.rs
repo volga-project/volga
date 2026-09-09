@@ -27,10 +27,12 @@ use super::cql::{
     UPDATE_HEAD_PROMOTE_SERVING, UPDATE_HEAD_STEAL_OWNER,
 };
 use super::schema::TABLES;
-use super::{checkpoint, maintain, read, triggers, write};
+use super::{checkpoint, maintain, read, request, triggers, write};
 use crate::runtime::operators::window::store::backend::{
-    StateVersion, WindowBackendSnapshot, WindowOperatorStore, WindowStoreTaskScope,
+    StateVersion, WindowBackendSnapshot, WindowOperatorStore, WindowRequestStore,
+    WindowStoreTaskScope,
 };
+use crate::runtime::operators::window::store::data::WindowData;
 
 #[derive(Clone)]
 pub struct ScyllaWindowStore {
@@ -343,5 +345,17 @@ impl OperatorStore for ScyllaWindowStore {
         state: &dyn OperatorTaskState,
     ) -> Result<()> {
         maintain::maintain(self, ns, state).await
+    }
+}
+
+#[async_trait]
+impl WindowRequestStore for ScyllaWindowStore {
+    async fn load_window_data(
+        &self,
+        partition: &PartitionKey,
+        raw_runs: &[RawRun],
+        tile_runs: &[TileRun],
+    ) -> Result<WindowData> {
+        request::load_window_data(self, partition, raw_runs, tile_runs).await
     }
 }

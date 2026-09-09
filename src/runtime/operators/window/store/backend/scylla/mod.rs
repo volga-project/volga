@@ -2,6 +2,7 @@ mod checkpoint;
 mod cql;
 mod maintain;
 mod read;
+mod request;
 mod schema;
 mod store;
 mod triggers;

@@ -99,7 +99,12 @@ pub fn open_window_operator_store(
 pub async fn open_window_request_store(
     config: &RequestStoreConfig,
 ) -> Result<Arc<dyn WindowRequestStore>> {
-    match *config {}
+    match config {
+        RequestStoreConfig::Scylla(cfg) => {
+            Ok(Arc::new(ScyllaWindowStore::connect(cfg.clone()).await?)
+                as Arc<dyn WindowRequestStore>)
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

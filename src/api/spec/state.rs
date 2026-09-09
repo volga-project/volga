@@ -42,6 +42,8 @@ pub struct ScyllaConfig {
     /// `on_commit`. Not a fence — owner CAS is. WRO always pins serving.
     #[serde(default, skip_serializing_if = "is_on_commit_publish")]
     pub serving_publish: ServingPublish,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_parallelism: Option<usize>,
 }
 
 fn is_on_commit_publish(policy: &ServingPublish) -> bool {
@@ -63,9 +65,11 @@ impl ServingPublish {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub enum RequestStoreConfig {}
+pub enum RequestStoreConfig {
+    Scylla(ScyllaConfig),
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
