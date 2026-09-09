@@ -10,9 +10,9 @@ use crate::runtime::operators::window::model::{
 };
 use crate::runtime::operators::window::store::backend::codec::{decode_batch, decode_val};
 
-use super::cql::HeadClaim;
 use super::schema::{align_down, RAW_BUCKET_MS};
 use super::store::ScyllaWindowStoreClient;
+use super::write;
 
 pub(super) async fn load_key_state(
     client: &ScyllaWindowStoreClient,
@@ -42,16 +42,7 @@ pub(super) async fn load_key_state(
             best = Some((attempt, epoch, decode_val(&payload)?));
         }
     }
-    let claim = match best.as_ref() {
-        None => HeadClaim::Empty,
-        Some((attempt, _, _)) if attempt.as_slice() == client.scope.attempt.as_slice() => {
-            HeadClaim::Ours
-        }
-        Some(_) => HeadClaim::Steal,
-    };
-    client
-        .head_claims
-        .insert(partition.business_key.clone(), claim);
+    write::steal_owner(client, session.as_ref(), partition, kg).await?;
     Ok(best.map(|(_, _, s)| s).unwrap_or_default())
 }
 

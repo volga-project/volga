@@ -37,6 +37,8 @@ pub(super) async fn restore(
             ),
         )
         .await?;
+    // Overlay pin only. Steal owner on first touch; serving stays at the
+    // previous cut until catch-up promote.
     *client.restore_base.lock().await = Some(version.clone());
     client
         .last_epoch

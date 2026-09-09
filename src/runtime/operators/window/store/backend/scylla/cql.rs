@@ -12,7 +12,8 @@ pub(super) const INSERT_KG_BUCKETS: &str = "INSERT INTO window_kg_buckets (names
 pub(super) const INSERT_TILES: &str = "INSERT INTO window_tiles (namespace, key_group, business_key, granularity_ms, bucket_start, tile_start, attempt, epoch, payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
 pub(super) const INSERT_KEY_STATES: &str = "INSERT INTO window_key_states (namespace, key_group, business_key, attempt, epoch, key_state) VALUES (?, ?, ?, ?, ?, ?)";
 pub(super) const INSERT_TRIGGERS: &str = "INSERT INTO window_triggers (namespace, bucket_start, kg_shard, fire_ts, fire_seq, business_key, trigger_kind, window_id, key_group, attempt, epoch) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
-pub(super) const UPDATE_HEAD_IF_OWNER: &str = "UPDATE window_head SET owner_writer = ?, writer_attempt = ?, writer_epoch = ?, serving_attempt = ?, serving_epoch = ? WHERE namespace = ? AND key_group = ? AND business_key = ? IF owner_writer = ?";
+pub(super) const UPDATE_HEAD_STEAL_OWNER: &str = "UPDATE window_head SET owner_writer = ? WHERE namespace = ? AND key_group = ? AND business_key = ? IF owner_writer = ?";
+pub(super) const UPDATE_HEAD_PROMOTE_SERVING: &str = "UPDATE window_head SET writer_attempt = ?, writer_epoch = ?, serving_attempt = ?, serving_epoch = ? WHERE namespace = ? AND key_group = ? AND business_key = ? IF owner_writer = ?";
 pub(super) const INSERT_HEAD_IF_NOT_EXISTS: &str = "INSERT INTO window_head (namespace, key_group, business_key, owner_writer, writer_attempt, writer_epoch, serving_attempt, serving_epoch) VALUES (?, ?, ?, ?, ?, ?, ?, ?) IF NOT EXISTS";
 pub(super) const INSERT_RECOVERY_BASES: &str = "INSERT INTO window_recovery_bases (namespace, recovery_attempt, range_start, range_end, base_attempt, base_epoch) VALUES (?, ?, ?, ?, ?, ?)";
 pub(super) const SELECT_KEY_STATE: &str = "SELECT attempt, epoch, key_state FROM window_key_states WHERE namespace = ? AND key_group = ? AND business_key = ?";
@@ -20,6 +21,7 @@ pub(super) const SELECT_RAW: &str = "SELECT event_ts, seq_no, attempt, epoch, pa
 pub(super) const SELECT_TILES: &str = "SELECT tile_start, attempt, epoch, payload FROM window_tiles WHERE namespace = ? AND key_group = ? AND business_key = ? AND granularity_ms = ? AND bucket_start = ? AND tile_start >= ? AND tile_start < ?";
 pub(super) const SELECT_TRIGGERS: &str = "SELECT fire_ts, fire_seq, business_key, trigger_kind, window_id, key_group, attempt, epoch FROM window_triggers WHERE namespace = ? AND bucket_start = ? AND kg_shard = ? AND fire_ts >= ? AND fire_ts <= ? LIMIT ?";
 pub(super) const SELECT_TRIGGERS_AFTER: &str = "SELECT fire_ts, fire_seq, business_key, trigger_kind, window_id, key_group, attempt, epoch FROM window_triggers WHERE namespace = ? AND bucket_start = ? AND kg_shard = ? AND (fire_ts, fire_seq, business_key, trigger_kind, window_id, attempt, epoch) > (?, ?, ?, ?, ?, ?, ?) AND fire_ts <= ? LIMIT ?";
+pub(super) const SELECT_HEAD: &str = "SELECT serving_attempt, serving_epoch FROM window_head WHERE namespace = ? AND key_group = ? AND business_key = ?";
 
 pub(super) struct PreparedDml {
     pub(super) insert_raw: PreparedStatement,
@@ -27,7 +29,8 @@ pub(super) struct PreparedDml {
     pub(super) insert_tiles: PreparedStatement,
     pub(super) insert_key_states: PreparedStatement,
     pub(super) insert_triggers: PreparedStatement,
-    pub(super) update_head_if_owner: PreparedStatement,
+    pub(super) steal_head_if_owner: PreparedStatement,
+    pub(super) promote_head_if_owner: PreparedStatement,
     pub(super) insert_head_if_not_exists: PreparedStatement,
     pub(super) insert_recovery_bases: PreparedStatement,
     pub(super) select_key_state: PreparedStatement,
@@ -35,6 +38,7 @@ pub(super) struct PreparedDml {
     pub(super) select_tiles: PreparedStatement,
     pub(super) select_triggers: PreparedStatement,
     pub(super) select_triggers_after: PreparedStatement,
+    pub(super) select_head: PreparedStatement,
 }
 
 pub(super) async fn prepare_stmts<const N: usize>(
@@ -63,11 +67,16 @@ pub(super) async fn unlogged_batch(
     Ok(())
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum HeadClaim {
-    Ours,
-    Steal,
+    /// No head row. First durable write inserts owner + serving.
     Empty,
+    /// Restore pin exists; owner not stolen yet.
+    Steal,
+    /// We own the row; serving is still the previous cut.
+    Fenced,
+    /// We own the row; OnCommit may promote serving.
+    Ours,
 }
 
 pub(super) fn encode_owner_writer(attempt: &[u8], vertex: &[u8]) -> Vec<u8> {

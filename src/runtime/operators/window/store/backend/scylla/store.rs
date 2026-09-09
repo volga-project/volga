@@ -19,8 +19,8 @@ use crate::runtime::state::{OperatorStore, OperatorTaskState, StateSessionHandle
 use super::cql::{
     encode_owner_writer, prepare_stmts, HeadClaim, PreparedDml, INSERT_HEAD_IF_NOT_EXISTS,
     INSERT_KEY_STATES, INSERT_KG_BUCKETS, INSERT_RAW, INSERT_RECOVERY_BASES, INSERT_TILES,
-    INSERT_TRIGGERS, SELECT_KEY_STATE, SELECT_RAW, SELECT_TILES, SELECT_TRIGGERS,
-    SELECT_TRIGGERS_AFTER, UPDATE_HEAD_IF_OWNER,
+    INSERT_TRIGGERS, SELECT_HEAD, SELECT_KEY_STATE, SELECT_RAW, SELECT_TILES, SELECT_TRIGGERS,
+    SELECT_TRIGGERS_AFTER, UPDATE_HEAD_PROMOTE_SERVING, UPDATE_HEAD_STEAL_OWNER,
 };
 use super::schema::TABLES;
 use super::{checkpoint, read, triggers, write};
@@ -82,7 +82,8 @@ impl ScyllaWindowStore {
                     insert_tiles,
                     insert_key_states,
                     insert_triggers,
-                    update_head_if_owner,
+                    steal_head_if_owner,
+                    promote_head_if_owner,
                     insert_head_if_not_exists,
                     insert_recovery_bases,
                     select_key_state,
@@ -90,6 +91,7 @@ impl ScyllaWindowStore {
                     select_tiles,
                     select_triggers,
                     select_triggers_after,
+                    select_head,
                 ] = prepare_stmts(
                     session.as_ref(),
                     [
@@ -98,7 +100,8 @@ impl ScyllaWindowStore {
                         INSERT_TILES,
                         INSERT_KEY_STATES,
                         INSERT_TRIGGERS,
-                        UPDATE_HEAD_IF_OWNER,
+                        UPDATE_HEAD_STEAL_OWNER,
+                        UPDATE_HEAD_PROMOTE_SERVING,
                         INSERT_HEAD_IF_NOT_EXISTS,
                         INSERT_RECOVERY_BASES,
                         SELECT_KEY_STATE,
@@ -106,6 +109,7 @@ impl ScyllaWindowStore {
                         SELECT_TILES,
                         SELECT_TRIGGERS,
                         SELECT_TRIGGERS_AFTER,
+                        SELECT_HEAD,
                     ],
                 )
                 .await?;
@@ -115,7 +119,8 @@ impl ScyllaWindowStore {
                     insert_tiles,
                     insert_key_states,
                     insert_triggers,
-                    update_head_if_owner,
+                    steal_head_if_owner,
+                    promote_head_if_owner,
                     insert_head_if_not_exists,
                     insert_recovery_bases,
                     select_key_state,
@@ -123,6 +128,7 @@ impl ScyllaWindowStore {
                     select_tiles,
                     select_triggers,
                     select_triggers_after,
+                    select_head,
                 })
             })
             .await
