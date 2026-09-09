@@ -378,8 +378,8 @@ write. It is not a per-key or per-key-group clock.
 | --- | --- |
 | Writer allocator | produces `E` |
 | Data rows | MVCC: this cell belongs to publish `E` |
-| Head `writer_(attempt, epoch)` | this key's latest publish |
-| Head `serving_(attempt, epoch)` | WRO pin; same number line, equal to writer except during recovery |
+| Head `writer_(attempt, epoch)` | optional watermark of this key's latest **writer** publish |
+| Head `serving_(attempt, epoch)` | WRO/GC pin — the only cut request reads. Not updated on ingest unless the publish policy says so |
 | Checkpoint cutoff | include versions with `epoch <= E` for keys in this range |
 
 Head `writer_epoch=5` on key A and `7` on key B means A and B were last
@@ -565,10 +565,11 @@ CREATE TABLE window_triggers (
 );
 ```
 
-- `window_head`: per-key writer fence plus writer and WRO-visible version
-  pointers; the LWT publication boundary. `owner_writer` is `WriterId`.
-  `writer_*` / `serving_*` are job-level `StateVersion`. Point get by
-  `(namespace, key_group, business_key)`.
+- `window_head`: one row per key (not versioned by attempt). `owner_writer` is
+  the fence. `serving_*` is the published snapshot WRO always pins.
+  `writer_*` may lag serving during recovery. Point get by
+  `(namespace, key_group, business_key)`. Do not put `attempt` in this PK —
+  that stores many names and the zombie race moves to the reader.
 - `window_recovery_bases`: immutable rows mapping a new job `recovery_attempt`
   to restored checkpoint cutoffs at **key-group range** granularity. Lookup for
   a key: find the row with `range_start <= key_group < range_end`. This lets a
@@ -577,7 +578,7 @@ CREATE TABLE window_triggers (
   source tasks.
 - `window_kg_buckets`: skinny GC index, not a source of truth for reads.
   One table. `commit_events` does an unversioned upsert of `business_key`
-  (no `attempt`/`epoch`, no payload). A failed head LWT may leave a stale
+  (no `attempt`/`epoch`, no payload). A failed serving promote may leave a stale
   index row; `maintain` deletes it. `maintain` per owned `key_group`:
 
   ```cql
@@ -618,36 +619,63 @@ CREATE TABLE window_triggers (
 
 ### Head semantics
 
-- `owner_writer` is the WO task execution allowed to publish this key.
-- `writer_(attempt, epoch)` is the private WO snapshot (job attempt + writer
-  epoch).
-- `serving_(attempt, epoch)` is the complete snapshot visible to WRO.
-- Writer and serving versions are equal normally and may differ during
-  recovery.
+`window_head` is a singleton lease, not an MVCC table. Data rows are versioned
+by `(attempt, epoch)` in their primary keys; overlay fences zombie **data**.
+Head is the **serving name**. A last-write-wins upsert lets dying attempt N
+overwrite `serving_*` after N+1 is live; WRO follows that pin. Owner LWT is
+the fence for that cell, not a workaround for a missing clustering key.
 
-When a new WO instance (initial or recovery) first writes a key, it
-LWT/CAS-claims `owner_writer`. Every later head update checks both owner and
-expected writer version.
+Three fields, three jobs — never one LWT that does all three on ingest:
 
-Claiming means conditionally setting `owner_writer`: insert it for a new head,
-or replace the expected previous owner. Only one competing WO can succeed.
-Fencing happens when a zombie tries to update a head now owned by the new WO:
-the conditional update fails, so the zombie's data is not published.
+| Column | Role |
+| --- | --- |
+| `owner_writer` | Who may change serving. Fence. |
+| `writer_(attempt, epoch)` | Optional writer watermark. |
+| `serving_(attempt, epoch)` | Snapshot WRO always `SELECT`s. |
+
+`owner_writer` is length-prefixed `attempt || vertex` (`WriterId` on the
+scope stays vertex). Claiming is **only** `SET owner_writer`:
+
+- empty key: `INSERT … IF NOT EXISTS` (may also set serving — there is no
+  prior cut);
+- restore, first touch: `UPDATE … SET owner_writer = me IF owner_writer =
+  previous`. **Do not** change `serving_*`.
+
+CAS not applied fences; do not fall through to a second LWT. Restore is a
+key-group range, head is per key, so steal is **lazy on first touch**, not a
+range scan at restore.
+
+WRO always pins `serving_*` (one hop + payload). It does not discover epoch
+from `key_state` and does not read writer overlay.
+
+**Publish policy** (same `promote_serving` LWT: `SET serving_* IF owner =
+me`). Cadence is the freshness / ingest-p99 knob; it is not fencing:
+
+| Policy | Ingest wait path | WRO freshness |
+| --- | --- | --- |
+| `OnCommit` (v1 default, after catch-up) | data + promote LWT | last promoted commit |
+| async / periodic / checkpoint | data only | last successful promote |
+
+Do not advance `serving_*` while N+1 is catching up. A timer that publishes
+serving during replay is a mixed writer+serving read.
 
 ### WO write
 
 For one key:
 
-1. Load writer `KeyState`.
+1. Load writer `KeyState` (overlay). On first access after restore, steal
+   `owner_writer` without moving serving.
 2. Allocate writer epoch `E`.
 3. Derive `key_group` from the key hash and the client's `max_p`.
 4. Write changed raw rows, tiles, `KeyState`, and triggers under
    `(job attempt, E)`. Upsert `window_kg_buckets` unversioned (not under
-   `E`; failed head LWT may leave a stale index row for `maintain` to drop).
-5. LWT-update the head, requiring the current `owner_writer` and previous
-   writer version.
-6. During normal operation, set both writer and serving versions to
-   `(job attempt, E)`. During recovery, advance only writer until catch-up.
+   `E`; a later failed promote may leave a stale index row for `maintain`).
+5. **Empty key:** after data is durable, `INSERT IF NOT EXISTS` with serving
+   `E` (first snapshot).
+6. **Owned, not recovering (or catch-up complete):** `promote_serving(E)` —
+   `SET serving_* IF owner = me` (v1 `OnCommit`). During recovery freeze,
+   skip this until writer `KeyState` has caught the pinned serving
+   `KeyState` (`next_seq` and, if present, `evaluation.through`).
 7. Update or invalidate affected WO cache entries.
 
 Each `(key, bucket)` (and each tile partition) is one Scylla partition.
@@ -655,15 +683,15 @@ Each `(key, bucket)` (and each tile partition) is one Scylla partition.
 mutation per event/tile row, one RTT per partition, not one RTT per event.
 Do not use logged BATCH. Do not batch across partitions (no cross-partition
 atomicity, coordinator penalty). Tiles, triggers, and other buckets are
-separate requests. The head LWT is the visibility boundary after those
-writes complete.
+separate requests.
 
-Data written before a failed head update is orphaned. A new epoch starts only
-after the previous publication outcome is known. On success, advance the
-epoch; on failure, safely retry the same publication or abort the attempt.
-An ownership CAS failure stops the WO as fenced. Trigger rows from an
-unpublished attempt/epoch are orphaned with its other data and are not
-returned by `stream_due`.
+Serving LWT is the WRO visibility boundary. It is **not** coupled to ingest
+except under `OnCommit` after catch-up. Data rows are already stamped with
+`E`; WO reload does not need head. Orphaned data from a failed promote is
+invisible to WRO until a later promote names that epoch. A new epoch starts
+only after the previous write outcome is known. Ownership CAS failure stops
+the WO as fenced. Trigger rows from an unpublished attempt/epoch are not
+returned by `stream_due` (overlay).
 
 `store_key_state` follows the same protocol but writes no raw, tile, trigger,
 or bucket-index rows.
@@ -751,21 +779,22 @@ future work.
    the attempt publishes data. The master only plans and sends the restore
    payload.
 3. Source restores its checkpoint offset and replays post-checkpoint input.
-4. On first access to a key, retain its old serving version, claim
-   `owner_writer`, and restore writer `KeyState` from the checkpoint base for
-   that key's range.
+4. On first access to a key, steal `owner_writer` (CAS). Leave `serving_*` at
+   the previous cut (or `restore_base` if head had never been published).
+   Restore writer `KeyState` from the checkpoint overlay for that key's range.
 5. Resume watermark work by streaming checkpoint-visible triggers above the
-   restored watermark while replay advances only writer state.
-6. Once append-only replay catches the old serving state, atomically switch
-   serving to writer.
-7. Continue normal publication with writer and serving together.
+   restored watermark while replay advances only writer state. Do not promote
+   serving.
+6. Once append-only replay catches the old serving `KeyState`, `SET serving_*
+   IF owner = me`.
+7. Continue under the configured publish policy (`OnCommit` / later periodic).
 
-During recovery, writer and serving versions differ. Replay advances writer
-while WRO keeps using the old serving snapshot. While they differ, compare the
-writer `KeyState` with the retained serving state. Once `next_seq` and
-`evaluation.through` reach the serving state, atomically promote writer to
-serving. Keys without evaluation state compare only `next_seq`. Keys not
-touched after recovery may continue serving their old snapshot.
+During recovery, writer data and serving pins differ. Replay advances MVCC
+rows; WRO keeps using `serving_*`. Compare the writer `KeyState` with the
+key_state row at the pinned serving version. Once `next_seq` and
+`evaluation.through` reach that state, promote. Keys without evaluation
+state compare only `next_seq`. Keys not touched after recovery keep their
+old serving snapshot. A zombie N publish after steal does not apply.
 
 ### WO cache
 
@@ -799,12 +828,17 @@ Minimal setup is single DC, RF=3. Because we need read-your-write after publish,
 use `LOCAL_QUORUM` for both data reads and writes (`W+R > RF`). Head claim/publish
 is LWT with `LOCAL_SERIAL` + learn `LOCAL_QUORUM`:
 
-- **WO write:** non-LWT data @ `LOCAL_QUORUM`; one head LWT per publish (fence + visibility).
-- **WO read (cache miss):** head lookup + data @ `LOCAL_QUORUM` (writer pointer).
-- **WRO read:** head pin + data @ `LOCAL_QUORUM` (serving pointer) for one coherent snapshot.
+- **WO write:** non-LWT data @ `LOCAL_QUORUM`. Owner steal is one LWT on first
+  touch (fence, no serving change). Serving promote is a separate LWT
+  (`OnCommit` after catch-up in v1; later a periodic/checkpoint publisher).
+- **WO read (cache miss):** overlay on versioned tables @ `LOCAL_QUORUM`
+  (not the serving pin).
+- **WRO read:** head pin + data @ `LOCAL_QUORUM` (serving pointer) for one
+  coherent snapshot. Always this path; do not derive the pin from `max(epoch)`.
 
-**Possible future improvement:** generation + `USING TIMESTAMP` may avoid LWT on
-each publish; still quorum everywhere. Explore it only if LWT latency hurts.
+**Not v1:** `USING TIMESTAMP` instead of owner CAS; derived-from-`key_state`
+WRO pins. Explore a non-`OnCommit` publisher if serving LWT dominates ingest
+p99 — same promote LWT, different cadence.
 
 ### State prune / cleanup
 
@@ -829,7 +863,7 @@ owned range from `OperatorTaskState`.
   width)`). Page the result. For each `(business_key, bucket_start)`, delete
   the per-key `window_raw` partition and every `window_tiles` partition for
   that key+bucket (each `granularity_ms` from task state), then the index
-  row (including stale rows from a failed head LWT). Do not probe historical
+  row (including stale rows from a failed serving promote). Do not probe historical
   bucket ids. Do not rely on TWCS/TTL (write-time ≠ event-time; replay
   rewrites old buckets);
 - drop unreachable MVCC generations for keys still present in **live**
