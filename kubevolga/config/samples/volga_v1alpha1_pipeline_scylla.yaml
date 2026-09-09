@@ -59,6 +59,7 @@ spec:
             - scylla.default.svc.cluster.local:9042
           keyspace: volga_window
           datacenter: datacenter1
+          # serving_publish: on_commit | checkpoint | { interval: { interval_ms: 1000 } }
       maintenance_enabled: true
       maintenance_interval_ms: 1000
       checkpoint:

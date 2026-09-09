@@ -44,6 +44,29 @@ func TestScyllaRequestStoreValidates(t *testing.T) {
 	}
 }
 
+func TestScyllaServingPublishValidates(t *testing.T) {
+	raw := loadSamplePipelineSpec(t, "volga_v1alpha1_pipeline_scylla.yaml")
+	var spec map[string]any
+	if err := json.Unmarshal(raw, &spec); err != nil {
+		t.Fatalf("unmarshal pipelineSpec: %v", err)
+	}
+	scylla := spec["state"].(map[string]any)["operator_backend"].(map[string]any)["scylla"].(map[string]any)
+	for _, policy := range []any{
+		"on_commit",
+		"checkpoint",
+		map[string]any{"interval": map[string]any{"interval_ms": float64(1000)}},
+	} {
+		scylla["serving_publish"] = policy
+		patched, err := json.Marshal(spec)
+		if err != nil {
+			t.Fatalf("marshal patched spec: %v", err)
+		}
+		if err := validatePipelineSpec(patched); err != nil {
+			t.Fatalf("serving_publish %#v should be valid, got error: %v", policy, err)
+		}
+	}
+}
+
 func TestOperatorBackendScyllaMissingKeyspaceRejected(t *testing.T) {
 	raw := loadSamplePipelineSpec(t, "volga_v1alpha1_pipeline_scylla.yaml")
 	var spec map[string]any

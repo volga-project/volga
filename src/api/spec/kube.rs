@@ -193,6 +193,10 @@ mod tests {
                 assert_eq!(cfg.contact_points, vec!["127.0.0.1:9042"]);
                 assert_eq!(cfg.keyspace, "volga_window");
                 assert_eq!(cfg.datacenter.as_deref(), Some("datacenter1"));
+                assert_eq!(
+                    cfg.serving_publish,
+                    crate::api::spec::state::ServingPublish::OnCommit
+                );
             }
             other => panic!("expected Scylla operator backend, got {other:?}"),
         }
