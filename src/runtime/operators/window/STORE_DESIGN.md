@@ -648,16 +648,24 @@ range scan at restore.
 WRO always pins `serving_*` (one hop + payload). It does not discover epoch
 from `key_state` and does not read writer overlay.
 
-**Publish policy** (same `promote_serving` LWT: `SET serving_* IF owner =
-me`). Cadence is the freshness / ingest-p99 knob; it is not fencing:
+**Publish policy** (`ScyllaConfig.serving_publish`, same `promote_serving`
+LWT: `SET serving_* IF owner = me`). Cadence is the freshness / ingest-p99
+knob; it is not fencing. Catch-up freeze still wins: do not promote serving
+while N+1 is behind the pinned cut.
 
 | Policy | Ingest wait path | WRO freshness |
 | --- | --- | --- |
-| `OnCommit` (v1 default, after catch-up) | data + promote LWT | last promoted commit |
-| async / periodic / checkpoint | data only | last successful promote |
+| `on_commit` (default) | data + promote LWT after catch-up | last ingest |
+| `interval: { interval_ms }` | data only; promote this key when the interval elapses | last promote, at most `interval_ms` lag (continuous ingest) |
+| `checkpoint` | data only | last checkpoint flush |
 
-Do not advance `serving_*` while N+1 is catching up. A timer that publishes
-serving during replay is a mixed writer+serving read.
+Checkpoint always flushes serving for live keys (so a barrier is WRO-visible
+even under `interval` / `checkpoint`). Empty-key `INSERT IF NOT EXISTS` still
+names the first snapshot so WRO is not empty.
+
+A background timer is not required: interval is checked on the next ingest
+of that key, and checkpoint covers idle keys. Do not spawn a publisher
+during restore freeze.
 
 ### WO write
 
@@ -672,10 +680,11 @@ For one key:
    `E`; a later failed promote may leave a stale index row for `maintain`).
 5. **Empty key:** after data is durable, `INSERT IF NOT EXISTS` with serving
    `E` (first snapshot).
-6. **Owned, not recovering (or catch-up complete):** `promote_serving(E)` —
-   `SET serving_* IF owner = me` (v1 `OnCommit`). During recovery freeze,
-   skip this until writer `KeyState` has caught the pinned serving
-   `KeyState` (`next_seq` and, if present, `evaluation.through`).
+6. **Owned, not recovering (or catch-up complete):** `promote_serving(E)`
+   according to `serving_publish` (`on_commit` waits; `interval` /
+   `checkpoint` skip until due). During recovery freeze, skip until writer
+   `KeyState` has caught the pinned serving `KeyState` (`next_seq` and, if
+   present, `evaluation.through`).
 7. Update or invalidate affected WO cache entries.
 
 Each `(key, bucket)` (and each tile partition) is one Scylla partition.
@@ -787,7 +796,7 @@ future work.
    serving.
 6. Once append-only replay catches the old serving `KeyState`, `SET serving_*
    IF owner = me`.
-7. Continue under the configured publish policy (`OnCommit` / later periodic).
+7. Continue under `serving_publish` (`on_commit` / `interval` / `checkpoint`).
 
 During recovery, writer data and serving pins differ. Replay advances MVCC
 rows; WRO keeps using `serving_*`. Compare the writer `KeyState` with the
@@ -829,16 +838,16 @@ use `LOCAL_QUORUM` for both data reads and writes (`W+R > RF`). Head claim/publi
 is LWT with `LOCAL_SERIAL` + learn `LOCAL_QUORUM`:
 
 - **WO write:** non-LWT data @ `LOCAL_QUORUM`. Owner steal is one LWT on first
-  touch (fence, no serving change). Serving promote is a separate LWT
-  (`OnCommit` after catch-up in v1; later a periodic/checkpoint publisher).
+  touch (fence, no serving change). Serving promote is a separate LWT on the
+  configured cadence (`on_commit` / `interval` / `checkpoint`), never during
+  catch-up freeze.
 - **WO read (cache miss):** overlay on versioned tables @ `LOCAL_QUORUM`
   (not the serving pin).
 - **WRO read:** head pin + data @ `LOCAL_QUORUM` (serving pointer) for one
   coherent snapshot. Always this path; do not derive the pin from `max(epoch)`.
 
 **Not v1:** `USING TIMESTAMP` instead of owner CAS; derived-from-`key_state`
-WRO pins. Explore a non-`OnCommit` publisher if serving LWT dominates ingest
-p99 — same promote LWT, different cadence.
+WRO pins.
 
 ### State prune / cleanup
 
