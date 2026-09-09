@@ -281,11 +281,52 @@
           ],
           "format": "uint",
           "minimum": 0
+        },
+        "serving_publish": {
+          "description": "How often this writer publishes `window_head.serving_*`. Default\n`on_commit`. Not a fence — owner CAS is. WRO always pins serving.",
+          "$ref": "#/$defs/ServingPublish"
         }
       },
       "required": [
         "contact_points",
         "keyspace"
+      ]
+    },
+    "ServingPublish": {
+      "oneOf": [
+        {
+          "description": "Wait for the serving LWT after each ingest (once catch-up allows).",
+          "type": "string",
+          "const": "on_commit"
+        },
+        {
+          "description": "Ingest does not wait. Promote this key when `interval_ms` has elapsed\nsince its last promote. Checkpoint also flushes touched keys.",
+          "type": "object",
+          "properties": {
+            "interval": {
+              "type": "object",
+              "properties": {
+                "interval_ms": {
+                  "type": "integer",
+                  "format": "uint64",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "interval_ms"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "interval"
+          ]
+        },
+        {
+          "description": "Ingest does not wait. Promote touched keys on checkpoint only.",
+          "type": "string",
+          "const": "checkpoint"
+        }
       ]
     },
     "StateSpec": {
