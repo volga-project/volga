@@ -1,14 +1,11 @@
 //! In-memory window store implementation and behavior tests.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::io::Cursor as IoCursor;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use arrow::array::{RecordBatch, UInt32Array};
 use arrow::compute::concat_batches;
-use arrow::ipc::reader::FileReader;
-use arrow::ipc::writer::FileWriter;
 use async_trait::async_trait;
 use dashmap::DashMap;
 use parking_lot::RwLock;
@@ -297,23 +294,6 @@ impl InMemWindowStore {
         out
     }
 
-    fn encode_batch(batch: &RecordBatch) -> Result<Vec<u8>> {
-        let mut bytes = Vec::new();
-        {
-            let mut writer = FileWriter::try_new(&mut bytes, batch.schema().as_ref())?;
-            writer.write(batch)?;
-            writer.finish()?;
-        }
-        Ok(bytes)
-    }
-
-    fn decode_batch(bytes: &[u8]) -> Result<RecordBatch> {
-        FileReader::try_new(IoCursor::new(bytes), None)?
-            .next()
-            .transpose()?
-            .ok_or_else(|| anyhow!("in-memory checkpoint contains an empty Arrow payload"))
-    }
-
     pub fn client(&self, scope: WindowStoreTaskScope) -> InMemWindowStoreClient {
         InMemWindowStoreClient {
             inner: self.clone(),
@@ -437,7 +417,7 @@ impl InMemWindowStore {
                             .raw
                             .batch
                             .as_ref()
-                            .map(Self::encode_batch)
+                            .map(super::codec::encode_batch)
                             .transpose()?,
                         ts_column_index: state.ts_column_index,
                         tiles: state.tiles,
@@ -495,7 +475,7 @@ impl InMemWindowStore {
             .map(|(partition, state)| {
                 let raw = match state.raw {
                     Some(bytes) => {
-                        PackedRaw::rebuild(&Self::decode_batch(&bytes)?, state.ts_column_index)?
+                        PackedRaw::rebuild(&super::codec::decode_batch(&bytes)?, state.ts_column_index)?
                     }
                     None => PackedRaw::default(),
                 };

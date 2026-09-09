@@ -95,6 +95,20 @@ impl WindowOperatorState {
         self.store.as_ref()
     }
 
+    pub fn tile_granularity_ms(&self) -> Vec<i64> {
+        let mut out = Vec::new();
+        for window in self.window_configs.values() {
+            if let Some(tiling) = &window.tiling {
+                for gran in &tiling.granularities {
+                    out.push(gran.to_millis());
+                }
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
     pub fn namespace(&self) -> &StateNamespace {
         &self.scope.namespace
     }

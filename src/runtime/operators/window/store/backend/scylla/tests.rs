@@ -1,23 +1,29 @@
-//! Docker / testcontainer contract for the 287 write-path store.
+//! Docker / testcontainer contract for the Scylla window store.
 //!
 //! Ignored by default (`src/tests/README.md`). Point at an already-running
 //! cluster with `VOLGA_SCYLLA_CONTACT=127.0.0.1:9042` (unique keyspace per
 //! test). Otherwise each test starts `scylladb/scylla:5.4`. Later PRs add
-//! checkpoint / overlay-restore / maintain / WRO cases to this file.
+//! checkpoint / overlay-restore / WRO cases to this file.
+
+use std::collections::BTreeMap;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use crate::api::spec::state::ScyllaConfig;
+use crate::common::KeyGroupRange;
 use crate::runtime::operators::window::model::{
     Cursor, KeyEvaluationState, KeyState, PartitionKey, RawRun, StateNamespace, TileMap, TileRun,
     TimeGranularity, WindowTiles, WindowTrigger, WindowTriggerKind,
 };
+use crate::runtime::operators::window::state::WindowOperatorState;
 use crate::runtime::operators::window::store::backend::{
-    stream_due, WindowOperatorStore, WindowStoreTaskScope,
+    stream_due, WindowOperatorStore, WindowStoreTaskScope, WriterId,
 };
 use crate::runtime::operators::window::store::data::cursors_from_batch;
+use crate::runtime::state::OperatorStore;
 use crate::test_utils::window_aggs as test_utils;
 use arrow::array::RecordBatch;
 use futures::TryStreamExt;
-use std::collections::BTreeMap;
 use testcontainers::{clients, Container, GenericImage};
 
 use super::ScyllaWindowStore;
@@ -97,6 +103,16 @@ async fn connect<'a>(
     .await
     .expect("scylla connect via StateSessionHandle");
     (container, store)
+}
+
+fn live_scope(ns: &StateNamespace) -> WindowStoreTaskScope {
+    WindowStoreTaskScope {
+        namespace: ns.clone(),
+        max_parallelism: 1,
+        key_group_range: KeyGroupRange::full(1),
+        writer_id: WriterId(b"writer".to_vec()),
+        attempt: b"live".to_vec(),
+    }
 }
 
 /// Full write → load_key_state / load_raw / stream_due loop.
@@ -454,4 +470,105 @@ async fn scylla_overlay_hides_other_attempt() {
         .await
         .unwrap()
         .is_none());
+}
+
+#[tokio::test]
+#[ignore]
+async fn scylla_maintain_drops_unreachable_generations() {
+    let docker = clients::Cli::default();
+    let (_container, store) = connect(&docker, "volga_maintain").await;
+    let ns = StateNamespace::new(b"op");
+    let scope = live_scope(&ns);
+    let client = store.client(scope.clone());
+    let partition = partition(&ns);
+    let events = test_utils::batch(&[(1_000, 1_000.0, "key", 1)]);
+    client
+        .commit_events(
+            &partition,
+            0,
+            &events,
+            &Default::default(),
+            &KeyState {
+                next_seq: 2,
+                ..Default::default()
+            },
+            &[],
+        )
+        .await
+        .expect("commit");
+
+    let session = store.session();
+    session
+        .query_unpaged(
+            "INSERT INTO window_key_states (namespace, key_group, business_key, attempt, epoch, key_state) VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                ns.bytes.clone(),
+                0i32,
+                partition.business_key.clone(),
+                b"dead".to_vec(),
+                1i64,
+                vec![1u8],
+            ),
+        )
+        .await
+        .unwrap();
+    session
+        .query_unpaged(
+            "INSERT INTO window_raw (namespace, key_group, business_key, bucket_start, event_ts, seq_no, attempt, epoch, payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                ns.bytes.clone(),
+                0i32,
+                partition.business_key.clone(),
+                0i64,
+                1_000i64,
+                99i64,
+                b"dead".to_vec(),
+                1i64,
+                vec![1u8],
+            ),
+        )
+        .await
+        .unwrap();
+
+    let task_state = WindowOperatorState::new(
+        Arc::new(client.clone()) as Arc<dyn WindowOperatorStore>,
+        Arc::from("t"),
+        0,
+        Arc::new(BTreeMap::new()),
+        0,
+        1_000_000,
+        scope,
+    );
+    task_state
+        .watermark_frontier
+        .store(10_000, Ordering::Release);
+    store.maintain(&ns, &task_state).await.unwrap();
+
+    let attempts = session
+        .query_unpaged(
+            "SELECT attempt FROM window_key_states WHERE namespace = ? AND key_group = ? AND business_key = ?",
+            (ns.bytes.clone(), 0i32, partition.business_key.clone()),
+        )
+        .await
+        .unwrap()
+        .into_rows_result()
+        .unwrap();
+    let attempts: Vec<Vec<u8>> = attempts
+        .rows::<(Vec<u8>,)>()
+        .unwrap()
+        .map(|row| row.unwrap().0)
+        .collect();
+    assert_eq!(attempts, vec![b"live".to_vec()]);
+    assert_eq!(client.load_key_state(&partition).await.unwrap().next_seq, 2);
+    let loaded = client
+        .load_raw(
+            &partition,
+            &[RawRun {
+                from: Cursor::new(0, 0),
+                to: Cursor::new(2_000, 0),
+            }],
+        )
+        .await
+        .unwrap();
+    assert_eq!(loaded.iter().map(|b| b.num_rows()).sum::<usize>(), 1);
 }

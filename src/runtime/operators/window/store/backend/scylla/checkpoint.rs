@@ -59,7 +59,7 @@ pub(super) async fn restore(
     let WindowBackendSnapshot::Versioned { version } = snapshot else {
         return Err(anyhow!("Scylla restore requires Versioned snapshot"));
     };
-    let session = client.inner.session().await?;
+    let session = client.inner.session();
     let prepared = client.inner.prepared().await?;
     session
         .execute_unpaged(
