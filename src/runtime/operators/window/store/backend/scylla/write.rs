@@ -13,7 +13,7 @@ use crate::runtime::operators::window::model::{
 use crate::runtime::operators::window::store::backend::codec::{encode_batch, encode_val};
 use crate::runtime::operators::window::store::data::cursors_from_batch;
 
-use super::cql::unlogged_batch;
+use super::cql::{lwt_applied, unlogged_batch, encode_owner_writer, HeadClaim};
 use super::schema::{align_down, kg_shard, RAW_BUCKET_MS, TRIGGER_BUCKET_MS};
 use super::store::ScyllaWindowStoreClient;
 
@@ -33,12 +33,103 @@ pub(super) async fn insert_key_state(
     Ok(())
 }
 
-/// Write versioned raw / tiles / key_state / triggers. One UNLOGGED BATCH
-/// per Scylla partition (prepared statements — unprepared values in a batch
-/// would prepare sequentially). Independent partitions are joined.
+/// One chosen owner LWT from overlay/load. No probe chain, no last-write-wins,
+/// and `key_group_range` is routing only — not a head-claim signal.
 ///
-/// Serving (`window_head`) is not published here. WO reads use the writer
-/// overlay (same attempt). Steal / promote lands in the checkpoint PR.
+/// `owner_writer` is length-prefixed `attempt || vertex` (`WriterId` on the
+/// scope stays vertex). After restore, first touch steals
+/// `WriterId(base.attempt, vertex)`; later publishes `UPDATE IF owner = me`.
+/// CAS failure fences; do not fall through to a second LWT.
+///
+/// Later: Foyer so hot path can `IF writer_epoch = prev`; split writer vs
+/// serving until recovery catch-up (WRO pin); `USING TIMESTAMP` if LWT p99
+/// dominates.
+pub(super) async fn publish_head(
+    client: &ScyllaWindowStoreClient,
+    session: &Session,
+    partition: &PartitionKey,
+    kg: i32,
+    epoch: i64,
+) -> Result<()> {
+    let prepared = client.inner.prepared().await?;
+    let me = client.owner_writer();
+    let claim = client.head_claim(&partition.business_key).await;
+    let result = match claim {
+        HeadClaim::Ours => {
+            session
+                .execute_unpaged(
+                    &prepared.update_head_if_owner,
+                    (
+                        me.clone(),
+                        client.scope.attempt.clone(),
+                        epoch,
+                        client.scope.attempt.clone(),
+                        epoch,
+                        client.scope.namespace.bytes.clone(),
+                        kg,
+                        partition.business_key.clone(),
+                        me,
+                    ),
+                )
+                .await?
+        }
+        HeadClaim::Steal => {
+            let previous = {
+                let base = client.restore_base.lock().await;
+                let Some(base) = base.as_ref() else {
+                    anyhow::bail!("steal head without restore_base");
+                };
+                encode_owner_writer(&base.attempt, &client.scope.writer_id.0)
+            };
+            session
+                .execute_unpaged(
+                    &prepared.update_head_if_owner,
+                    (
+                        me.clone(),
+                        client.scope.attempt.clone(),
+                        epoch,
+                        client.scope.attempt.clone(),
+                        epoch,
+                        client.scope.namespace.bytes.clone(),
+                        kg,
+                        partition.business_key.clone(),
+                        previous,
+                    ),
+                )
+                .await?
+        }
+        HeadClaim::Empty => {
+            session
+                .execute_unpaged(
+                    &prepared.insert_head_if_not_exists,
+                    (
+                        client.scope.namespace.bytes.clone(),
+                        kg,
+                        partition.business_key.clone(),
+                        me,
+                        client.scope.attempt.clone(),
+                        epoch,
+                        client.scope.attempt.clone(),
+                        epoch,
+                    ),
+                )
+                .await?
+        }
+    };
+    if !lwt_applied(result)? {
+        anyhow::bail!("window_head is owned by another writer; refusing to publish serving");
+    }
+    client
+        .head_claims
+        .insert(partition.business_key.clone(), HeadClaim::Ours);
+    Ok(())
+}
+
+/// Write data then publish head. Data: one UNLOGGED BATCH per Scylla
+/// partition (prepared statements — unprepared values in a batch would
+/// prepare sequentially). Independent partitions are joined; head stays
+/// after that (visibility boundary). Head is one chosen owner LWT
+/// (see `publish_head`).
 pub(super) async fn commit_events(
     client: &ScyllaWindowStoreClient,
     partition: &PartitionKey,
@@ -191,7 +282,7 @@ pub(super) async fn commit_events(
         key_state_fut,
         try_join_all(trigger_futs),
     )?;
-    Ok(())
+    publish_head(client, &session, partition, kg, epoch).await
 }
 
 pub(super) async fn store_key_state(
@@ -213,5 +304,6 @@ pub(super) async fn store_key_state(
         epoch,
         state,
     )
-    .await
+    .await?;
+    publish_head(client, &session, partition, kg, epoch).await
 }

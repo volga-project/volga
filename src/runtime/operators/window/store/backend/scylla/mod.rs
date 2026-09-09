@@ -1,3 +1,4 @@
+mod checkpoint;
 mod cql;
 mod read;
 mod schema;

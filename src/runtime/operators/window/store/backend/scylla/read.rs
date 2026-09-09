@@ -10,6 +10,7 @@ use crate::runtime::operators::window::model::{
 };
 use crate::runtime::operators::window::store::backend::codec::{decode_batch, decode_val};
 
+use super::cql::HeadClaim;
 use super::schema::{align_down, RAW_BUCKET_MS};
 use super::store::ScyllaWindowStoreClient;
 
@@ -31,17 +32,27 @@ pub(super) async fn load_key_state(
         )
         .await?;
     let rows = result.into_rows_result()?;
-    let mut best: Option<(i64, KeyState)> = None;
+    let mut best: Option<(Vec<u8>, i64, KeyState)> = None;
     for row in rows.rows::<(Vec<u8>, i64, Vec<u8>)>()? {
         let (attempt, epoch, payload) = row?;
-        if !client.overlay_ok(&attempt, epoch, None) {
+        if !client.overlay_visible(&attempt, epoch).await {
             continue;
         }
-        if best.as_ref().map_or(true, |(e, _)| epoch > *e) {
-            best = Some((epoch, decode_val(&payload)?));
+        if best.as_ref().map_or(true, |(_, e, _)| epoch > *e) {
+            best = Some((attempt, epoch, decode_val(&payload)?));
         }
     }
-    Ok(best.map(|(_, s)| s).unwrap_or_default())
+    let claim = match best.as_ref() {
+        None => HeadClaim::Empty,
+        Some((attempt, _, _)) if attempt.as_slice() == client.scope.attempt.as_slice() => {
+            HeadClaim::Ours
+        }
+        Some(_) => HeadClaim::Steal,
+    };
+    client
+        .head_claims
+        .insert(partition.business_key.clone(), claim);
+    Ok(best.map(|(_, _, s)| s).unwrap_or_default())
 }
 
 pub(super) async fn load_raw(
@@ -81,7 +92,7 @@ pub(super) async fn load_raw(
             if cursor < from || cursor >= to {
                 continue;
             }
-            if !client.overlay_ok(&attempt, epoch, None) {
+            if !client.overlay_visible(&attempt, epoch).await {
                 continue;
             }
             by_cursor.insert(cursor, decode_batch(&payload)?);
@@ -124,7 +135,7 @@ pub(super) async fn load_tiles(
         let mut best: BTreeMap<i64, (i64, Vec<u8>)> = BTreeMap::new();
         for row in rows.rows::<(i64, Vec<u8>, i64, Vec<u8>)>()? {
             let (tile_start, attempt, epoch, payload) = row?;
-            if !client.overlay_ok(&attempt, epoch, None) {
+            if !client.overlay_visible(&attempt, epoch).await {
                 continue;
             }
             if best.get(&tile_start).map_or(true, |(e, _)| epoch >= *e) {

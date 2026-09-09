@@ -5,8 +5,10 @@ use std::sync::Arc;
 use anyhow::{anyhow, Result};
 use arrow::array::RecordBatch;
 use async_trait::async_trait;
+use dashmap::DashMap;
 use scylla::client::session::Session;
 use tokio::sync::OnceCell;
+use tokio::sync::Mutex as AsyncMutex;
 
 use crate::api::spec::state::ScyllaConfig;
 use crate::runtime::operators::window::model::{
@@ -15,14 +17,15 @@ use crate::runtime::operators::window::model::{
 use crate::runtime::state::{OperatorStore, OperatorTaskState, StateSessionHandle};
 
 use super::cql::{
-    prepare_stmts, PreparedDml, INSERT_KEY_STATES, INSERT_KG_BUCKETS, INSERT_RAW, INSERT_TILES,
+    encode_owner_writer, prepare_stmts, HeadClaim, PreparedDml, INSERT_HEAD_IF_NOT_EXISTS,
+    INSERT_KEY_STATES, INSERT_KG_BUCKETS, INSERT_RAW, INSERT_RECOVERY_BASES, INSERT_TILES,
     INSERT_TRIGGERS, SELECT_KEY_STATE, SELECT_RAW, SELECT_TILES, SELECT_TRIGGERS,
-    SELECT_TRIGGERS_AFTER,
+    SELECT_TRIGGERS_AFTER, UPDATE_HEAD_IF_OWNER,
 };
 use super::schema::TABLES;
-use super::{read, triggers, write};
+use super::{checkpoint, read, triggers, write};
 use crate::runtime::operators::window::store::backend::{
-    WindowBackendSnapshot, WindowOperatorStore, WindowStoreTaskScope,
+    StateVersion, WindowBackendSnapshot, WindowOperatorStore, WindowStoreTaskScope,
 };
 
 #[derive(Clone)]
@@ -79,6 +82,9 @@ impl ScyllaWindowStore {
                     insert_tiles,
                     insert_key_states,
                     insert_triggers,
+                    update_head_if_owner,
+                    insert_head_if_not_exists,
+                    insert_recovery_bases,
                     select_key_state,
                     select_raw,
                     select_tiles,
@@ -92,6 +98,9 @@ impl ScyllaWindowStore {
                         INSERT_TILES,
                         INSERT_KEY_STATES,
                         INSERT_TRIGGERS,
+                        UPDATE_HEAD_IF_OWNER,
+                        INSERT_HEAD_IF_NOT_EXISTS,
+                        INSERT_RECOVERY_BASES,
                         SELECT_KEY_STATE,
                         SELECT_RAW,
                         SELECT_TILES,
@@ -106,6 +115,9 @@ impl ScyllaWindowStore {
                     insert_tiles,
                     insert_key_states,
                     insert_triggers,
+                    update_head_if_owner,
+                    insert_head_if_not_exists,
+                    insert_recovery_bases,
                     select_key_state,
                     select_raw,
                     select_tiles,
@@ -122,6 +134,8 @@ impl ScyllaWindowStore {
             inner: Arc::new(self.clone()),
             scope,
             last_epoch: Arc::new(AtomicI64::new(0)),
+            restore_base: Arc::new(AsyncMutex::new(None)),
+            head_claims: Arc::new(DashMap::new()),
         }
     }
 }
@@ -130,7 +144,9 @@ impl ScyllaWindowStore {
 pub struct ScyllaWindowStoreClient {
     pub(super) inner: Arc<ScyllaWindowStore>,
     pub(super) scope: WindowStoreTaskScope,
-    last_epoch: Arc<AtomicI64>,
+    pub(super) last_epoch: Arc<AtomicI64>,
+    pub(super) restore_base: Arc<AsyncMutex<Option<StateVersion>>>,
+    pub(super) head_claims: Arc<DashMap<Vec<u8>, HeadClaim>>,
 }
 
 impl std::fmt::Debug for ScyllaWindowStoreClient {
@@ -159,8 +175,37 @@ impl ScyllaWindowStoreClient {
         self.last_epoch.fetch_add(1, Ordering::AcqRel) + 1
     }
 
+    pub(super) fn owner_writer(&self) -> Vec<u8> {
+        encode_owner_writer(&self.scope.attempt, &self.scope.writer_id.0)
+    }
+
+    pub(super) async fn head_claim(&self, key: &[u8]) -> HeadClaim {
+        if let Some(claim) = self.head_claims.get(key) {
+            return *claim;
+        }
+        if self.restore_base.lock().await.is_some() {
+            HeadClaim::Steal
+        } else {
+            HeadClaim::Empty
+        }
+    }
+
     pub(super) fn overlay_ok(&self, attempt: &[u8], epoch: i64, writer_epoch: Option<i64>) -> bool {
-        attempt == self.scope.attempt.as_slice() && writer_epoch.map_or(true, |cut| epoch <= cut)
+        if attempt == self.scope.attempt.as_slice() {
+            return writer_epoch.map_or(true, |cut| epoch <= cut);
+        }
+        false
+    }
+
+    pub(super) async fn overlay_visible(&self, attempt: &[u8], epoch: i64) -> bool {
+        if self.overlay_ok(attempt, epoch, None) {
+            return true;
+        }
+        let base = self.restore_base.lock().await;
+        match base.as_ref() {
+            Some(base) => attempt == base.attempt.as_slice() && epoch <= base.epoch as i64,
+            None => false,
+        }
     }
 }
 
@@ -213,11 +258,11 @@ impl WindowOperatorStore for ScyllaWindowStoreClient {
     }
 
     async fn checkpoint(&self) -> Result<WindowBackendSnapshot> {
-        anyhow::bail!("Scylla checkpoint lands in feat/scylla-wo-checkpoint")
+        checkpoint::checkpoint(self).await
     }
 
-    async fn restore(&self, _snapshot: &WindowBackendSnapshot) -> Result<()> {
-        anyhow::bail!("Scylla restore lands in feat/scylla-wo-checkpoint")
+    async fn restore(&self, snapshot: &WindowBackendSnapshot) -> Result<()> {
+        checkpoint::restore(self, snapshot).await
     }
 }
 
