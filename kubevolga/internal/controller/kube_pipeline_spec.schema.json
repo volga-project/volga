@@ -30,6 +30,15 @@
       ],
       "default": null
     },
+    "max_parallelism": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint",
+      "default": null,
+      "minimum": 0
+    },
     "operator_overrides": {
       "default": {
         "defaults": {
@@ -38,15 +47,6 @@
         },
         "per_operator": {}
       }
-    },
-    "max_parallelism": {
-      "type": [
-        "integer",
-        "null"
-      ],
-      "format": "uint",
-      "minimum": 0,
-      "default": null
     },
     "parallelism": {
       "type": "integer",
@@ -219,12 +219,75 @@
       ]
     },
     "OperatorStateBackendConfig": {
-      "type": "string",
-      "enum": [
-        "in_memory"
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "in_memory"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "scylla": {
+              "$ref": "#/$defs/ScyllaConfig"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "scylla"
+          ]
+        }
       ]
     },
-    "RequestStoreConfig": false,
+    "RequestStoreConfig": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "scylla": {
+              "$ref": "#/$defs/ScyllaConfig"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "scylla"
+          ]
+        }
+      ]
+    },
+    "ScyllaConfig": {
+      "type": "object",
+      "properties": {
+        "contact_points": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "datacenter": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "keyspace": {
+          "type": "string"
+        },
+        "max_parallelism": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "contact_points",
+        "keyspace"
+      ]
+    },
     "StateSpec": {
       "type": "object",
       "properties": {
@@ -308,7 +371,7 @@
       "type": "object",
       "properties": {
         "emit_interval_ms": {
-          "description": "Processing-time interval for coalescing watermark emits (ms).\nUnset uses the runtime default (200ms). Batch does not assign watermarks (EOF flush only).",
+          "description": "Event-time emit period and wall-clock cap (ms). Unset uses the runtime\ndefault (200ms). Batch does not assign watermarks (EOF flush only).",
           "type": [
             "integer",
             "null"

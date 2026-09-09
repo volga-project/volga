@@ -176,4 +176,31 @@ mod tests {
             other => panic!("expected InMemoryStorageGrpc sink, got {:?}", other),
         }
     }
+
+    #[test]
+    fn kube_pipeline_spec_parses_scylla_state() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src/api/spec/testdata/kube_scylla_state.yaml");
+        let yaml = fs::read_to_string(&path).expect("read scylla kube fixture");
+        let yaml_value: serde_yaml::Value =
+            serde_yaml::from_str(&yaml).expect("parse scylla kube yaml");
+        let json_value = serde_json::to_value(yaml_value).expect("yaml value to json");
+        let kube_spec: KubePipelineSpec =
+            serde_json::from_value(json_value).expect("deserialize KubePipelineSpec");
+        let spec = PipelineSpec::try_from(kube_spec).expect("kube scylla spec should parse");
+        match &spec.state.operator_backend {
+            crate::api::spec::state::OperatorStateBackendConfig::Scylla(cfg) => {
+                assert_eq!(cfg.contact_points, vec!["127.0.0.1:9042"]);
+                assert_eq!(cfg.keyspace, "volga_window");
+                assert_eq!(cfg.datacenter.as_deref(), Some("datacenter1"));
+            }
+            other => panic!("expected Scylla operator backend, got {other:?}"),
+        }
+        match &spec.state.request_store {
+            Some(crate::api::spec::state::RequestStoreConfig::Scylla(cfg)) => {
+                assert_eq!(cfg.keyspace, "volga_window");
+            }
+            other => panic!("expected Scylla request store, got {other:?}"),
+        }
+    }
 }
