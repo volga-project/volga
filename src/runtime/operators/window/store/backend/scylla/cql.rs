@@ -75,7 +75,9 @@ pub(super) enum HeadClaim {
     Steal,
     /// We own the row; serving is still the previous cut.
     Fenced,
-    /// We own the row; OnCommit may promote serving.
+    /// Caught up; waiting for the publish cadence to promote serving.
+    Pending,
+    /// We own the row; serving has been published at least once this attempt.
     Ours,
 }
 

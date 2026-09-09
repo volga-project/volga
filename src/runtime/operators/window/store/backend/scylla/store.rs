@@ -1,6 +1,7 @@
 use std::any::Any;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::{anyhow, Result};
 use arrow::array::RecordBatch;
@@ -142,6 +143,7 @@ impl ScyllaWindowStore {
             last_epoch: Arc::new(AtomicI64::new(0)),
             restore_base: Arc::new(AsyncMutex::new(None)),
             head_claims: Arc::new(DashMap::new()),
+            last_promoted: Arc::new(DashMap::new()),
         }
     }
 }
@@ -153,6 +155,7 @@ pub struct ScyllaWindowStoreClient {
     pub(super) last_epoch: Arc<AtomicI64>,
     pub(super) restore_base: Arc<AsyncMutex<Option<StateVersion>>>,
     pub(super) head_claims: Arc<DashMap<Vec<u8>, HeadClaim>>,
+    pub(super) last_promoted: Arc<DashMap<Vec<u8>, (i64, Instant)>>,
 }
 
 impl std::fmt::Debug for ScyllaWindowStoreClient {

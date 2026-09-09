@@ -131,7 +131,7 @@ async fn serving_key_state(
     Ok(None)
 }
 
-async fn promote_serving(
+pub(super) async fn promote_serving(
     client: &ScyllaWindowStoreClient,
     session: &Session,
     partition: &PartitionKey,
@@ -161,6 +161,10 @@ async fn promote_serving(
     client
         .head_claims
         .insert(partition.business_key.clone(), HeadClaim::Ours);
+    client.last_promoted.insert(
+        partition.business_key.clone(),
+        (epoch, std::time::Instant::now()),
+    );
     Ok(())
 }
 
@@ -194,11 +198,16 @@ async fn insert_head_empty(
     client
         .head_claims
         .insert(partition.business_key.clone(), HeadClaim::Ours);
+    client.last_promoted.insert(
+        partition.business_key.clone(),
+        (epoch, std::time::Instant::now()),
+    );
     Ok(())
 }
 
-/// After data is durable: first snapshot, or OnCommit promote once catch-up
-/// allows it. Steal does not move serving.
+/// After data is durable: first snapshot, or promote serving according to
+/// `ServingPublish`. Steal does not move serving. Catch-up freeze still
+/// wins over cadence.
 ///
 /// Timeout is unknown Paxos. Do not `inc_epoch` and republish; fail the task.
 pub(super) async fn publish_serving(
@@ -218,11 +227,38 @@ pub(super) async fn publish_serving(
             }
             match serving_key_state(client, session, partition, kg).await? {
                 Some(serving) if !serving_caught_up(writer_state, &serving) => Ok(()),
-                _ => promote_serving(client, session, partition, kg, epoch).await,
+                _ => maybe_promote(client, session, partition, kg, epoch).await,
             }
         }
-        HeadClaim::Ours => promote_serving(client, session, partition, kg, epoch).await,
+        HeadClaim::Pending | HeadClaim::Ours => {
+            maybe_promote(client, session, partition, kg, epoch).await
+        }
     }
+}
+
+async fn maybe_promote(
+    client: &ScyllaWindowStoreClient,
+    session: &Session,
+    partition: &PartitionKey,
+    kg: i32,
+    epoch: i64,
+) -> Result<()> {
+    let last = client
+        .last_promoted
+        .get(&partition.business_key)
+        .map(|e| e.1);
+    if !client
+        .inner
+        .config
+        .serving_publish
+        .promote_on_ingest(last)
+    {
+        client
+            .head_claims
+            .insert(partition.business_key.clone(), HeadClaim::Pending);
+        return Ok(());
+    }
+    promote_serving(client, session, partition, kg, epoch).await
 }
 
 #[cfg(test)]
@@ -247,6 +283,20 @@ mod serving_catch_up_tests {
     }
 
     #[test]
+    fn ingest_cadence() {
+        use crate::api::spec::state::ServingPublish;
+        use std::time::{Duration, Instant};
+
+        assert!(ServingPublish::OnCommit.promote_on_ingest(None));
+        assert!(ServingPublish::OnCommit.promote_on_ingest(Some(Instant::now())));
+        assert!(!ServingPublish::Checkpoint.promote_on_ingest(None));
+        assert!(ServingPublish::Interval { interval_ms: 1_000 }.promote_on_ingest(None));
+        let stale = Instant::now() - Duration::from_secs(2);
+        assert!(ServingPublish::Interval { interval_ms: 1_000 }.promote_on_ingest(Some(stale)));
+        assert!(!ServingPublish::Interval { interval_ms: 60_000 }.promote_on_ingest(Some(Instant::now())));
+    }
+
+    #[test]
     fn through_must_reach_serving() {
         let serving = state(5, Some((1_000, 4)));
         assert!(!serving_caught_up(&state(5, Some((1_000, 3))), &serving));
@@ -258,7 +308,7 @@ mod serving_catch_up_tests {
 /// Write data then publish serving if due. Data: one UNLOGGED BATCH per
 /// Scylla partition. Independent partitions are joined. Owner steal (if
 /// needed) runs before data; serving promote is a separate LWT after
-/// (`OnCommit` once catch-up allows it).
+/// (`OnCommit` / interval / checkpoint after catch-up).
 ///
 /// `Err` after the driver gives up is unknown (write/LWT timeout). Do not
 /// `inc_epoch` and republish; fail the task and restore. Same-epoch retry

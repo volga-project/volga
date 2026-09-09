@@ -18,6 +18,19 @@ pub enum OperatorStateBackendConfig {
     Scylla(ScyllaConfig),
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ServingPublish {
+    /// Wait for the serving LWT after each ingest (once catch-up allows).
+    #[default]
+    OnCommit,
+    /// Ingest does not wait. Promote this key when `interval_ms` has elapsed
+    /// since its last promote. Checkpoint also flushes touched keys.
+    Interval { interval_ms: u64 },
+    /// Ingest does not wait. Promote touched keys on checkpoint only.
+    Checkpoint,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct ScyllaConfig {
@@ -25,6 +38,29 @@ pub struct ScyllaConfig {
     pub keyspace: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub datacenter: Option<String>,
+    /// How often this writer publishes `window_head.serving_*`. Default
+    /// `on_commit`. Not a fence — owner CAS is. WRO always pins serving.
+    #[serde(default, skip_serializing_if = "is_on_commit_publish")]
+    pub serving_publish: ServingPublish,
+}
+
+fn is_on_commit_publish(policy: &ServingPublish) -> bool {
+    matches!(policy, ServingPublish::OnCommit)
+}
+
+impl ServingPublish {
+    /// Whether ingest should wait on `promote_serving` (after catch-up).
+    /// `last` is this key's last successful promote time (`None` = never).
+    pub fn promote_on_ingest(&self, last: Option<std::time::Instant>) -> bool {
+        match self {
+            Self::OnCommit => true,
+            Self::Checkpoint => false,
+            Self::Interval { interval_ms } => match last {
+                None => true,
+                Some(at) => at.elapsed() >= Duration::from_millis(*interval_ms),
+            },
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
