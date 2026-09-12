@@ -21,8 +21,7 @@ impl Message<Configure> for Worker {
             return Err("Worker is already running; reset before reconfigure".to_string());
         }
         self.reset_async().await;
-        self.configure(msg.0);
-        Ok(())
+        self.configure(msg.0).await
     }
 }
 
