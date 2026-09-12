@@ -6,6 +6,7 @@ use crate::common::message::Message;
 use crate::common::MAX_WATERMARK_VALUE;
 use crate::runtime::operators::operator::{StreamOperator, VecOutput};
 use crate::runtime::operators::window::operator::WindowOperatorConfig;
+use crate::runtime::operators::window::store::trigger_fetch_limit;
 use crate::runtime::operators::window::{
     TileConfig, TimeGranularity, TASK_METADATA_ROWS_ACCEPTED, TASK_METADATA_ROWS_DROPPED_LATE,
 };
@@ -199,21 +200,23 @@ WINDOW w AS (
   ORDER BY timestamp
   RANGE BETWEEN INTERVAL '5000' MILLISECOND PRECEDING AND CURRENT ROW
 )"#;
-    let n = 300i64;
+    let n = (trigger_fetch_limit() + 34) as i64;
+    let wm = (n * 10) as u64;
     let ts: Vec<i64> = (1..=n).map(|i| i * 10).collect();
     let vals: Vec<f64> = (1..=n).map(|i| i as f64).collect();
     let keys: Vec<&str> = vec!["A"; n as usize];
     let exec = window_exec_from_sql(sql).await;
     let mut h = Harness::new(WindowOperatorConfig::new(exec)).await;
     h.ingest(batch(ts, vals, keys), "A").await;
+    let accepted = n.to_string();
     assert_eq!(
         h.task_metadata.get(TASK_METADATA_ROWS_ACCEPTED).as_deref(),
-        Some("300")
+        Some(accepted.as_str())
     );
 
     let mut out = VecOutput::default();
     h.op.handle_watermark(
-        match watermark_message(3_000) {
+        match watermark_message(wm) {
             Message::Watermark(w) => w,
             other => panic!("expected watermark, got {other:?}"),
         },
@@ -233,7 +236,7 @@ WINDOW w AS (
                 rows += base.record_batch.num_rows();
             }
             Message::Watermark(w) => {
-                assert_eq!(w.watermark_value, 3_000);
+                assert_eq!(w.watermark_value, wm);
                 saw_wm = true;
             }
             other => panic!("expected due page or watermark, got {other:?}"),
@@ -242,20 +245,24 @@ WINDOW w AS (
     assert!(saw_wm);
     assert!(
         pages >= 2,
-        "300 triggers should span more than one due page"
+        "{n} triggers should span more than one due page"
     );
-    assert_eq!(rows, 300);
+    assert_eq!(rows, n as usize);
 
     let mut extra = VecOutput::default();
     h.op.process_data(
-        vec![keyed_message(batch(vec![4_000], vec![1.0], vec!["A"]), "A")],
+        vec![keyed_message(
+            batch(vec![(wm as i64) + 1_000], vec![1.0], vec!["A"]),
+            "A",
+        )],
         &mut extra,
     )
     .await
     .expect("ingest after watermark");
     assert!(extra.messages.is_empty());
+    let accepted_after = (n + 1).to_string();
     assert_eq!(
         h.task_metadata.get(TASK_METADATA_ROWS_ACCEPTED).as_deref(),
-        Some("301")
+        Some(accepted_after.as_str())
     );
 }
