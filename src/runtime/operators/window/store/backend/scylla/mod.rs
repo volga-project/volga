@@ -2,7 +2,7 @@ mod cql;
 mod read;
 mod schema;
 mod store;
-mod stream;
+mod triggers;
 mod write;
 
 pub use store::{ScyllaWindowStore, ScyllaWindowStoreClient};

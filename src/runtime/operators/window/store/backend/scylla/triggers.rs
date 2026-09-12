@@ -42,7 +42,7 @@ struct TriggerSeek {
     epoch: i64,
 }
 
-struct DueScan {
+struct TriggerScan {
     client: ScyllaWindowStoreClient,
     after: Option<Cursor>,
     through: Cursor,
@@ -53,7 +53,7 @@ struct DueScan {
     leftover: VecDeque<WindowTrigger>,
 }
 
-impl DueScan {
+impl TriggerScan {
     async fn new(
         client: ScyllaWindowStoreClient,
         after: Option<Cursor>,
@@ -298,7 +298,7 @@ pub(super) async fn load_triggers(
     resume: Option<&TriggerResume>,
     limit: usize,
 ) -> Result<(Vec<WindowTrigger>, Option<TriggerResume>)> {
-    let mut scan = DueScan::new(client.clone(), after, through, resume).await?;
+    let mut scan = TriggerScan::new(client.clone(), after, through, resume).await?;
     let selected = scan.take_visible(limit).await?;
     if selected.is_empty() {
         return Ok((Vec::new(), None));

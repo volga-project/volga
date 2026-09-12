@@ -20,7 +20,7 @@ use super::cql::{
     SELECT_TRIGGERS_AFTER,
 };
 use super::schema::TABLES;
-use super::{read, stream, write};
+use super::{read, triggers, write};
 use crate::runtime::operators::window::store::backend::{
     WindowBackendSnapshot, WindowOperatorStore, WindowStoreTaskScope,
 };
@@ -205,7 +205,7 @@ impl WindowOperatorStore for ScyllaWindowStoreClient {
         Vec<WindowTrigger>,
         Option<crate::runtime::operators::window::store::TriggerResume>,
     )> {
-        stream::load_triggers(self, after, through, resume, limit).await
+        triggers::load_triggers(self, after, through, resume, limit).await
     }
 
     async fn store_key_state(&self, partition: &PartitionKey, state: &KeyState) -> Result<()> {
