@@ -18,13 +18,16 @@ use crate::runtime::operators::window::model::{
 use crate::runtime::state::{OperatorStore, OperatorTaskState, StateSessionHandle};
 
 use super::cql::{
-    encode_owner_writer, prepare_stmts, HeadClaim, PreparedDml, INSERT_HEAD_IF_NOT_EXISTS,
-    INSERT_KEY_STATES, INSERT_KG_BUCKETS, INSERT_RAW, INSERT_RECOVERY_BASES, INSERT_TILES,
-    INSERT_TRIGGERS, SELECT_HEAD, SELECT_KEY_STATE, SELECT_RAW, SELECT_TILES, SELECT_TRIGGERS,
-    SELECT_TRIGGERS_AFTER, UPDATE_HEAD_PROMOTE_SERVING, UPDATE_HEAD_STEAL_OWNER,
+    encode_owner_writer, prepare_stmts, HeadClaim, PreparedDml, DELETE_KG_BUCKETS,
+    DELETE_KEY_STATE_VERSION, DELETE_RAW, DELETE_RAW_VERSION, DELETE_TILES, DELETE_TILE_VERSION,
+    INSERT_HEAD_IF_NOT_EXISTS, INSERT_KEY_STATES, INSERT_KG_BUCKETS, INSERT_RAW,
+    INSERT_RECOVERY_BASES, INSERT_TILES, INSERT_TRIGGERS, SELECT_HEAD, SELECT_HEAD_VERSIONS,
+    SELECT_KEY_STATE, SELECT_KEY_STATE_VERSIONS, SELECT_KG_BUCKETS, SELECT_RAW, SELECT_RAW_VERSIONS,
+    SELECT_RECOVERY_BASES, SELECT_TILES, SELECT_TILE_VERSIONS, SELECT_TRIGGERS, SELECT_TRIGGERS_AFTER,
+    UPDATE_HEAD_PROMOTE_SERVING, UPDATE_HEAD_STEAL_OWNER,
 };
 use super::schema::TABLES;
-use super::{checkpoint, read, triggers, write};
+use super::{checkpoint, maintain, read, triggers, write};
 use crate::runtime::operators::window::store::backend::{
     StateVersion, WindowBackendSnapshot, WindowOperatorStore, WindowStoreTaskScope,
 };
@@ -92,6 +95,18 @@ impl ScyllaWindowStore {
                     select_tiles,
                     select_triggers,
                     select_triggers_after,
+                    select_kg_buckets,
+                    select_head_versions,
+                    select_recovery_bases,
+                    select_key_state_versions,
+                    select_raw_versions,
+                    select_tile_versions,
+                    delete_raw,
+                    delete_tiles,
+                    delete_kg_buckets,
+                    delete_key_state_version,
+                    delete_raw_version,
+                    delete_tile_version,
                     select_head,
                 ] = prepare_stmts(
                     session.as_ref(),
@@ -110,11 +125,23 @@ impl ScyllaWindowStore {
                         SELECT_TILES,
                         SELECT_TRIGGERS,
                         SELECT_TRIGGERS_AFTER,
+                        SELECT_KG_BUCKETS,
+                        SELECT_HEAD_VERSIONS,
+                        SELECT_RECOVERY_BASES,
+                        SELECT_KEY_STATE_VERSIONS,
+                        SELECT_RAW_VERSIONS,
+                        SELECT_TILE_VERSIONS,
+                        DELETE_RAW,
+                        DELETE_TILES,
+                        DELETE_KG_BUCKETS,
+                        DELETE_KEY_STATE_VERSION,
+                        DELETE_RAW_VERSION,
+                        DELETE_TILE_VERSION,
                         SELECT_HEAD,
                     ],
                 )
                 .await?;
-                Ok::<_, anyhow::Error>(PreparedDml {
+                let mut prepared = PreparedDml {
                     insert_raw,
                     insert_kg_buckets,
                     insert_tiles,
@@ -129,8 +156,22 @@ impl ScyllaWindowStore {
                     select_tiles,
                     select_triggers,
                     select_triggers_after,
+                    select_kg_buckets,
+                    select_head_versions,
+                    select_recovery_bases,
+                    select_key_state_versions,
+                    select_raw_versions,
+                    select_tile_versions,
+                    delete_raw,
+                    delete_tiles,
+                    delete_kg_buckets,
+                    delete_key_state_version,
+                    delete_raw_version,
+                    delete_tile_version,
                     select_head,
-                })
+                };
+                prepared.mark_idempotent_dml();
+                Ok::<_, anyhow::Error>(prepared)
             })
             .await
             .map_err(|e| anyhow!("{e}"))
@@ -283,10 +324,10 @@ impl OperatorStore for ScyllaWindowStoreClient {
 
     async fn maintain(
         &self,
-        _ns: &crate::runtime::operators::window::model::StateNamespace,
-        _state: &dyn OperatorTaskState,
+        ns: &crate::runtime::operators::window::model::StateNamespace,
+        state: &dyn OperatorTaskState,
     ) -> Result<()> {
-        anyhow::bail!("Scylla maintain lands in feat/scylla-wo-maintain")
+        self.inner.maintain(ns, state).await
     }
 }
 
@@ -298,9 +339,9 @@ impl OperatorStore for ScyllaWindowStore {
 
     async fn maintain(
         &self,
-        _ns: &crate::runtime::operators::window::model::StateNamespace,
-        _state: &dyn OperatorTaskState,
+        ns: &crate::runtime::operators::window::model::StateNamespace,
+        state: &dyn OperatorTaskState,
     ) -> Result<()> {
-        anyhow::bail!("Scylla maintain lands in feat/scylla-wo-maintain")
+        maintain::maintain(self, ns, state).await
     }
 }
