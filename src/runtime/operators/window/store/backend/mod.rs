@@ -1,3 +1,4 @@
+use std::any::Any;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -11,15 +12,18 @@ use crate::runtime::operators::window::model::{
     Cursor, KeyState, PartitionKey, RawRun, StateNamespace, TileMap, TileRun, WindowTrigger,
 };
 use crate::runtime::operators::OperatorKind;
-use crate::runtime::state::{OperatorStore, StateRegistry};
+use crate::runtime::state::{OperatorStore, StateRegistry, StateSessionHandle};
 
 use super::WindowData;
 
+mod codec;
 mod due;
 mod inmem;
+mod scylla;
 
 pub use due::{collect_due, trigger_page_size};
 pub use inmem::{InMemWindowStore, InMemWindowStoreClient};
+pub use scylla::{ScyllaWindowStore, ScyllaWindowStoreClient};
 
 /// Job-level execution attempt stamped on published versions.
 pub type AttemptToken = Vec<u8>;
@@ -70,6 +74,26 @@ pub fn open_window_operator_store(
                 .clone();
             Ok(Arc::new(inmem.client(scope.clone())) as Arc<dyn WindowOperatorStore>)
         }
+        OperatorStateBackendConfig::Scylla(cfg) => {
+            anyhow::ensure!(
+                !scope.attempt.is_empty(),
+                "Scylla window store requires execution_attempt_id"
+            );
+            let cfg = cfg.clone();
+            let registered = registry.get_or_insert_store(OperatorKind::Window, move |session| {
+                let session = match session {
+                    Some(StateSessionHandle::Scylla(session)) => Arc::clone(session),
+                    None => panic!("Scylla window store requires StateSessionHandle::Scylla"),
+                };
+                Arc::new(ScyllaWindowStore::new(cfg.clone(), session)) as Arc<dyn OperatorStore>
+            });
+            let store = registered
+                .as_any()
+                .downcast_ref::<ScyllaWindowStore>()
+                .expect("window Scylla store type")
+                .clone();
+            Ok(Arc::new(store.client(scope.clone())) as Arc<dyn WindowOperatorStore>)
+        }
     }
 }
 
@@ -100,18 +124,39 @@ pub struct DueWindowWork {
 }
 
 /// Opaque pager token. Only the backend that produced it should pass it back.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TriggerResume {
-    last: WindowTrigger,
+    last: Option<WindowTrigger>,
+    backend: Option<Arc<dyn Any + Send + Sync>>,
+}
+
+impl std::fmt::Debug for TriggerResume {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TriggerResume").finish_non_exhaustive()
+    }
 }
 
 impl TriggerResume {
     pub(crate) fn after_visible(last: WindowTrigger) -> Self {
-        Self { last }
+        Self {
+            last: Some(last),
+            backend: None,
+        }
     }
 
     pub(crate) fn last(&self) -> &WindowTrigger {
-        &self.last
+        self.last.as_ref().expect("visible resume")
+    }
+
+    pub(crate) fn opaque<T: Any + Send + Sync>(value: T) -> Self {
+        Self {
+            last: None,
+            backend: Some(Arc::new(value)),
+        }
+    }
+
+    pub(crate) fn downcast<T: Any>(&self) -> Option<&T> {
+        self.backend.as_ref()?.downcast_ref()
     }
 }
 

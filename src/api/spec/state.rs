@@ -15,6 +15,16 @@ pub enum CheckpointStoreConfig {
 pub enum OperatorStateBackendConfig {
     #[default]
     InMemory,
+    Scylla(ScyllaConfig),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct ScyllaConfig {
+    pub contact_points: Vec<String>,
+    pub keyspace: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub datacenter: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
