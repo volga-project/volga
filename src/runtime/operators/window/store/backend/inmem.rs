@@ -16,7 +16,6 @@ use serde::{Deserialize, Serialize};
 
 use std::any::Any;
 
-use crate::runtime::consts::{runtime_consts, WINDOW_PROCESS_PAGE_SIZE};
 use crate::runtime::metrics::MetricsLabels;
 use crate::runtime::operators::window::metrics;
 use crate::common::KeyGroupRange;
@@ -25,7 +24,7 @@ use crate::runtime::operators::window::state::WindowOperatorState;
 use crate::runtime::state::{OperatorStore, OperatorTaskState};
 
 use super::{
-    DueWindowWork, DueWorkStream, WindowBackendSnapshot, WindowOperatorStore, WindowRequestStore,
+    TriggerResume, WindowBackendSnapshot, WindowOperatorStore, WindowRequestStore,
     WindowStoreTaskScope,
 };
 use crate::runtime::operators::window::store::data::cursors_from_batch;
@@ -381,60 +380,34 @@ impl InMemWindowStore {
         Ok(())
     }
 
-    fn stream_due_in<'a>(
-        &'a self,
-        scope: &'a WindowStoreTaskScope,
+    fn load_triggers_in(
+        &self,
+        scope: &WindowStoreTaskScope,
         after: Option<Cursor>,
         through: Cursor,
-    ) -> DueWorkStream<'a> {
-        let page_size = runtime_consts().u64(WINDOW_PROCESS_PAGE_SIZE).max(1) as usize;
-        let store = self.clone();
-        let scope = scope.clone();
-        Box::pin(futures::stream::try_unfold(
-            (store, None::<WindowTrigger>),
-            move |(store, resume_after)| {
-                let scope = scope.clone();
-                async move {
-                    let selected = store
-                        .triggers
-                        .read()
-                        .iter()
-                        .filter(|trigger| Self::owns_partition(&trigger.partition, &scope))
-                        .filter(|trigger| after.map_or(true, |after| trigger.fire_at > after))
-                        .filter(|trigger| trigger.fire_at <= through)
-                        .filter(|trigger| {
-                            resume_after
-                                .as_ref()
-                                .map_or(true, |resume_after| *trigger > resume_after)
-                        })
-                        .take(page_size)
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    let Some(next) = selected.last().cloned() else {
-                        return Ok(None);
-                    };
-
-                    let mut grouped = BTreeMap::<PartitionKey, Vec<WindowTrigger>>::new();
-                    for trigger in selected {
-                        grouped
-                            .entry(trigger.partition.clone())
-                            .or_default()
-                            .push(trigger);
-                    }
-                    let work = grouped
-                        .into_iter()
-                        .map(|(partition, triggers)| DueWindowWork {
-                            key_state: store
-                                .read_part(&partition, |state| state.meta.clone())
-                                .unwrap_or_default(),
-                            partition,
-                            triggers,
-                        })
-                        .collect();
-                    Ok(Some((work, (store, Some(next)))))
-                }
-            },
-        ))
+        resume: Option<&TriggerResume>,
+        limit: usize,
+    ) -> (Vec<WindowTrigger>, Option<TriggerResume>) {
+        let limit = limit.max(1);
+        let selected = self
+            .triggers
+            .read()
+            .iter()
+            .filter(|trigger| Self::owns_partition(&trigger.partition, scope))
+            .filter(|trigger| after.map_or(true, |after| trigger.fire_at > after))
+            .filter(|trigger| trigger.fire_at <= through)
+            .filter(|trigger| {
+                resume
+                    .map(|resume| trigger > &&resume.last)
+                    .unwrap_or(true)
+            })
+            .take(limit)
+            .cloned()
+            .collect::<Vec<_>>();
+        let next = (selected.len() == limit)
+            .then(|| selected.last().cloned().map(TriggerResume::after_visible))
+            .flatten();
+        (selected, next)
     }
 
     pub async fn store_key_state(&self, partition: &PartitionKey, meta: &KeyState) -> Result<()> {
@@ -642,8 +615,16 @@ impl WindowOperatorStore for InMemWindowStoreClient {
             .await
     }
 
-    fn stream_due<'a>(&'a self, after: Option<Cursor>, through: Cursor) -> DueWorkStream<'a> {
-        self.inner.stream_due_in(&self.scope, after, through)
+    async fn load_triggers(
+        &self,
+        after: Option<Cursor>,
+        through: Cursor,
+        resume: Option<&TriggerResume>,
+        limit: usize,
+    ) -> Result<(Vec<WindowTrigger>, Option<TriggerResume>)> {
+        Ok(self
+            .inner
+            .load_triggers_in(&self.scope, after, through, resume, limit))
     }
 
     async fn store_key_state(&self, partition: &PartitionKey, state: &KeyState) -> Result<()> {
@@ -725,7 +706,7 @@ impl OperatorStore for InMemWindowStoreClient {
 mod tests {
     use super::*;
     use crate::common::KeyGroupRange;
-    use crate::runtime::consts::{runtime_consts, WINDOW_PROCESS_PAGE_SIZE};
+    use crate::runtime::operators::window::store::{stream_due, trigger_fetch_limit};
     use futures::TryStreamExt;
 
     use crate::runtime::operators::window::model::{
@@ -1129,9 +1110,12 @@ mod tests {
         let store = InMemWindowStore::new();
         let partition = partition();
         let namespace = StateNamespace::new(&partition.namespace);
-        let triggers = (0..300)
+        let page = trigger_fetch_limit();
+        let extra = 34;
+        let n = page + extra;
+        let triggers = (0..n)
             .map(|seq_no| WindowTrigger {
-                fire_at: Cursor::new(seq_no as i64, seq_no),
+                fire_at: Cursor::new(10 + seq_no as i64, seq_no as u64),
                 partition: partition.clone(),
                 kind: WindowTriggerKind::RowEmit,
             })
@@ -1149,17 +1133,15 @@ mod tests {
             .unwrap();
 
         let client = client(&store, &namespace);
-        let mut due = client.stream_due(
+        let mut due = stream_due(
+            &client,
             Some(Cursor::new(9, u64::MAX)),
-            Cursor::new(299, u64::MAX),
+            Cursor::new(10 + n as i64 - 1, u64::MAX),
         );
         let first = due.try_next().await.unwrap().unwrap();
-        assert_eq!(
-            first[0].triggers.len(),
-            runtime_consts().u64(WINDOW_PROCESS_PAGE_SIZE) as usize
-        );
+        assert_eq!(first[0].triggers.len(), page);
         let second = due.try_next().await.unwrap().unwrap();
-        assert_eq!(second[0].triggers.len(), 34);
+        assert_eq!(second[0].triggers.len(), extra);
         assert!(due.try_next().await.unwrap().is_none());
     }
 
@@ -1219,7 +1201,7 @@ mod tests {
             .store(5_000, std::sync::atomic::Ordering::Release);
         store.maintain(&namespace, &task_state).await.unwrap();
 
-        let mut due = client.stream_due(None, Cursor::new(10_000, u64::MAX));
+        let mut due = stream_due(&client, None, Cursor::new(10_000, u64::MAX));
         let work = due.try_next().await.unwrap().unwrap();
         assert_eq!(work[0].triggers, vec![triggers[2].clone()]);
         assert!(due.try_next().await.unwrap().is_none());
@@ -1302,7 +1284,8 @@ mod tests {
 
         assert_meta(&restored.load_key_state(&partition).await.unwrap(), &meta);
         let restored_client = client(&restored, &namespace);
-        let mut due = restored_client.stream_due(
+        let mut due = stream_due(
+            &restored_client,
             Some(Cursor::new(1_000, u64::MAX)),
             Cursor::new(2_000, u64::MAX),
         );
@@ -1523,14 +1506,12 @@ mod tests {
             .store(5_000, std::sync::atomic::Ordering::Release);
         store.maintain(&ns, &task0).await.unwrap();
 
-        assert!(c0
-            .stream_due(None, Cursor::new(10_000, u64::MAX))
+        assert!(stream_due(&c0, None, Cursor::new(10_000, u64::MAX))
             .try_next()
             .await
             .unwrap()
             .is_none());
-        let work1 = c1
-            .stream_due(None, Cursor::new(10_000, u64::MAX))
+        let work1 = stream_due(&c1, None, Cursor::new(10_000, u64::MAX))
             .try_next()
             .await
             .unwrap()

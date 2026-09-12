@@ -42,7 +42,7 @@ pub const TRANSPORT_TCP_CONNECT_RETRY_DELAY: &str = "transport.tcp_connect_retry
 pub const WINDOW_INGEST_MAX_RECORDS: &str = "window.ingest_max_records";
 /// In-flight keys for ingest `insert_batch` and WRO `process_key`.
 pub const WINDOW_INGEST_KEY_CONCURRENCY: &str = "window.ingest_key_concurrency";
-/// Triggers per `stream_due` page (eval + emit before the next page).
+/// Trigger fetch cap for one due hop (`max` with process key concurrency).
 pub const WINDOW_PROCESS_PAGE_SIZE: &str = "window.process_page_size";
 /// In-flight keys evaluating one process page.
 pub const WINDOW_PROCESS_KEY_CONCURRENCY: &str = "window.process_key_concurrency";
@@ -390,7 +390,7 @@ mod tests {
         for profile in [&prod, &kube, &local] {
             assert_eq!(profile.u64(WINDOW_INGEST_MAX_RECORDS), 65536);
             assert_eq!(profile.u64(WINDOW_INGEST_KEY_CONCURRENCY), 32);
-            assert_eq!(profile.u64(WINDOW_PROCESS_PAGE_SIZE), 256);
+            assert_eq!(profile.u64(WINDOW_PROCESS_PAGE_SIZE), 4096);
             assert_eq!(profile.u64(WINDOW_PROCESS_KEY_CONCURRENCY), 16);
         }
     }

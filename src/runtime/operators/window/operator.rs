@@ -33,7 +33,8 @@ use crate::runtime::operators::window::model::{Cursor, WindowId};
 use crate::runtime::operators::window::spec::WindowSpec;
 use crate::runtime::operators::window::state::{WindowOperatorState, WindowStateSnapshot};
 use crate::runtime::operators::window::store::{
-    open_window_operator_store, AttemptToken, StateNamespace, WindowStoreTaskScope, WriterId,
+    open_window_operator_store, stream_due, AttemptToken, StateNamespace, WindowStoreTaskScope,
+    WriterId,
 };
 use crate::runtime::operators::window::TileConfig;
 use crate::runtime::runtime_context::RuntimeContext;
@@ -199,7 +200,7 @@ impl WindowOperator {
         let after = state
             .watermark_frontier()
             .map(|timestamp| Cursor::new(timestamp, u64::MAX));
-        let mut pages = state.store().stream_due(after, through);
+        let mut pages = stream_due(state.store(), after, through);
         while let Some(work) = pages.try_next().await.expect("stream due window triggers") {
             let page = stream::iter(work)
                 .map(|work| {

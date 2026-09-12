@@ -9,7 +9,7 @@ use crate::runtime::operators::window::model::{Cursor, RawRun, TileRun, WindowTr
 use crate::runtime::operators::window::operator::WindowOperatorConfig;
 use crate::runtime::operators::window::spec::WindowSpec;
 use crate::runtime::operators::window::store::{
-    DueWorkStream, InMemWindowStore, KeyState, PartitionKey, StateNamespace, TileMap,
+    InMemWindowStore, KeyState, PartitionKey, StateNamespace, TileMap, TriggerResume,
     WindowBackendSnapshot, WindowData, WindowOperatorStore, WindowRequestStore,
     WindowStoreTaskScope,
 };
@@ -89,8 +89,16 @@ impl WindowOperatorStore for RecordingWindowStore {
             .await
     }
 
-    fn stream_due<'a>(&'a self, after: Option<Cursor>, through: Cursor) -> DueWorkStream<'a> {
-        self.client.stream_due(after, through)
+    async fn load_triggers(
+        &self,
+        after: Option<Cursor>,
+        through: Cursor,
+        resume: Option<&TriggerResume>,
+        limit: usize,
+    ) -> Result<(Vec<WindowTrigger>, Option<TriggerResume>)> {
+        self.client
+            .load_triggers(after, through, resume, limit)
+            .await
     }
 
     async fn store_key_state(&self, partition: &PartitionKey, state: &KeyState) -> Result<()> {
