@@ -11,15 +11,18 @@ use crate::runtime::operators::window::model::{
     Cursor, KeyState, PartitionKey, RawRun, StateNamespace, TileMap, TileRun, WindowTrigger,
 };
 use crate::runtime::operators::OperatorKind;
-use crate::runtime::state::{OperatorStore, StateRegistry};
+use crate::runtime::state::{OperatorStore, StateRegistry, StateSessionHandle};
 
 use super::WindowData;
 
+mod codec;
 mod due;
 mod inmem;
+mod scylla;
 
 pub use due::{stream_due, trigger_fetch_limit, DueWorkStream};
 pub use inmem::{InMemWindowStore, InMemWindowStoreClient};
+pub use scylla::{ScyllaWindowStore, ScyllaWindowStoreClient};
 
 /// Job-level execution attempt stamped on published versions.
 pub type AttemptToken = Vec<u8>;
@@ -70,6 +73,26 @@ pub fn open_window_operator_store(
                 .clone();
             Ok(Arc::new(inmem.client(scope.clone())) as Arc<dyn WindowOperatorStore>)
         }
+        OperatorStateBackendConfig::Scylla(cfg) => {
+            anyhow::ensure!(
+                !scope.attempt.is_empty(),
+                "Scylla window store requires execution_attempt_id"
+            );
+            let cfg = cfg.clone();
+            let registered = registry.get_or_insert_store(OperatorKind::Window, move |session| {
+                let session = match session {
+                    Some(StateSessionHandle::Scylla(session)) => Arc::clone(session),
+                    None => panic!("Scylla window store requires StateSessionHandle::Scylla"),
+                };
+                Arc::new(ScyllaWindowStore::new(cfg.clone(), session)) as Arc<dyn OperatorStore>
+            });
+            let store = registered
+                .as_any()
+                .downcast_ref::<ScyllaWindowStore>()
+                .expect("window Scylla store type")
+                .clone();
+            Ok(Arc::new(store.client(scope.clone())) as Arc<dyn WindowOperatorStore>)
+        }
     }
 }
 
@@ -108,6 +131,8 @@ pub struct TriggerResume {
     /// overlay-hidden rows from visible ones. Empty attempt = last visible.
     pub raw_attempt: Vec<u8>,
     pub raw_epoch: i64,
+    /// Scylla `(bucket, shard)` walk index. InMem ignores this.
+    pub part_idx: usize,
 }
 
 impl TriggerResume {
@@ -116,6 +141,7 @@ impl TriggerResume {
             last,
             raw_attempt: Vec::new(),
             raw_epoch: 0,
+            part_idx: 0,
         }
     }
 }

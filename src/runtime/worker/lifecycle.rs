@@ -11,7 +11,7 @@ use super::inner::WorkerInner;
 use super::Worker;
 
 impl Worker {
-    pub(crate) fn configure(&mut self, config: WorkerConfig) {
+    pub(crate) async fn configure(&mut self, config: WorkerConfig) -> Result<(), String> {
         if self.is_running() {
             panic!("Cannot configure worker while it is running");
         }
@@ -28,7 +28,8 @@ impl Worker {
             config.num_threads_per_task
         );
 
-        self.inner = Some(WorkerInner::from_config(config));
+        self.inner = Some(WorkerInner::from_config(config).await?);
+        Ok(())
     }
 
     pub(crate) async fn close_async(&mut self) {
