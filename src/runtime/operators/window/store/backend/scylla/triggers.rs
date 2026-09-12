@@ -89,7 +89,7 @@ async fn fetch_raw_page(
     Ok(result)
 }
 
-fn visible_trigger(
+async fn visible_trigger(
     client: &ScyllaWindowStoreClient,
     after: Option<Cursor>,
     through: Cursor,
@@ -101,16 +101,16 @@ fn visible_trigger(
     key_group: i32,
     attempt: &[u8],
     epoch: i64,
-) -> Option<WindowTrigger> {
+) -> Result<Option<WindowTrigger>> {
     if !client.scope.key_group_range.contains(key_group as usize) {
-        return None;
+        return Ok(None);
     }
-    if !client.overlay_ok(attempt, epoch, None) {
-        return None;
+    if !client.overlay_visible(attempt, epoch).await {
+        return Ok(None);
     }
     let fire_at = Cursor::new(ts, seq as u64);
     if after.map_or(false, |a| fire_at <= a) || fire_at > through {
-        return None;
+        return Ok(None);
     }
     let kind = if kind == 0 {
         WindowTriggerKind::RowEmit
@@ -119,14 +119,14 @@ fn visible_trigger(
             window_id: window_id as usize,
         }
     };
-    Some(WindowTrigger {
+    Ok(Some(WindowTrigger {
         fire_at,
         partition: PartitionKey {
             namespace: client.scope.namespace.bytes.clone(),
             business_key,
         },
         kind,
-    })
+    }))
 }
 
 fn seek_from_resume(resume: &TriggerResume) -> Option<TriggerSeek> {
@@ -267,7 +267,9 @@ pub(super) async fn load_triggers(
                 key_group,
                 &attempt,
                 epoch,
-            ) {
+            )
+            .await?
+            {
                 selected.push(trigger);
             }
         }

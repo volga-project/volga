@@ -92,6 +92,7 @@ async fn connect<'a>(
         contact_points: vec![contact],
         keyspace: keyspace.to_string(),
         datacenter: None,
+        serving_publish: Default::default(),
     })
     .await
     .expect("scylla connect via StateSessionHandle");

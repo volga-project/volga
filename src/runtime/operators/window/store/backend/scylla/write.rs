@@ -10,10 +10,12 @@ use scylla::statement::prepared::PreparedStatement;
 use crate::runtime::operators::window::model::{
     Cursor, KeyState, PartitionKey, TileMap, WindowTrigger, WindowTriggerKind,
 };
-use crate::runtime::operators::window::store::backend::codec::{encode_batch, encode_val};
+use crate::runtime::operators::window::store::backend::codec::{
+    decode_val, encode_batch, encode_val,
+};
 use crate::runtime::operators::window::store::data::cursors_from_batch;
 
-use super::cql::unlogged_batch;
+use super::cql::{lwt_applied, unlogged_batch, encode_owner_writer, HeadClaim};
 use super::schema::{align_down, kg_shard, RAW_BUCKET_MS, TRIGGER_BUCKET_MS};
 use super::store::ScyllaWindowStoreClient;
 
@@ -33,12 +35,284 @@ pub(super) async fn insert_key_state(
     Ok(())
 }
 
-/// Write versioned raw / tiles / key_state / triggers. One UNLOGGED BATCH
-/// per Scylla partition (prepared statements — unprepared values in a batch
-/// would prepare sequentially). Independent partitions are joined.
+/// Steal `owner_writer` without moving `serving_*`. Fence only.
+/// CAS failure stops the WO; do not try a second LWT.
+pub(super) async fn steal_owner(
+    client: &ScyllaWindowStoreClient,
+    session: &Session,
+    partition: &PartitionKey,
+    kg: i32,
+) -> Result<()> {
+    if client.head_claim(&partition.business_key).await != HeadClaim::Steal {
+        return Ok(());
+    }
+    let prepared = client.inner.prepared().await?;
+    let previous = {
+        let base = client.restore_base.lock().await;
+        let Some(base) = base.as_ref() else {
+            anyhow::bail!("steal head without restore_base");
+        };
+        encode_owner_writer(&base.attempt, &client.scope.writer_id.0)
+    };
+    let result = session
+        .execute_unpaged(
+            &prepared.steal_head_if_owner,
+            (
+                client.owner_writer(),
+                client.scope.namespace.bytes.clone(),
+                kg,
+                partition.business_key.clone(),
+                previous,
+            ),
+        )
+        .await?;
+    if !lwt_applied(result)? {
+        anyhow::bail!("window_head is owned by another writer; refusing to steal");
+    }
+    client
+        .head_claims
+        .insert(partition.business_key.clone(), HeadClaim::Fenced);
+    Ok(())
+}
+
+fn serving_caught_up(writer: &KeyState, serving: &KeyState) -> bool {
+    if writer.next_seq < serving.next_seq {
+        return false;
+    }
+    match (&writer.evaluation, &serving.evaluation) {
+        (_, None) => true,
+        (None, Some(_)) => false,
+        (Some(w), Some(s)) => w.through >= s.through,
+    }
+}
+
+async fn serving_key_state(
+    client: &ScyllaWindowStoreClient,
+    session: &Session,
+    partition: &PartitionKey,
+    kg: i32,
+) -> Result<Option<KeyState>> {
+    let prepared = client.inner.prepared().await?;
+    let head = session
+        .execute_unpaged(
+            &prepared.select_head,
+            (
+                client.scope.namespace.bytes.clone(),
+                kg,
+                partition.business_key.clone(),
+            ),
+        )
+        .await?;
+    let rows = head.into_rows_result()?;
+    let mut pin = None;
+    for row in rows.rows::<(Vec<u8>, i64)>()? {
+        pin = Some(row?);
+    }
+    let Some((serving_attempt, serving_epoch)) = pin else {
+        return Ok(None);
+    };
+    let states = session
+        .execute_unpaged(
+            &prepared.select_key_state,
+            (
+                client.scope.namespace.bytes.clone(),
+                kg,
+                partition.business_key.clone(),
+            ),
+        )
+        .await?;
+    let rows = states.into_rows_result()?;
+    for row in rows.rows::<(Vec<u8>, i64, Vec<u8>)>()? {
+        let (attempt, epoch, payload) = row?;
+        if attempt == serving_attempt && epoch == serving_epoch {
+            return Ok(Some(decode_val(&payload)?));
+        }
+    }
+    Ok(None)
+}
+
+pub(super) async fn promote_serving(
+    client: &ScyllaWindowStoreClient,
+    session: &Session,
+    partition: &PartitionKey,
+    kg: i32,
+    epoch: i64,
+) -> Result<()> {
+    let prepared = client.inner.prepared().await?;
+    let me = client.owner_writer();
+    let result = session
+        .execute_unpaged(
+            &prepared.promote_head_if_owner,
+            (
+                client.scope.attempt.clone(),
+                epoch,
+                client.scope.attempt.clone(),
+                epoch,
+                client.scope.namespace.bytes.clone(),
+                kg,
+                partition.business_key.clone(),
+                me,
+            ),
+        )
+        .await?;
+    if !lwt_applied(result)? {
+        anyhow::bail!("window_head is owned by another writer; refusing to publish serving");
+    }
+    client
+        .head_claims
+        .insert(partition.business_key.clone(), HeadClaim::Ours);
+    client.last_promoted.insert(
+        partition.business_key.clone(),
+        (epoch, std::time::Instant::now()),
+    );
+    Ok(())
+}
+
+async fn insert_head_empty(
+    client: &ScyllaWindowStoreClient,
+    session: &Session,
+    partition: &PartitionKey,
+    kg: i32,
+    epoch: i64,
+) -> Result<()> {
+    let prepared = client.inner.prepared().await?;
+    let me = client.owner_writer();
+    let result = session
+        .execute_unpaged(
+            &prepared.insert_head_if_not_exists,
+            (
+                client.scope.namespace.bytes.clone(),
+                kg,
+                partition.business_key.clone(),
+                me,
+                client.scope.attempt.clone(),
+                epoch,
+                client.scope.attempt.clone(),
+                epoch,
+            ),
+        )
+        .await?;
+    if !lwt_applied(result)? {
+        anyhow::bail!("window_head is owned by another writer; refusing to publish serving");
+    }
+    client
+        .head_claims
+        .insert(partition.business_key.clone(), HeadClaim::Ours);
+    client.last_promoted.insert(
+        partition.business_key.clone(),
+        (epoch, std::time::Instant::now()),
+    );
+    Ok(())
+}
+
+/// After data is durable: first snapshot, or promote serving according to
+/// `ServingPublish`. Steal does not move serving. Catch-up freeze still
+/// wins over cadence.
 ///
-/// Serving (`window_head`) is not published here. WO reads use the writer
-/// overlay (same attempt). Steal / promote lands in the checkpoint PR.
+/// Timeout is unknown Paxos. Do not `inc_epoch` and republish; fail the task.
+pub(super) async fn publish_serving(
+    client: &ScyllaWindowStoreClient,
+    session: &Session,
+    partition: &PartitionKey,
+    kg: i32,
+    epoch: i64,
+    writer_state: &KeyState,
+) -> Result<()> {
+    let claim = client.head_claim(&partition.business_key).await;
+    match claim {
+        HeadClaim::Empty => insert_head_empty(client, session, partition, kg, epoch).await,
+        HeadClaim::Steal | HeadClaim::Fenced => {
+            if claim == HeadClaim::Steal {
+                steal_owner(client, session, partition, kg).await?;
+            }
+            match serving_key_state(client, session, partition, kg).await? {
+                Some(serving) if !serving_caught_up(writer_state, &serving) => Ok(()),
+                _ => maybe_promote(client, session, partition, kg, epoch).await,
+            }
+        }
+        HeadClaim::Pending | HeadClaim::Ours => {
+            maybe_promote(client, session, partition, kg, epoch).await
+        }
+    }
+}
+
+async fn maybe_promote(
+    client: &ScyllaWindowStoreClient,
+    session: &Session,
+    partition: &PartitionKey,
+    kg: i32,
+    epoch: i64,
+) -> Result<()> {
+    let last = client
+        .last_promoted
+        .get(&partition.business_key)
+        .map(|e| e.1);
+    if !client
+        .inner
+        .config
+        .serving_publish
+        .promote_on_ingest(last)
+    {
+        client
+            .head_claims
+            .insert(partition.business_key.clone(), HeadClaim::Pending);
+        return Ok(());
+    }
+    promote_serving(client, session, partition, kg, epoch).await
+}
+
+#[cfg(test)]
+mod serving_catch_up_tests {
+    use super::*;
+    use crate::runtime::operators::window::model::{Cursor, KeyEvaluationState};
+
+    fn state(next_seq: u64, through: Option<(i64, u64)>) -> KeyState {
+        KeyState {
+            next_seq,
+            evaluation: through.map(|(ts, seq_no)| KeyEvaluationState {
+                through: Cursor::new(ts, seq_no),
+                accumulators: Default::default(),
+            }),
+        }
+    }
+
+    #[test]
+    fn seq_only_when_no_evaluation() {
+        assert!(serving_caught_up(&state(2, None), &state(2, None)));
+        assert!(!serving_caught_up(&state(1, None), &state(2, None)));
+    }
+
+    #[test]
+    fn ingest_cadence() {
+        use crate::api::spec::state::ServingPublish;
+        use std::time::{Duration, Instant};
+
+        assert!(ServingPublish::OnCommit.promote_on_ingest(None));
+        assert!(ServingPublish::OnCommit.promote_on_ingest(Some(Instant::now())));
+        assert!(!ServingPublish::Checkpoint.promote_on_ingest(None));
+        assert!(ServingPublish::Interval { interval_ms: 1_000 }.promote_on_ingest(None));
+        let stale = Instant::now() - Duration::from_secs(2);
+        assert!(ServingPublish::Interval { interval_ms: 1_000 }.promote_on_ingest(Some(stale)));
+        assert!(!ServingPublish::Interval { interval_ms: 60_000 }.promote_on_ingest(Some(Instant::now())));
+    }
+
+    #[test]
+    fn through_must_reach_serving() {
+        let serving = state(5, Some((1_000, 4)));
+        assert!(!serving_caught_up(&state(5, Some((1_000, 3))), &serving));
+        assert!(serving_caught_up(&state(5, Some((1_000, 4))), &serving));
+        assert!(serving_caught_up(&state(6, Some((1_001, 0))), &serving));
+    }
+}
+
+/// Write data then publish serving if due. Data: one UNLOGGED BATCH per
+/// Scylla partition. Independent partitions are joined. Owner steal (if
+/// needed) runs before data; serving promote is a separate LWT after
+/// (`OnCommit` / interval / checkpoint after catch-up).
+///
+/// `Err` after the driver gives up is unknown (write/LWT timeout). Do not
+/// `inc_epoch` and republish; fail the task and restore. Same-epoch retry
+/// is the only safe resend (idempotent INSERTs + the same LWT).
 pub(super) async fn commit_events(
     client: &ScyllaWindowStoreClient,
     partition: &PartitionKey,
@@ -54,6 +328,7 @@ pub(super) async fn commit_events(
     );
     let kg = client.key_group(partition)?;
     let session = client.inner.session();
+    steal_owner(client, &session, partition, kg).await?;
     let prepared = client.inner.prepared().await?;
     let epoch = client.inc_epoch();
     let ns = client.scope.namespace.bytes.clone();
@@ -191,7 +466,7 @@ pub(super) async fn commit_events(
         key_state_fut,
         try_join_all(trigger_futs),
     )?;
-    Ok(())
+    publish_serving(client, &session, partition, kg, epoch, meta).await
 }
 
 pub(super) async fn store_key_state(
@@ -201,6 +476,7 @@ pub(super) async fn store_key_state(
 ) -> Result<()> {
     let kg = client.key_group(partition)?;
     let session = client.inner.session();
+    steal_owner(client, &session, partition, kg).await?;
     let prepared = client.inner.prepared().await?;
     let epoch = client.inc_epoch();
     insert_key_state(
@@ -213,5 +489,6 @@ pub(super) async fn store_key_state(
         epoch,
         state,
     )
-    .await
+    .await?;
+    publish_serving(client, &session, partition, kg, epoch, state).await
 }
