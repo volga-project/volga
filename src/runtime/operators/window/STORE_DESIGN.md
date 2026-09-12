@@ -145,6 +145,9 @@ job-wide and must not change for a pipeline incarnation.
 - `WindowTrigger` is durable event-time work. Current RANGE windows create one
   `RowEmit` trigger per accepted row; `WindowEnd` is reserved for scheduled
   windows.
+- `TriggerResume` is an opaque `load_triggers` cursor. Scylla seeks from the
+  last **raw** clustering row (even if overlay-hidden), not the last visible
+  trigger. InMem resumes from the last visible trigger.
 - Tiles for all windows share `(granularity, tile_start)`, so persisted tile and
   accumulator state retain `WindowId`.
 - `WindowData` is one materialized WRO snapshot. Evaluation filters its rows by
