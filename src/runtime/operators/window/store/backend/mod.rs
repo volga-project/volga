@@ -3,7 +3,6 @@ use std::sync::Arc;
 use anyhow::Result;
 use arrow::array::RecordBatch;
 use async_trait::async_trait;
-use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 
 use crate::api::spec::state::{OperatorStateBackendConfig, RequestStoreConfig};
@@ -16,8 +15,10 @@ use crate::runtime::state::{OperatorStore, StateRegistry};
 
 use super::WindowData;
 
+mod due;
 mod inmem;
 
+pub use due::{collect_due, trigger_page_size};
 pub use inmem::{InMemWindowStore, InMemWindowStoreClient};
 
 /// Job-level execution attempt stamped on published versions.
@@ -98,7 +99,21 @@ pub struct DueWindowWork {
     pub triggers: Vec<WindowTrigger>,
 }
 
-pub type DueWorkStream<'a> = BoxStream<'a, Result<Vec<DueWindowWork>>>;
+/// Opaque pager token. Only the backend that produced it should pass it back.
+#[derive(Debug, Clone)]
+pub struct TriggerResume {
+    last: WindowTrigger,
+}
+
+impl TriggerResume {
+    pub(crate) fn after_visible(last: WindowTrigger) -> Self {
+        Self { last }
+    }
+
+    pub(crate) fn last(&self) -> &WindowTrigger {
+        &self.last
+    }
+}
 
 /// Store operations used by the sole Window Operator for a partition.
 #[async_trait]
@@ -116,7 +131,17 @@ pub trait WindowOperatorStore: OperatorStore {
         meta: &KeyState,
         triggers: &[WindowTrigger],
     ) -> Result<()>;
-    fn stream_due<'a>(&'a self, after: Option<Cursor>, through: Cursor) -> DueWorkStream<'a>;
+    /// One hop of due triggers in `(after, through]`.
+    ///
+    /// Short pages and empty `triggers` with `Some(resume)` are legal. End of
+    /// range is `next is None` — do not treat an empty page as EOF.
+    async fn load_triggers(
+        &self,
+        after: Option<Cursor>,
+        through: Cursor,
+        resume: Option<&TriggerResume>,
+        limit: usize,
+    ) -> Result<(Vec<WindowTrigger>, Option<TriggerResume>)>;
     async fn store_key_state(&self, partition: &PartitionKey, state: &KeyState) -> Result<()>;
     /// Complete all pending writes before capturing the returned snapshot.
     async fn checkpoint(&self) -> Result<WindowBackendSnapshot>;
