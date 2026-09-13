@@ -11,12 +11,11 @@ use crate::runtime::operators::window::model::{
     TimeGranularity, WindowTiles, WindowTrigger, WindowTriggerKind,
 };
 use crate::runtime::operators::window::store::backend::{
-    stream_due, WindowOperatorStore, WindowStoreTaskScope,
+    collect_due, WindowOperatorStore, WindowStoreTaskScope,
 };
 use crate::runtime::operators::window::store::data::cursors_from_batch;
 use crate::test_utils::window_aggs as test_utils;
 use arrow::array::RecordBatch;
-use futures::TryStreamExt;
 use std::collections::BTreeMap;
 use testcontainers::{clients, Container, GenericImage};
 
@@ -138,10 +137,10 @@ async fn scylla_commit_load_and_stream_due() {
         .await
         .unwrap();
     assert_eq!(loaded.iter().map(|b| b.num_rows()).sum::<usize>(), 1);
-    let mut due = stream_due(&client, None, Cursor::new(2_000, u64::MAX));
-    let page = due.try_next().await.unwrap().unwrap();
+    let page = collect_due(&client, None, Cursor::new(2_000, u64::MAX))
+        .await
+        .unwrap();
     assert_eq!(page[0].triggers.len(), 1);
-    assert!(due.try_next().await.unwrap().is_none());
 }
 
 #[tokio::test]
@@ -183,11 +182,10 @@ async fn scylla_empty_loads_and_empty_runs() {
         .await
         .unwrap()
         .is_empty());
-    assert!(stream_due(&client, None, Cursor::new(2_000, u64::MAX))
-        .try_next()
+    assert!(collect_due(&client, None, Cursor::new(2_000, u64::MAX))
         .await
         .unwrap()
-        .is_none());
+        .is_empty());
 }
 
 #[tokio::test]
@@ -448,9 +446,8 @@ async fn scylla_overlay_hides_other_attempt() {
         .await
         .unwrap()
         .is_empty());
-    assert!(stream_due(&other, None, Cursor::new(2_000, u64::MAX))
-        .try_next()
+    assert!(collect_due(&other, None, Cursor::new(2_000, u64::MAX))
         .await
         .unwrap()
-        .is_none());
+        .is_empty());
 }
