@@ -1200,6 +1200,13 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(second, vec![trigger_b]);
+        // Full hop may still return a resume; EOF is the next empty hop.
+        let resume = next.expect("full page");
+        let (third, next) = client
+            .load_triggers(None, Cursor::new(1_000, u64::MAX), Some(&resume), 1)
+            .await
+            .unwrap();
+        assert!(third.is_empty());
         assert!(next.is_none());
     }
 

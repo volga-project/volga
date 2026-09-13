@@ -7,7 +7,7 @@ use crate::runtime::operators::window::model::{Cursor, PartitionKey, WindowTrigg
 
 use super::{DueWindowWork, WindowOperatorStore};
 
-/// Store hop size: `window.process_page_size` visible-row cap.
+/// Store hop size: `window.process_page_size`.
 pub fn trigger_page_size() -> usize {
     runtime_consts().u64(WINDOW_PROCESS_PAGE_SIZE).max(1) as usize
 }
