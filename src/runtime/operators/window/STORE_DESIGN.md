@@ -85,16 +85,9 @@ pub struct DueWindowWork {
     pub key_state: KeyState,
     pub triggers: Vec<WindowTrigger>,
 }
-/// Opaque to the operator. Only the backend that produced it should pass it back.
-pub struct TriggerResume {
-    pub last: WindowTrigger,
-    /// Last raw clustering `(attempt, epoch)` when the store distinguishes
-    /// overlay-hidden rows from visible ones. Empty attempt = last visible.
-    pub raw_attempt: Vec<u8>,
-    pub raw_epoch: i64,
-    /// Scylla `(bucket, shard)` walk index. InMem ignores this.
-    pub part_idx: usize,
-}
+/// Opaque pager token. Only the backend that produced it should pass it back.
+/// The helper must not read its fields.
+pub struct TriggerResume { /* private */ }
 pub struct TileState {
     pub accumulator_state: Option<AccumulatorState>,
 }
@@ -145,9 +138,10 @@ job-wide and must not change for a pipeline incarnation.
 - `WindowTrigger` is durable event-time work. Current RANGE windows create one
   `RowEmit` trigger per accepted row; `WindowEnd` is reserved for scheduled
   windows.
-- `TriggerResume` is an opaque `load_triggers` cursor. Scylla seeks from the
-  last **raw** clustering row (even if overlay-hidden), not the last visible
-  trigger. InMem resumes from the last visible trigger.
+- `TriggerResume` is an opaque `load_triggers` cursor. The operator helper
+  must not read it. InMem stores the last visible `WindowTrigger`. Scylla
+  stores a private seek (last **raw** clustering + `(bucket, shard)`), not
+  a packed `WindowTrigger`.
 - Tiles for all windows share `(granularity, tile_start)`, so persisted tile and
   accumulator state retain `WindowId`.
 - `WindowData` is one materialized WRO snapshot. Evaluation filters its rows by
@@ -176,8 +170,8 @@ AttemptToken    = job-level execution attempt
 The client derives `key_group` from `Key.hash` and bound `max_p`. It never
 trusts a caller-supplied group. `load_triggers` / `checkpoint` / `restore` use
 the bound range and do not take `owned` or `namespace`. Per-key calls must
-land in the bound range (routing bug otherwise). The operator helper
-`stream_due` pages `load_triggers` and is not a store method.
+land in the bound range (routing bug otherwise). The operator loops `load_triggers` in `emit_due_pages`. Tests drain with
+`collect_due`. Neither lives on the store trait.
 
 WRO reuses the WO owner namespace. It addresses rows by `PartitionKey`
 (namespace + business key). Request routing still sends a lookup to the WRO
@@ -265,14 +259,16 @@ pub trait WindowRequestStore: Send + Sync + Debug {
   and triggers. `ts_column_index` plus `__seq_no` identifies each raw cursor.
   Retries are idempotent. The backend derives `key_group` from the partition's
   business key; it does not trust a caller-supplied group.
-- `load_triggers` returns a bounded page of **visible** triggers in one
-  stable `(after, through]` plus an opaque resume, or none when the range is
-  exhausted. It only returns work for the client's bound key-group range.
-  The store does not group by key or load `key_state`. The operator helper
-  `stream_due` pages this call, groups by key, and attaches `key_state`.
-  Fetch size is `window.process_page_size` (4096), floored at
-  `process_key_concurrency`. Paginate only when a hop exceeds the cap.
-  Do not derive fetch size from key concurrency. Prefetch is later
+- `load_triggers` is **one hop**. It returns the visible triggers from that
+  hop plus an opaque resume. Short pages and empty `triggers` with
+  `Some(resume)` are legal (hidden-only hop). End of range is `next is None`
+  — do not treat an empty page as EOF, and do not fill `limit` visible
+  rows inside the store. It only returns work for the client's bound
+  key-group range. The store does not group by key or load `key_state`.
+  The operator loops this call in `emit_due_pages`, groups by key, and
+  load+evals on the same `process_key_concurrency` pool (16). Fetch size
+  is `window.process_page_size` (256) until Scylla is measured. Do not
+  floor at key concurrency. Prefetch is later
   ([#297](https://github.com/volga-project/volga/issues/297)).
 - `store_key_state` publishes only sequence/evaluation state.
 - `checkpoint` completes pending writes and returns a backend-specific
@@ -741,19 +737,13 @@ Logical runs are mapped to time buckets, loaded, merged, and filtered back to
 the exact requested ranges. Raw rows are deduplicated by `Cursor`; current
 tiles replace matching base tiles.
 
-`load_triggers` maps its stable watermark range to trigger buckets and the
-`kg_shard`s that overlap the client's bound range. One hop is `LIMIT` plus
-optional clustering seek `>` the last **raw** row (full tuple, not `fire_at`
-alone). Overlay-hidden rows still advance the seek so they are not
-re-read. The next `(bucket, shard)` resets the seek to `after`.
+`load_triggers` is one CQL hop. Mid-shard seek is the last **raw**
+clustering row (full tuple, not `fire_at` alone), even if overlay-hidden.
+First hop and a new `(bucket, shard)` seek from `after` (watermark
+cursor). `next_partition` walks shards then time buckets; do not rebuild
+a `(after, through]` grid or store `part_idx`.
 
 ```text
--- first page of a shard
-WHERE namespace = ? AND bucket_start = ? AND kg_shard = ?
-  AND fire_ts >= ? AND fire_ts <= ?
-LIMIT ?
-
--- continue inside the same shard
 WHERE namespace = ? AND bucket_start = ? AND kg_shard = ?
   AND (fire_ts, fire_seq, business_key, trigger_kind, window_id, attempt, epoch)
       > (?, ?, ?, ?, ?, ?, ?)
@@ -762,17 +752,14 @@ LIMIT ?
 ```
 
 The client drops `key_group` outside the bound range and applies the same
-attempt/epoch visibility filter as raw overlay. Resume is
-`(last raw row as a WindowTrigger, raw_attempt, raw_epoch, part_idx)`.
-Empty `raw_attempt` means start of the current shard (no seek).
+attempt/epoch visibility filter as raw overlay. Resume is a private
+`Seek`; the helper does not read it.
 
-Do not use `OFFSET`, native `PagingState`, seek on `fire_ts` alone, or
-`execute_unpaged` of the whole range.
+Do not use `OFFSET`, native `PagingState`, a second `fire_ts >=` query,
+seek on `fire_ts` alone, or `execute_unpaged` of the whole range.
 
-The operator helper `stream_due` pages `load_triggers`, groups by key,
-loads writer `KeyState`, and yields `DueWindowWork`. It does not live on
-the store trait. Watermark still advances only after the full
-`(after, through]`. Prefetch is later
+`emit_due_pages` loops `load_triggers` until `next is None`. Watermark
+still advances only after the full `(after, through]`. Prefetch is later
 ([#297](https://github.com/volga-project/volga/issues/297)).
 
 ### WRO reads
