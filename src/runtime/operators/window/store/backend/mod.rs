@@ -18,7 +18,7 @@ use super::WindowData;
 mod due;
 mod inmem;
 
-pub use due::{stream_due, trigger_fetch_limit, DueWorkStream};
+pub use due::{collect_due, trigger_page_size};
 pub use inmem::{InMemWindowStore, InMemWindowStoreClient};
 
 /// Job-level execution attempt stamped on published versions.
@@ -99,24 +99,19 @@ pub struct DueWindowWork {
     pub triggers: Vec<WindowTrigger>,
 }
 
-/// Resume token for [`WindowOperatorStore::load_triggers`]. Opaque to the
-/// operator: only the backend that produced it should pass it back.
+/// Opaque pager token. Only the backend that produced it should pass it back.
 #[derive(Debug, Clone)]
 pub struct TriggerResume {
-    pub last: WindowTrigger,
-    /// Last raw clustering `(attempt, epoch)` when the store distinguishes
-    /// overlay-hidden rows from visible ones. Empty attempt = last visible.
-    pub raw_attempt: Vec<u8>,
-    pub raw_epoch: i64,
+    last: WindowTrigger,
 }
 
 impl TriggerResume {
-    pub fn after_visible(last: WindowTrigger) -> Self {
-        Self {
-            last,
-            raw_attempt: Vec::new(),
-            raw_epoch: 0,
-        }
+    pub(crate) fn after_visible(last: WindowTrigger) -> Self {
+        Self { last }
+    }
+
+    pub(crate) fn last(&self) -> &WindowTrigger {
+        &self.last
     }
 }
 
@@ -136,6 +131,10 @@ pub trait WindowOperatorStore: OperatorStore {
         meta: &KeyState,
         triggers: &[WindowTrigger],
     ) -> Result<()>;
+    /// One hop of due triggers in `(after, through]`.
+    ///
+    /// Short pages and empty `triggers` with `Some(resume)` are legal. End of
+    /// range is `next is None` — do not treat an empty page as EOF.
     async fn load_triggers(
         &self,
         after: Option<Cursor>,

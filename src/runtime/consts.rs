@@ -390,7 +390,7 @@ mod tests {
         for profile in [&prod, &kube, &local] {
             assert_eq!(profile.u64(WINDOW_INGEST_MAX_RECORDS), 65536);
             assert_eq!(profile.u64(WINDOW_INGEST_KEY_CONCURRENCY), 32);
-            assert_eq!(profile.u64(WINDOW_PROCESS_PAGE_SIZE), 4096);
+            assert_eq!(profile.u64(WINDOW_PROCESS_PAGE_SIZE), 256);
             assert_eq!(profile.u64(WINDOW_PROCESS_KEY_CONCURRENCY), 16);
         }
     }

@@ -1,23 +1,15 @@
 use std::collections::BTreeMap;
 
 use anyhow::Result;
-use futures::future::try_join_all;
-use futures::stream::BoxStream;
 
-use crate::runtime::consts::{
-    runtime_consts, WINDOW_PROCESS_KEY_CONCURRENCY, WINDOW_PROCESS_PAGE_SIZE,
-};
+use crate::runtime::consts::{runtime_consts, WINDOW_PROCESS_PAGE_SIZE};
 use crate::runtime::operators::window::model::{Cursor, PartitionKey, WindowTrigger};
 
-use super::{DueWindowWork, TriggerResume, WindowOperatorStore};
+use super::{DueWindowWork, WindowOperatorStore};
 
-pub type DueWorkStream<'a> = BoxStream<'a, Result<Vec<DueWindowWork>>>;
-
-/// Visible triggers to fetch per store hop: page cap, at least the key pool.
-pub fn trigger_fetch_limit() -> usize {
-    let page = runtime_consts().u64(WINDOW_PROCESS_PAGE_SIZE).max(1) as usize;
-    let concurrency = runtime_consts().u64(WINDOW_PROCESS_KEY_CONCURRENCY).max(1) as usize;
-    page.max(concurrency)
+/// Store hop size: `window.process_page_size` visible-row cap.
+pub fn trigger_page_size() -> usize {
+    runtime_consts().u64(WINDOW_PROCESS_PAGE_SIZE).max(1) as usize
 }
 
 pub async fn group_due_work(
@@ -31,38 +23,38 @@ pub async fn group_due_work(
             .or_default()
             .push(trigger);
     }
-    try_join_all(grouped.into_iter().map(|(partition, triggers)| async move {
+    let mut work = Vec::with_capacity(grouped.len());
+    for (partition, triggers) in grouped {
         let key_state = store.load_key_state(&partition).await?;
-        Ok(DueWindowWork {
+        work.push(DueWindowWork {
             partition,
             key_state,
             triggers,
-        })
-    }))
-    .await
+        });
+    }
+    Ok(work)
 }
 
-/// Operator-owned due stream: store only pages triggers.
-pub fn stream_due<'a>(
-    store: &'a dyn WindowOperatorStore,
+/// Drain `(after, through]` until `next` is `None`. Empty hops with a resume continue.
+pub async fn collect_due(
+    store: &dyn WindowOperatorStore,
     after: Option<Cursor>,
     through: Cursor,
-) -> DueWorkStream<'a> {
-    let limit = trigger_fetch_limit();
-    Box::pin(futures::stream::try_unfold(
-        Some(None::<TriggerResume>),
-        move |state| async move {
-            let Some(resume) = state else {
-                return Ok(None);
-            };
-            let (triggers, next) = store
-                .load_triggers(after, through, resume.as_ref(), limit)
-                .await?;
-            if triggers.is_empty() {
-                return Ok(None);
-            }
-            let work = group_due_work(store, triggers).await?;
-            Ok(Some((work, next.map(Some))))
-        },
-    ))
+) -> Result<Vec<DueWindowWork>> {
+    let limit = trigger_page_size();
+    let mut resume = None;
+    let mut out = Vec::new();
+    loop {
+        let (triggers, next) = store
+            .load_triggers(after, through, resume.as_ref(), limit)
+            .await?;
+        if !triggers.is_empty() {
+            out.extend(group_due_work(store, triggers).await?);
+        }
+        match next {
+            Some(token) => resume = Some(token),
+            None => break,
+        }
+    }
+    Ok(out)
 }

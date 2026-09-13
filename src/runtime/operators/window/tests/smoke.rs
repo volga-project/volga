@@ -6,7 +6,6 @@ use crate::common::message::Message;
 use crate::common::MAX_WATERMARK_VALUE;
 use crate::runtime::operators::operator::{StreamOperator, VecOutput};
 use crate::runtime::operators::window::operator::WindowOperatorConfig;
-use crate::runtime::operators::window::store::trigger_fetch_limit;
 use crate::runtime::operators::window::{
     TileConfig, TimeGranularity, TASK_METADATA_ROWS_ACCEPTED, TASK_METADATA_ROWS_DROPPED_LATE,
 };
@@ -200,7 +199,7 @@ WINDOW w AS (
   ORDER BY timestamp
   RANGE BETWEEN INTERVAL '5000' MILLISECOND PRECEDING AND CURRENT ROW
 )"#;
-    let n = (trigger_fetch_limit() + 34) as i64;
+    let n = 300i64;
     let wm = (n * 10) as u64;
     let ts: Vec<i64> = (1..=n).map(|i| i * 10).collect();
     let vals: Vec<f64> = (1..=n).map(|i| i as f64).collect();

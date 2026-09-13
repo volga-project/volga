@@ -398,7 +398,7 @@ impl InMemWindowStore {
             .filter(|trigger| trigger.fire_at <= through)
             .filter(|trigger| {
                 resume
-                    .map(|resume| trigger > &&resume.last)
+                    .map(|resume| **trigger > *resume.last())
                     .unwrap_or(true)
             })
             .take(limit)
@@ -706,8 +706,7 @@ impl OperatorStore for InMemWindowStoreClient {
 mod tests {
     use super::*;
     use crate::common::KeyGroupRange;
-    use crate::runtime::operators::window::store::{stream_due, trigger_fetch_limit};
-    use futures::TryStreamExt;
+    use crate::runtime::operators::window::store::{collect_due, trigger_page_size};
 
     use crate::runtime::operators::window::model::{
         KeyEvaluationState, TileRun, TimeGranularity, WindowTiles, WindowTriggerKind,
@@ -1110,7 +1109,7 @@ mod tests {
         let store = InMemWindowStore::new();
         let partition = partition();
         let namespace = StateNamespace::new(&partition.namespace);
-        let page = trigger_fetch_limit();
+        let page = trigger_page_size();
         let extra = 34;
         let n = page + extra;
         let triggers = (0..n)
@@ -1133,16 +1132,75 @@ mod tests {
             .unwrap();
 
         let client = client(&store, &namespace);
-        let mut due = stream_due(
-            &client,
-            Some(Cursor::new(9, u64::MAX)),
-            Cursor::new(10 + n as i64 - 1, u64::MAX),
-        );
-        let first = due.try_next().await.unwrap().unwrap();
-        assert_eq!(first[0].triggers.len(), page);
-        let second = due.try_next().await.unwrap().unwrap();
-        assert_eq!(second[0].triggers.len(), extra);
-        assert!(due.try_next().await.unwrap().is_none());
+        let after = Some(Cursor::new(9, u64::MAX));
+        let through = Cursor::new(10 + n as i64 - 1, u64::MAX);
+        let (first, resume) = client
+            .load_triggers(after, through, None, page)
+            .await
+            .unwrap();
+        assert_eq!(first.len(), page);
+        let resume = resume.expect("more pages");
+        let (second, next) = client
+            .load_triggers(after, through, Some(&resume), page)
+            .await
+            .unwrap();
+        assert_eq!(second.len(), extra);
+        assert!(next.is_none());
+    }
+
+    #[tokio::test]
+    async fn load_triggers_resumes_same_fire_at_across_keys() {
+        let store = InMemWindowStore::new();
+        let namespace = StateNamespace::new(b"test-namespace");
+        let a = partition_for_group(&namespace, 0, 1, b"a");
+        let b = partition_for_group(&namespace, 0, 1, b"b");
+        let fire_at = Cursor::new(1_000, 1);
+        let trigger_a = WindowTrigger {
+            fire_at,
+            partition: a.clone(),
+            kind: WindowTriggerKind::RowEmit,
+        };
+        let trigger_b = WindowTrigger {
+            fire_at,
+            partition: b.clone(),
+            kind: WindowTriggerKind::RowEmit,
+        };
+        store
+            .commit_events(
+                &a,
+                0,
+                &batch(&[]),
+                &TileMap::new(),
+                &KeyState::default(),
+                &[trigger_a.clone()],
+            )
+            .await
+            .unwrap();
+        store
+            .commit_events(
+                &b,
+                0,
+                &batch(&[]),
+                &TileMap::new(),
+                &KeyState::default(),
+                &[trigger_b.clone()],
+            )
+            .await
+            .unwrap();
+
+        let client = client(&store, &namespace);
+        let (first, resume) = client
+            .load_triggers(None, Cursor::new(1_000, u64::MAX), None, 1)
+            .await
+            .unwrap();
+        assert_eq!(first, vec![trigger_a.clone()]);
+        let resume = resume.expect("second key");
+        let (second, next) = client
+            .load_triggers(None, Cursor::new(1_000, u64::MAX), Some(&resume), 1)
+            .await
+            .unwrap();
+        assert_eq!(second, vec![trigger_b]);
+        assert!(next.is_none());
     }
 
     #[tokio::test]
@@ -1201,10 +1259,10 @@ mod tests {
             .store(5_000, std::sync::atomic::Ordering::Release);
         store.maintain(&namespace, &task_state).await.unwrap();
 
-        let mut due = stream_due(&client, None, Cursor::new(10_000, u64::MAX));
-        let work = due.try_next().await.unwrap().unwrap();
+        let work = collect_due(&client, None, Cursor::new(10_000, u64::MAX))
+            .await
+            .unwrap();
         assert_eq!(work[0].triggers, vec![triggers[2].clone()]);
-        assert!(due.try_next().await.unwrap().is_none());
 
         let loaded = store
             .load_raw(&partition, &[raw_run((0, 0), (20_000, 0))])
@@ -1284,12 +1342,13 @@ mod tests {
 
         assert_meta(&restored.load_key_state(&partition).await.unwrap(), &meta);
         let restored_client = client(&restored, &namespace);
-        let mut due = stream_due(
+        let work = collect_due(
             &restored_client,
             Some(Cursor::new(1_000, u64::MAX)),
             Cursor::new(2_000, u64::MAX),
-        );
-        let work = due.try_next().await.unwrap().unwrap();
+        )
+        .await
+        .unwrap();
         assert_eq!(work.len(), 1);
         assert_eq!(work[0].triggers, vec![triggers[1].clone()]);
         let loaded = restored
@@ -1506,15 +1565,12 @@ mod tests {
             .store(5_000, std::sync::atomic::Ordering::Release);
         store.maintain(&ns, &task0).await.unwrap();
 
-        assert!(stream_due(&c0, None, Cursor::new(10_000, u64::MAX))
-            .try_next()
+        assert!(collect_due(&c0, None, Cursor::new(10_000, u64::MAX))
             .await
             .unwrap()
-            .is_none());
-        let work1 = stream_due(&c1, None, Cursor::new(10_000, u64::MAX))
-            .try_next()
+            .is_empty());
+        let work1 = collect_due(&c1, None, Cursor::new(10_000, u64::MAX))
             .await
-            .unwrap()
             .unwrap();
         assert_eq!(work1[0].triggers, vec![triggers1[0].clone()]);
         assert_eq!(c1.load_key_state(&part1).await.unwrap().next_seq, 21);
