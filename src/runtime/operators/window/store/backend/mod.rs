@@ -28,7 +28,7 @@ pub use scylla::{ScyllaWindowStore, ScyllaWindowStoreClient};
 /// Job-level execution attempt stamped on published versions.
 pub type AttemptToken = Vec<u8>;
 
-/// Task-execution identity stored on the writer head fence (Scylla).
+/// Task-execution identity. Request-lease `owner` only; not part of data PKs.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct WriterId(pub Vec<u8>);
 

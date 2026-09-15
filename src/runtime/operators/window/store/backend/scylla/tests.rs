@@ -97,7 +97,7 @@ async fn connect<'a>(
     (container, store)
 }
 
-/// Full write → load_key_state / load_raw / stream_due loop.
+/// Full write → load_key_state / load_raw / collect_due loop.
 #[tokio::test]
 #[ignore]
 async fn scylla_commit_load_and_stream_due() {

@@ -37,8 +37,7 @@ pub(super) async fn insert_key_state(
 /// per Scylla partition (prepared statements — unprepared values in a batch
 /// would prepare sequentially). Independent partitions are joined.
 ///
-/// Serving (`window_head`) is not published here. WO reads use the writer
-/// overlay (same attempt). Steal / promote lands in the checkpoint PR.
+/// No lease, no LWT. Overlay is this attempt until checkpoint restore (#288).
 pub(super) async fn commit_events(
     client: &ScyllaWindowStoreClient,
     partition: &PartitionKey,

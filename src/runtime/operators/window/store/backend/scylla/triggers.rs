@@ -120,7 +120,7 @@ fn visible_trigger(
     if !client.scope.key_group_range.contains(key_group as usize) {
         return None;
     }
-    if !client.overlay_ok(attempt, epoch, None) {
+    if !client.overlay_visible(attempt, epoch) {
         return None;
     }
     let fire_at = Cursor::new(ts, seq as u64);

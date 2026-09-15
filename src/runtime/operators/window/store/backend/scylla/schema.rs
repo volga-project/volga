@@ -3,26 +3,6 @@ pub const TRIGGER_BUCKET_MS: i64 = 60_000;
 pub const TRIGGER_SHARD_COUNT: usize = 32;
 
 pub const TABLES: &[&str] = &[
-    r#"CREATE TABLE IF NOT EXISTS window_head (
-        namespace blob,
-        key_group int,
-        business_key blob,
-        owner_writer blob,
-        writer_attempt blob,
-        writer_epoch bigint,
-        serving_attempt blob,
-        serving_epoch bigint,
-        PRIMARY KEY ((namespace, key_group, business_key))
-    )"#,
-    r#"CREATE TABLE IF NOT EXISTS window_recovery_bases (
-        namespace blob,
-        recovery_attempt blob,
-        range_start int,
-        range_end int,
-        base_attempt blob,
-        base_epoch bigint,
-        PRIMARY KEY ((namespace, recovery_attempt), range_start)
-    )"#,
     r#"CREATE TABLE IF NOT EXISTS window_kg_buckets (
         namespace blob,
         key_group int,

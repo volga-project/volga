@@ -155,8 +155,10 @@ impl ScyllaWindowStoreClient {
         self.last_epoch.fetch_add(1, Ordering::AcqRel) + 1
     }
 
-    pub(super) fn overlay_ok(&self, attempt: &[u8], epoch: i64, writer_epoch: Option<i64>) -> bool {
-        attempt == self.scope.attempt.as_slice() && writer_epoch.map_or(true, |cut| epoch <= cut)
+    /// Streaming overlay before restore: this attempt only. #288 adds
+    /// `cp.attempt ∧ E ≤ cp_E`.
+    pub(super) fn overlay_visible(&self, attempt: &[u8], _epoch: i64) -> bool {
+        attempt == self.scope.attempt.as_slice()
     }
 }
 
