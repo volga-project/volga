@@ -20,7 +20,18 @@ pub(super) const SELECT_LEASE: &str = "SELECT owner_writer, serving_attempt, ser
 pub(super) const INSERT_LEASE_IF_NOT_EXISTS: &str = "INSERT INTO window_kg_lease (namespace, key_group, owner_writer, serving_attempt, serving_epoch, serving_wm, prev_attempt, prev_epoch) VALUES (?, ?, ?, ?, ?, ?, ?, ?) IF NOT EXISTS";
 pub(super) const STEAL_LEASE: &str = "UPDATE window_kg_lease SET owner_writer = ?, prev_attempt = ?, prev_epoch = ? WHERE namespace = ? AND key_group = ? IF owner_writer = ?";
 pub(super) const PUBLISH_LEASE: &str = "UPDATE window_kg_lease SET serving_attempt = ?, serving_epoch = ?, serving_wm = ? WHERE namespace = ? AND key_group = ? IF owner_writer = ?";
+pub(super) const SELECT_KG_BUCKETS: &str = "SELECT bucket_start, business_key FROM window_kg_buckets WHERE namespace = ? AND key_group = ?";
+pub(super) const SELECT_KEY_STATE_VERSIONS: &str = "SELECT attempt, epoch FROM window_key_states WHERE namespace = ? AND key_group = ? AND business_key = ?";
+pub(super) const SELECT_RAW_VERSIONS: &str = "SELECT event_ts, seq_no, attempt, epoch FROM window_raw WHERE namespace = ? AND key_group = ? AND business_key = ? AND bucket_start = ?";
+pub(super) const SELECT_TILE_VERSIONS: &str = "SELECT tile_start, attempt, epoch FROM window_tiles WHERE namespace = ? AND key_group = ? AND business_key = ? AND granularity_ms = ? AND bucket_start = ?";
+pub(super) const DELETE_RAW: &str = "DELETE FROM window_raw WHERE namespace = ? AND key_group = ? AND business_key = ? AND bucket_start = ?";
+pub(super) const DELETE_TILES: &str = "DELETE FROM window_tiles WHERE namespace = ? AND key_group = ? AND business_key = ? AND granularity_ms = ? AND bucket_start = ?";
+pub(super) const DELETE_KG_BUCKETS: &str = "DELETE FROM window_kg_buckets WHERE namespace = ? AND key_group = ? AND bucket_start = ? AND business_key = ?";
+pub(super) const DELETE_KEY_STATE_VERSION: &str = "DELETE FROM window_key_states WHERE namespace = ? AND key_group = ? AND business_key = ? AND attempt = ? AND epoch = ?";
+pub(super) const DELETE_RAW_VERSION: &str = "DELETE FROM window_raw WHERE namespace = ? AND key_group = ? AND business_key = ? AND bucket_start = ? AND event_ts = ? AND seq_no = ? AND attempt = ? AND epoch = ?";
+pub(super) const DELETE_TILE_VERSION: &str = "DELETE FROM window_tiles WHERE namespace = ? AND key_group = ? AND business_key = ? AND granularity_ms = ? AND bucket_start = ? AND tile_start = ? AND attempt = ? AND epoch = ?";
 
+#[derive(Clone)]
 pub(super) struct PreparedDml {
     pub(super) insert_raw: PreparedStatement,
     pub(super) insert_kg_buckets: PreparedStatement,
@@ -35,6 +46,16 @@ pub(super) struct PreparedDml {
     pub(super) insert_lease_if_not_exists: PreparedStatement,
     pub(super) steal_lease: PreparedStatement,
     pub(super) publish_lease: PreparedStatement,
+    pub(super) select_kg_buckets: PreparedStatement,
+    pub(super) select_key_state_versions: PreparedStatement,
+    pub(super) select_raw_versions: PreparedStatement,
+    pub(super) select_tile_versions: PreparedStatement,
+    pub(super) delete_raw: PreparedStatement,
+    pub(super) delete_tiles: PreparedStatement,
+    pub(super) delete_kg_buckets: PreparedStatement,
+    pub(super) delete_key_state_version: PreparedStatement,
+    pub(super) delete_raw_version: PreparedStatement,
+    pub(super) delete_tile_version: PreparedStatement,
 }
 
 pub(super) async fn prepare_stmts<const N: usize>(

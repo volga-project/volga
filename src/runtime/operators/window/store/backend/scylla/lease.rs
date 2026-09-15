@@ -20,7 +20,7 @@ pub(super) fn publish_allowed(current_wm: i64, serving_wm: i64) -> bool {
     current_wm != WATERMARK_UNSET && current_wm >= serving_wm
 }
 
-async fn load_lease(client: &ScyllaWindowStoreClient, kg: i32) -> Result<Option<LeaseRow>> {
+pub(super) async fn load_lease(client: &ScyllaWindowStoreClient, kg: i32) -> Result<Option<LeaseRow>> {
     let session = client.inner.session();
     let prepared = client.inner.prepared().await?;
     let result = session
