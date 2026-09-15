@@ -1,6 +1,9 @@
 use anyhow::{anyhow, Result};
 use futures::future::try_join_all;
 use scylla::client::session::Session;
+use scylla::deserialize::row::ColumnIterator;
+use scylla::deserialize::value::DeserializeValue;
+use scylla::response::query_result::QueryResult;
 use scylla::statement::batch::{Batch, BatchType};
 use scylla::statement::prepared::PreparedStatement;
 
@@ -13,6 +16,10 @@ pub(super) const SELECT_KEY_STATE: &str = "SELECT attempt, epoch, key_state FROM
 pub(super) const SELECT_RAW: &str = "SELECT event_ts, seq_no, attempt, epoch, payload FROM window_raw WHERE namespace = ? AND key_group = ? AND business_key = ? AND bucket_start = ? AND event_ts >= ? AND event_ts <= ?";
 pub(super) const SELECT_TILES: &str = "SELECT tile_start, attempt, epoch, payload FROM window_tiles WHERE namespace = ? AND key_group = ? AND business_key = ? AND granularity_ms = ? AND bucket_start = ? AND tile_start >= ? AND tile_start < ?";
 pub(super) const SELECT_TRIGGERS: &str = "SELECT fire_ts, fire_seq, business_key, trigger_kind, window_id, key_group, attempt, epoch FROM window_triggers WHERE namespace = ? AND bucket_start = ? AND kg_shard = ? AND (fire_ts, fire_seq, business_key, trigger_kind, window_id, attempt, epoch) > (?, ?, ?, ?, ?, ?, ?) AND fire_ts <= ? LIMIT ?";
+pub(super) const SELECT_LEASE: &str = "SELECT owner_writer, serving_attempt, serving_epoch, serving_wm, prev_attempt, prev_epoch FROM window_kg_lease WHERE namespace = ? AND key_group = ?";
+pub(super) const INSERT_LEASE_IF_NOT_EXISTS: &str = "INSERT INTO window_kg_lease (namespace, key_group, owner_writer, serving_attempt, serving_epoch, serving_wm, prev_attempt, prev_epoch) VALUES (?, ?, ?, ?, ?, ?, ?, ?) IF NOT EXISTS";
+pub(super) const STEAL_LEASE: &str = "UPDATE window_kg_lease SET owner_writer = ?, prev_attempt = ?, prev_epoch = ? WHERE namespace = ? AND key_group = ? IF owner_writer = ?";
+pub(super) const PUBLISH_LEASE: &str = "UPDATE window_kg_lease SET serving_attempt = ?, serving_epoch = ?, serving_wm = ? WHERE namespace = ? AND key_group = ? IF owner_writer = ?";
 
 pub(super) struct PreparedDml {
     pub(super) insert_raw: PreparedStatement,
@@ -24,6 +31,10 @@ pub(super) struct PreparedDml {
     pub(super) select_raw: PreparedStatement,
     pub(super) select_tiles: PreparedStatement,
     pub(super) select_triggers: PreparedStatement,
+    pub(super) select_lease: PreparedStatement,
+    pub(super) insert_lease_if_not_exists: PreparedStatement,
+    pub(super) steal_lease: PreparedStatement,
+    pub(super) publish_lease: PreparedStatement,
 }
 
 pub(super) async fn prepare_stmts<const N: usize>(
@@ -50,4 +61,27 @@ pub(super) async fn unlogged_batch(
     }
     session.batch(&batch, values).await?;
     Ok(())
+}
+
+pub(super) fn encode_owner_writer(attempt: &[u8], vertex: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(4 + attempt.len() + vertex.len());
+    out.extend_from_slice(&(attempt.len() as u32).to_be_bytes());
+    out.extend_from_slice(attempt);
+    out.extend_from_slice(vertex);
+    out
+}
+
+pub(super) fn lwt_applied(result: QueryResult) -> Result<bool> {
+    let rows = result.into_rows_result()?;
+    let Some(mut cols) = rows
+        .maybe_first_row::<ColumnIterator>()
+        .map_err(|e| anyhow!("{e}"))?
+    else {
+        return Ok(false);
+    };
+    let col = cols
+        .next()
+        .ok_or_else(|| anyhow!("LWT result missing [applied]"))?
+        .map_err(|e| anyhow!("{e}"))?;
+    bool::deserialize(col.spec.typ(), col.slice).map_err(|e| anyhow!("{e}"))
 }

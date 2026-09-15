@@ -18,6 +18,32 @@ pub enum OperatorStateBackendConfig {
     Scylla(ScyllaConfig),
 }
 
+/// Who calls `publish()` on `window_kg_lease`. Request-mode only.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ServingPublish {
+    /// After each ingest, if `current_wm >= serving_wm`.
+    #[default]
+    OnCommit,
+    /// Ingest skips unless `interval_ms` has elapsed since last publish.
+    Interval { interval_ms: u64 },
+    /// Ingest skips; checkpoint flushes stolen groups.
+    Checkpoint,
+}
+
+impl ServingPublish {
+    pub fn promote_on_ingest(&self, last: Option<std::time::Instant>) -> bool {
+        match self {
+            Self::OnCommit => true,
+            Self::Checkpoint => false,
+            Self::Interval { interval_ms } => match last {
+                None => true,
+                Some(at) => at.elapsed() >= Duration::from_millis(*interval_ms),
+            },
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct ScyllaConfig {
@@ -25,6 +51,9 @@ pub struct ScyllaConfig {
     pub keyspace: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub datacenter: Option<String>,
+    /// `None` = streaming (no lease). `Some` = request-mode publish cadence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serving_publish: Option<ServingPublish>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

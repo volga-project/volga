@@ -12,6 +12,7 @@ use crate::runtime::operators::window::store::backend::codec::{decode_batch, dec
 
 use super::schema::{align_down, RAW_BUCKET_MS};
 use super::store::ScyllaWindowStoreClient;
+use super::vis::cell_newer;
 
 pub(super) async fn load_key_state(
     client: &ScyllaWindowStoreClient,
@@ -31,17 +32,20 @@ pub(super) async fn load_key_state(
         )
         .await?;
     let rows = result.into_rows_result()?;
-    let mut best: Option<(i64, KeyState)> = None;
+    let mut best: Option<(i64, Vec<u8>, KeyState)> = None;
     for row in rows.rows::<(Vec<u8>, i64, Vec<u8>)>()? {
         let (attempt, epoch, payload) = row?;
         if !client.overlay_visible(&attempt, epoch) {
             continue;
         }
-        if best.as_ref().map_or(true, |(e, _)| epoch > *e) {
-            best = Some((epoch, decode_val(&payload)?));
+        if best
+            .as_ref()
+            .map_or(true, |(e, a, _)| cell_newer(epoch, &attempt, *e, a))
+        {
+            best = Some((epoch, attempt, decode_val(&payload)?));
         }
     }
-    Ok(best.map(|(_, s)| s).unwrap_or_default())
+    Ok(best.map(|(_, _, s)| s).unwrap_or_default())
 }
 
 pub(super) async fn load_raw(
@@ -72,7 +76,7 @@ pub(super) async fn load_raw(
             bucket += RAW_BUCKET_MS;
         }
     }
-    let mut by_cursor: BTreeMap<Cursor, RecordBatch> = BTreeMap::new();
+    let mut by_cursor: BTreeMap<Cursor, (i64, Vec<u8>, RecordBatch)> = BTreeMap::new();
     for (from, to, result) in try_join_all(pages).await? {
         let rows = result.into_rows_result()?;
         for row in rows.rows::<(i64, i64, Vec<u8>, i64, Vec<u8>)>()? {
@@ -84,10 +88,15 @@ pub(super) async fn load_raw(
             if !client.overlay_visible(&attempt, epoch) {
                 continue;
             }
-            by_cursor.insert(cursor, decode_batch(&payload)?);
+            let replace = by_cursor
+                .get(&cursor)
+                .map_or(true, |(e, a, _)| cell_newer(epoch, &attempt, *e, a));
+            if replace {
+                by_cursor.insert(cursor, (epoch, attempt, decode_batch(&payload)?));
+            }
         }
     }
-    Ok(by_cursor.into_values().collect())
+    Ok(by_cursor.into_values().map(|(_, _, batch)| batch).collect())
 }
 
 pub(super) async fn load_tiles(
@@ -121,17 +130,20 @@ pub(super) async fn load_tiles(
     let mut out = TileMap::new();
     for (granularity, result) in try_join_all(pages).await? {
         let rows = result.into_rows_result()?;
-        let mut best: BTreeMap<i64, (i64, Vec<u8>)> = BTreeMap::new();
+        let mut best: BTreeMap<i64, (i64, Vec<u8>, Vec<u8>)> = BTreeMap::new();
         for row in rows.rows::<(i64, Vec<u8>, i64, Vec<u8>)>()? {
             let (tile_start, attempt, epoch, payload) = row?;
             if !client.overlay_visible(&attempt, epoch) {
                 continue;
             }
-            if best.get(&tile_start).map_or(true, |(e, _)| epoch >= *e) {
-                best.insert(tile_start, (epoch, payload));
+            let replace = best
+                .get(&tile_start)
+                .map_or(true, |(e, a, _)| cell_newer(epoch, &attempt, *e, a));
+            if replace {
+                best.insert(tile_start, (epoch, attempt, payload));
             }
         }
-        for (tile_start, (_, payload)) in best {
+        for (tile_start, (_, _, payload)) in best {
             let tiles: crate::runtime::operators::window::model::WindowTiles = decode_val(&payload)?;
             out.insert((granularity, tile_start), tiles);
         }

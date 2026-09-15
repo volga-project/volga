@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -320,9 +319,7 @@ impl WindowOperator {
             }
         }
         if advances_frontier {
-            self.state_ref()
-                .watermark_frontier
-                .store(wm_ts, Ordering::Release);
+            self.state_ref().advance_watermark(wm_ts);
         }
         out.emit(Message::Watermark(watermark)).await
     }

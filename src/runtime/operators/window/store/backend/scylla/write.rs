@@ -14,6 +14,7 @@ use crate::runtime::operators::window::store::backend::codec::{encode_batch, enc
 use crate::runtime::operators::window::store::data::cursors_from_batch;
 
 use super::cql::unlogged_batch;
+use super::lease;
 use super::schema::{align_down, kg_shard, RAW_BUCKET_MS, TRIGGER_BUCKET_MS};
 use super::store::ScyllaWindowStoreClient;
 
@@ -190,6 +191,7 @@ pub(super) async fn commit_events(
         key_state_fut,
         try_join_all(trigger_futs),
     )?;
+    lease::after_write(client, kg, epoch).await?;
     Ok(())
 }
 
@@ -212,5 +214,6 @@ pub(super) async fn store_key_state(
         epoch,
         state,
     )
-    .await
+    .await?;
+    lease::after_write(client, kg, epoch).await
 }
