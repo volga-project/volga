@@ -54,11 +54,17 @@ pub struct ScyllaConfig {
     /// `None` = streaming (no lease). `Some` = request-mode publish cadence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub serving_publish: Option<ServingPublish>,
+    /// Job `max_parallelism` for WRO key_group derivation. WO clients bind it
+    /// on `WindowStoreTaskScope` instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_parallelism: Option<usize>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub enum RequestStoreConfig {}
+pub enum RequestStoreConfig {
+    Scylla(ScyllaConfig),
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]

@@ -11,7 +11,7 @@ use crate::runtime::operators::window::model::{
     TimeGranularity, WindowTiles, WindowTrigger, WindowTriggerKind,
 };
 use crate::runtime::operators::window::store::backend::{
-    collect_due, WindowBackendSnapshot, WindowOperatorStore, WindowStoreTaskScope,
+    collect_due, WindowBackendSnapshot, WindowOperatorStore, WindowRequestStore, WindowStoreTaskScope,
 };
 use crate::runtime::operators::window::store::data::cursors_from_batch;
 use crate::test_utils::window_aggs as test_utils;
@@ -92,6 +92,7 @@ async fn connect<'a>(
         keyspace: keyspace.to_string(),
         datacenter: None,
         serving_publish: None,
+        max_parallelism: None,
     })
     .await
     .expect("scylla connect via StateSessionHandle");
@@ -519,4 +520,82 @@ async fn scylla_restore_continues_epoch_and_overlays_checkpoint() {
         panic!("expected versioned snapshot");
     };
     assert!(v2.epoch > version.epoch);
+}
+
+#[tokio::test]
+#[ignore]
+async fn scylla_wro_pins_lease_and_drops_prev_extras() {
+    use crate::api::spec::state::ServingPublish;
+    use super::ScyllaWindowRequestStore;
+
+    let docker = clients::Cli::default();
+    let (contact, container) = contact(&docker);
+    let store = ScyllaWindowStore::connect(ScyllaConfig {
+        contact_points: vec![contact],
+        keyspace: "volga_wro".to_string(),
+        datacenter: None,
+        serving_publish: Some(ServingPublish::Checkpoint),
+        max_parallelism: Some(1),
+    })
+    .await
+    .expect("scylla connect");
+    let _container = container;
+    let ns = StateNamespace::new(b"op");
+    let a = store.client(scope(&ns, b"a"));
+    let b = store.client(scope(&ns, b"b"));
+    let partition = partition(&ns);
+    a.observe_watermark(Some(10_000));
+    b.observe_watermark(Some(10_000));
+
+    a.commit_events(
+        &partition,
+        0,
+        &batch(&[(1_000, 1)]),
+        &Default::default(),
+        &KeyState {
+            next_seq: 2,
+            ..Default::default()
+        },
+        &[],
+    )
+    .await
+    .unwrap();
+    a.checkpoint().await.unwrap();
+
+    a.commit_events(
+        &partition,
+        0,
+        &batch(&[(1_000, 1)]),
+        &Default::default(),
+        &KeyState {
+            next_seq: 2,
+            ..Default::default()
+        },
+        &[],
+    )
+    .await
+    .unwrap();
+
+    b.commit_events(
+        &partition,
+        0,
+        &batch(&[(2_000, 2)]),
+        &Default::default(),
+        &KeyState {
+            next_seq: 3,
+            ..Default::default()
+        },
+        &[],
+    )
+    .await
+    .unwrap();
+    b.checkpoint().await.unwrap();
+
+    let req = ScyllaWindowRequestStore::new(store, 1);
+    let data = req
+        .load_window_data(&partition, &[raw_run((0, 0), (3_000, 0))], &[])
+        .await
+        .unwrap();
+    let cursors = raw_cursors(data.raw_batches());
+    assert_eq!(cursors, vec![Cursor::new(1_000, 1), Cursor::new(2_000, 2)]);
 }

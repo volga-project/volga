@@ -78,8 +78,12 @@ pub(super) async fn steal(client: &ScyllaWindowStoreClient, kg: i32) -> Result<(
             }
             Ok(())
         }
-        Some(row) if row.owner == me => Ok(()),
+        Some(row) if row.owner == me => {
+            client.bump_epoch_at_least(row.serving_epoch.max(row.prev_epoch));
+            Ok(())
+        }
         Some(row) => {
+            let floor = row.serving_epoch.max(row.prev_epoch);
             let applied = lwt_applied(
                 session
                     .execute_unpaged(
@@ -98,6 +102,7 @@ pub(super) async fn steal(client: &ScyllaWindowStoreClient, kg: i32) -> Result<(
             if !applied {
                 anyhow::bail!("window_kg_lease is owned by another writer; refusing to steal");
             }
+            client.bump_epoch_at_least(floor);
             Ok(())
         }
     }

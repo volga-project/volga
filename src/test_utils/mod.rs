@@ -11,6 +11,8 @@ pub mod many_to_many_harness;
 pub mod parquet;
 #[cfg(test)]
 pub mod pipeline_exec;
+#[cfg(test)]
+pub mod request_correctness;
 pub mod recovery;
 #[cfg(test)]
 pub mod smoke;
