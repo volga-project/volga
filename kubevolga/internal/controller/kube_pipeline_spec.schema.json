@@ -283,7 +283,7 @@
           "minimum": 0
         },
         "serving_publish": {
-          "description": "How often this writer publishes `window_head.serving_*`. Default\n`on_commit`. Not a fence — owner CAS is. WRO always pins serving.",
+          "description": "How often this writer publishes `window_kg_lease.serving_*`.\nRequest-mode only. `None` is streaming (no lease). Owner CAS is the fence;\nWRO pins serving once per lookup.",
           "$ref": "#/$defs/ServingPublish"
         }
       },
@@ -295,12 +295,12 @@
     "ServingPublish": {
       "oneOf": [
         {
-          "description": "Wait for the serving LWT after each ingest (once catch-up allows).",
+          "description": "After each ingest, if `current_wm >= serving_wm`.",
           "type": "string",
           "const": "on_commit"
         },
         {
-          "description": "Ingest does not wait. Promote this key when `interval_ms` has elapsed\nsince its last promote. Checkpoint also flushes touched keys.",
+          "description": "Ingest skips unless `interval_ms` has elapsed since last publish.",
           "type": "object",
           "properties": {
             "interval": {
@@ -323,7 +323,7 @@
           ]
         },
         {
-          "description": "Ingest does not wait. Promote touched keys on checkpoint only.",
+          "description": "Ingest skips; checkpoint flushes stolen groups.",
           "type": "string",
           "const": "checkpoint"
         }
