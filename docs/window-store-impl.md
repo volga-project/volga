@@ -21,29 +21,32 @@ epoch restart at 0. The normative cut is `#157` → *Protocol (normative)*.
 `E` is per `key_group`, monotonic, **never reset**. Ingest: unlogged batches,
 **no LWT**.
 
-**Streaming WO overlay (no lease):**
+**Streaming WO overlay (no lease).** Until restore: `me` only. After restore
+(#288):
 
 ```text
 attempt == me
-OR E <= cp_E          -- any attempt; one cutoff, not a chain
+OR (attempt == cp.attempt AND E <= cp_E)
 ```
 
-Restore the writer from checkpoint (and source offsets), not from the serve
-pin. `load_triggers` uses the same overlay.
+Do **not** overlay any attempt with `E <= cp_E`. Idle keys after a second
+failover are the v1 cost of one `StateVersion`; WRO still sees them.
+`load_triggers` uses the same overlay.
 
 **Request (only if WRO is on)** — one lease per `key_group`
-(`window_kg_lease`): `owner`, `serving_*`, `prev_E` (serving `E` at steal;
-`0` if serving empty). Publish does **not** touch `prev_E`.
+(`window_kg_lease`): `owner`, `serving_*`, `prev_E` (`0` in CQL if serving
+empty). Publish does **not** touch `prev_E`. Empty serving ⇒ WRO returns no
+pin.
 
 - Steal: `prev_E ← serving_E` (or `0`), `SET owner IF owner = previous`.
-  Serving unchanged. `prev_E` is the last **published** cut, not the last writer.
+  Serving unchanged. Writer `E = max(cp_E, serving_E, prev_E)`.
 - Publish (timer / OnCommit / CP, one function): if `current_wm >= serving_wm`,
-  `SET serving_* IF owner = me`. Gate is event-time only, not per-key catch-up.
-- WRO: pin the lease **once**, then
+  `SET serving_* IF owner = me`. Gate is event-time only (v1 limit).
+- WRO: pin the lease **once** (skip if serving empty), then
 
 ```text
 E <= serving_E
-AND (prev_E unset OR E <= prev_E OR attempt == serving.attempt)
+AND (E <= prev_E OR attempt == serving.attempt)
 ```
 
   then latest per cell (`max(E)`, then `max(attempt)`). Filter is client-side.
@@ -77,10 +80,10 @@ This is the cut. Each PR stacks on the previous. Do not merge adjacent PRs.
 | 1 | Engine contract + InMem | `feat/window-store-contract` | Operator-scoped `StateNamespace`; per-task store client (`max_p`, key-group range); traits drop `namespace` on `load_triggers` / `checkpoint` / `restore`; `OperatorTaskState` exposes owned range for `maintain`. **Test:** two WO tasks, one worker — restore/maintain of task 0 do not clobber task 1. Read-path client uses operator ns. |
 | 1b | Due paging | `feat/wo-load-triggers` ([#296](https://github.com/volga-project/volga/pull/296)) | `stream_due` leaves the store trait. Stores only `load_triggers`. Operator helper pages, groups, `load_key_state`. Fetch cap `window.process_page_size` (4096), floored at `process_key_concurrency`. Prefetch later: [#297](https://github.com/volga-project/volga/issues/297). |
 | 2 | InMemoryGrpc + request-mode runner | `feat/request-inmem-grpc` | [#162](https://github.com/volga-project/volga/issues/162): shared state over gRPC; generic request-mode cluster runner (`env × backend × profile`). First scenario is windows; APIs are write/read/state, not WO/WRO. |
-| 3 | Scylla write path | `feat/scylla-wo-write` ([#287](https://github.com/volga-project/volga/pull/287)) | Session, DDL, raw / tiles / `key_states` / **versioned triggers**, `commit_events` (same-partition UNLOGGED BATCH). WO overlay `me \| E ≤ cp_E` (any attempt) once a checkpoint exists; until then `me` only. `load_triggers` (`LIMIT` + last-raw clustering seek). Derive `key_group`. **No lease, no `window_head`, no ingest LWT.** Testcontainer ingest + load + emit. |
-| 4 | Checkpoint / restore + request lease | `feat/scylla-wo-checkpoint` ([#288](https://github.com/volga-project/volga/pull/288)) | `Versioned { version }`; **continue `E` (never 0)**. Restore writer from CP into in-memory overlay slices (`me \| E ≤ cp_E`). Request: `window_kg_lease` per `key_group`; steal sets `prev_E ← serving_E` (or `0`); `publish()` after `serving_wm` (`on_commit` / `interval` / `checkpoint` = who calls it). Identity `RestorePlanner`. **Rewrite:** drop `window_recovery_bases`, HeadClaim / DashMaps, per-key head, ingest-path catch-up freeze, `prev_attempt` extras filter. Existing checkpoint e2e + Scylla. |
+| 3 | Scylla write path | `feat/scylla-wo-write` ([#287](https://github.com/volga-project/volga/pull/287)) | Session, DDL, raw / tiles / `key_states` / **versioned triggers**, `commit_events` (same-partition UNLOGGED BATCH). Overlay is **`me` only** (no restore yet). `load_triggers` (`LIMIT` + last-raw clustering seek). Derive `key_group`. **No lease, no `window_head`, no ingest LWT.** Testcontainer ingest + load + emit. |
+| 4 | Checkpoint / restore + request lease | `feat/scylla-wo-checkpoint` ([#288](https://github.com/volga-project/volga/pull/288)) | `Versioned { version }`. Overlay **`me \| (cp.attempt ∧ E ≤ cp_E)`**. Writer `E = max(cp_E, serving_E, prev_E)`. Request: `window_kg_lease`; steal sets `prev_E ← serving_E` (or `0`); `publish()` after `serving_wm`. **Rewrite:** drop `window_recovery_bases`, HeadClaim / DashMaps, per-key head, ingest-path catch-up freeze, any-attempt overlay, `prev_attempt` extras filter. Existing checkpoint e2e + Scylla. |
 | 5 | `maintain` / GC | `feat/scylla-wo-maintain` ([#289](https://github.com/volga-project/volga/pull/289)) | `window_kg_buckets`, `floor_bucket`, raw + all tile granularities. Drop `E > prev_E AND attempt != owner`. Do **not** drop unpublished current-writer or `E ≤ prev_E` holes until time GC / compact. Grace is event-time vs in-flight WRO windows, not a pin refcount. |
-| 6 | Scylla request store | `feat/scylla-request-store` ([#290](https://github.com/volga-project/volga/pull/290)) | Pin `window_kg_lease` once; client-side `E ≤ serving_E AND (E ≤ prev_E OR attempt == serving.attempt)` + per-cell `max(E)` then `max(attempt)`. Register `backend = Scylla` on the PR 2 runner. |
+| 6 | Scylla request store | `feat/scylla-request-store` ([#290](https://github.com/volga-project/volga/pull/290)) | Pin `window_kg_lease` once (empty serving ⇒ no pin). Client-side `E ≤ serving_E AND (E ≤ prev_E OR attempt == serving.attempt)` + per-cell `max(E)` then `max(attempt)`. Register `backend = Scylla` on the PR 2 runner. |
 
 ---
 
