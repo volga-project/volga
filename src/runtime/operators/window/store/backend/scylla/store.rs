@@ -211,6 +211,12 @@ impl ScyllaWindowStoreClient {
         self.last_epoch.fetch_add(1, Ordering::AcqRel) + 1
     }
 
+    /// E is per key_group and never resets. Steal/restore must not publish
+    /// below the last serving_E (outage: no dip to CP).
+    pub(super) fn bump_epoch_at_least(&self, seen: i64) {
+        self.last_epoch.fetch_max(seen.max(0), Ordering::AcqRel);
+    }
+
     pub(super) fn writer_epoch(&self) -> i64 {
         self.last_epoch.load(Ordering::Acquire)
     }

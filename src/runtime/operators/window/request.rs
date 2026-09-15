@@ -201,7 +201,9 @@ impl OperatorTrait for WindowRequestOperator {
             let request_store = context
                 .request_store()
                 .expect("request store must be configured for WindowRequestOperator");
-            self.store = Some(open_window_request_store(request_store).await?);
+            self.store = Some(
+                open_window_request_store(request_store, context.max_parallelism()).await?,
+            );
         }
         if self.namespace.is_none() {
             let owner_operator_id = self

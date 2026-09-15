@@ -23,7 +23,7 @@ mod scylla;
 
 pub use due::{collect_due, trigger_page_size};
 pub use inmem::{InMemWindowStore, InMemWindowStoreClient};
-pub use scylla::{ScyllaWindowStore, ScyllaWindowStoreClient};
+pub use scylla::{ScyllaWindowRequestStore, ScyllaWindowStore, ScyllaWindowStoreClient};
 
 /// Job-level execution attempt stamped on published versions.
 pub type AttemptToken = Vec<u8>;
@@ -99,8 +99,17 @@ pub fn open_window_operator_store(
 
 pub async fn open_window_request_store(
     config: &RequestStoreConfig,
+    max_parallelism: usize,
 ) -> Result<Arc<dyn WindowRequestStore>> {
-    match *config {}
+    match config {
+        RequestStoreConfig::Scylla(cfg) => {
+            let store = ScyllaWindowStore::connect(cfg.clone()).await?;
+            Ok(Arc::new(ScyllaWindowRequestStore::new(
+                store,
+                max_parallelism.max(1),
+            )) as Arc<dyn WindowRequestStore>)
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

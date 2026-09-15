@@ -16,6 +16,23 @@ pub(super) fn cell_newer(epoch: i64, attempt: &[u8], best_epoch: i64, best_attem
     epoch > best_epoch || (epoch == best_epoch && attempt > best_attempt)
 }
 
+/// WRO pin: `E ≤ serving_E AND NOT (prev extras)`. Empty prev ⇒ no extras drop.
+pub(super) fn wro_visible(
+    attempt: &[u8],
+    epoch: i64,
+    serving_epoch: i64,
+    prev_attempt: &[u8],
+    prev_epoch: i64,
+) -> bool {
+    if epoch > serving_epoch {
+        return false;
+    }
+    if !prev_attempt.is_empty() && attempt == prev_attempt && epoch > prev_epoch {
+        return false;
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -48,5 +65,14 @@ mod tests {
         assert!(!cell_newer(1, b"z", 2, b"a"));
         assert!(cell_newer(5, b"b", 5, b"a"));
         assert!(!cell_newer(5, b"a", 5, b"b"));
+    }
+
+    #[test]
+    fn wro_pin_drops_prev_extras_keeps_holes() {
+        assert!(wro_visible(b"a", 80, 160, b"a", 100));
+        assert!(!wro_visible(b"a", 101, 160, b"a", 100));
+        assert!(wro_visible(b"b", 160, 160, b"a", 100));
+        assert!(!wro_visible(b"b", 161, 160, b"a", 100));
+        assert!(wro_visible(b"a", 50, 100, b"", 0));
     }
 }
