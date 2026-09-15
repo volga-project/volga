@@ -1,6 +1,8 @@
 use std::any::Any;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use anyhow::{anyhow, Result};
 use arrow::array::RecordBatch;
@@ -8,20 +10,23 @@ use async_trait::async_trait;
 use scylla::client::session::Session;
 use tokio::sync::OnceCell;
 
-use crate::api::spec::state::ScyllaConfig;
+use crate::api::spec::state::{ScyllaConfig, ServingPublish};
 use crate::runtime::operators::window::model::{
     Cursor, KeyState, PartitionKey, RawRun, TileMap, TileRun, WindowTrigger,
 };
+use crate::runtime::operators::window::state::WATERMARK_UNSET;
 use crate::runtime::state::{OperatorStore, OperatorTaskState, StateSessionHandle};
 
 use super::cql::{
-    prepare_stmts, PreparedDml, INSERT_KEY_STATES, INSERT_KG_BUCKETS, INSERT_RAW, INSERT_TILES,
-    INSERT_TRIGGERS, SELECT_KEY_STATE, SELECT_RAW, SELECT_TILES, SELECT_TRIGGERS,
+    prepare_stmts, PreparedDml, INSERT_KEY_STATES, INSERT_KG_BUCKETS, INSERT_LEASE_IF_NOT_EXISTS,
+    INSERT_RAW, INSERT_TILES, INSERT_TRIGGERS, PUBLISH_LEASE, SELECT_KEY_STATE, SELECT_LEASE,
+    SELECT_RAW, SELECT_TILES, SELECT_TRIGGERS, STEAL_LEASE,
 };
 use super::schema::TABLES;
-use super::{read, triggers, write};
+use super::vis::overlay_visible;
+use super::{checkpoint, read, triggers, write};
 use crate::runtime::operators::window::store::backend::{
-    WindowBackendSnapshot, WindowOperatorStore, WindowStoreTaskScope,
+    StateVersion, WindowBackendSnapshot, WindowOperatorStore, WindowStoreTaskScope,
 };
 
 #[derive(Clone)]
@@ -48,7 +53,6 @@ impl ScyllaWindowStore {
         }
     }
 
-    /// Test/tooling: connect a cluster and open a window store on it.
     pub async fn connect(config: ScyllaConfig) -> Result<Self> {
         let Some(handle) = StateSessionHandle::connect(
             &crate::api::spec::state::OperatorStateBackendConfig::Scylla(config.clone()),
@@ -82,6 +86,10 @@ impl ScyllaWindowStore {
                     select_raw,
                     select_tiles,
                     select_triggers,
+                    select_lease,
+                    insert_lease_if_not_exists,
+                    steal_lease,
+                    publish_lease,
                 ] = prepare_stmts(
                     session.as_ref(),
                     [
@@ -94,6 +102,10 @@ impl ScyllaWindowStore {
                         SELECT_RAW,
                         SELECT_TILES,
                         SELECT_TRIGGERS,
+                        SELECT_LEASE,
+                        INSERT_LEASE_IF_NOT_EXISTS,
+                        STEAL_LEASE,
+                        PUBLISH_LEASE,
                     ],
                 )
                 .await?;
@@ -107,6 +119,10 @@ impl ScyllaWindowStore {
                     select_raw,
                     select_tiles,
                     select_triggers,
+                    select_lease,
+                    insert_lease_if_not_exists,
+                    steal_lease,
+                    publish_lease,
                 })
             })
             .await
@@ -118,6 +134,10 @@ impl ScyllaWindowStore {
             inner: Arc::new(self.clone()),
             scope,
             last_epoch: Arc::new(AtomicI64::new(0)),
+            current_wm: Arc::new(AtomicI64::new(WATERMARK_UNSET)),
+            restore_base: Arc::new(Mutex::new(None)),
+            stolen_groups: Arc::new(Mutex::new(HashSet::new())),
+            last_publish: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -126,7 +146,11 @@ impl ScyllaWindowStore {
 pub struct ScyllaWindowStoreClient {
     pub(super) inner: Arc<ScyllaWindowStore>,
     pub(super) scope: WindowStoreTaskScope,
-    last_epoch: Arc<AtomicI64>,
+    pub(super) last_epoch: Arc<AtomicI64>,
+    current_wm: Arc<AtomicI64>,
+    restore_base: Arc<Mutex<Option<StateVersion>>>,
+    stolen_groups: Arc<Mutex<HashSet<i32>>>,
+    last_publish: Arc<Mutex<HashMap<i32, Instant>>>,
 }
 
 impl std::fmt::Debug for ScyllaWindowStoreClient {
@@ -155,10 +179,56 @@ impl ScyllaWindowStoreClient {
         self.last_epoch.fetch_add(1, Ordering::AcqRel) + 1
     }
 
-    /// Streaming overlay before restore: this attempt only. #288 adds
-    /// `cp.attempt ∧ E ≤ cp_E`.
-    pub(super) fn overlay_visible(&self, attempt: &[u8], _epoch: i64) -> bool {
-        attempt == self.scope.attempt.as_slice()
+    pub(super) fn writer_epoch(&self) -> i64 {
+        self.last_epoch.load(Ordering::Acquire)
+    }
+
+    pub fn observe_watermark(&self, wm: Option<i64>) {
+        self.current_wm
+            .store(wm.unwrap_or(WATERMARK_UNSET), Ordering::Release);
+    }
+
+    pub(super) fn current_wm(&self) -> i64 {
+        self.current_wm.load(Ordering::Acquire)
+    }
+
+    pub(super) fn serving_publish(&self) -> Option<ServingPublish> {
+        self.inner.config.serving_publish.clone()
+    }
+
+    pub(super) fn set_restore_base(&self, version: StateVersion) {
+        *self.restore_base.lock().expect("restore_base") = Some(version);
+    }
+
+    pub(super) fn overlay_visible(&self, attempt: &[u8], epoch: i64) -> bool {
+        let cp = self.restore_base.lock().expect("restore_base");
+        overlay_visible(&self.scope.attempt, cp.as_ref(), attempt, epoch)
+    }
+
+    pub(super) fn mark_stolen(&self, kg: i32) -> bool {
+        self.stolen_groups.lock().expect("stolen_groups").insert(kg)
+    }
+
+    pub(super) fn stolen_groups(&self) -> Vec<i32> {
+        self.stolen_groups
+            .lock()
+            .expect("stolen_groups")
+            .iter()
+            .copied()
+            .collect()
+    }
+
+    pub(super) fn clear_stolen(&self) {
+        self.stolen_groups.lock().expect("stolen_groups").clear();
+        self.last_publish.lock().expect("last_publish").clear();
+    }
+
+    pub(super) fn last_published_at(&self, kg: i32) -> Option<Instant> {
+        self.last_publish.lock().expect("last_publish").get(&kg).copied()
+    }
+
+    pub(super) fn note_published(&self, kg: i32, at: Instant) {
+        self.last_publish.lock().expect("last_publish").insert(kg, at);
     }
 }
 
@@ -211,11 +281,11 @@ impl WindowOperatorStore for ScyllaWindowStoreClient {
     }
 
     async fn checkpoint(&self) -> Result<WindowBackendSnapshot> {
-        anyhow::bail!("Scylla checkpoint lands in feat/scylla-wo-checkpoint")
+        checkpoint::checkpoint(self).await
     }
 
-    async fn restore(&self, _snapshot: &WindowBackendSnapshot) -> Result<()> {
-        anyhow::bail!("Scylla restore lands in feat/scylla-wo-checkpoint")
+    async fn restore(&self, snapshot: &WindowBackendSnapshot) -> Result<()> {
+        checkpoint::restore(self, snapshot).await
     }
 }
 

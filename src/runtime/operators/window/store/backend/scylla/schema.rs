@@ -3,6 +3,17 @@ pub const TRIGGER_BUCKET_MS: i64 = 60_000;
 pub const TRIGGER_SHARD_COUNT: usize = 32;
 
 pub const TABLES: &[&str] = &[
+    r#"CREATE TABLE IF NOT EXISTS window_kg_lease (
+        namespace blob,
+        key_group int,
+        owner_writer blob,
+        serving_attempt blob,
+        serving_epoch bigint,
+        serving_wm bigint,
+        prev_attempt blob,
+        prev_epoch bigint,
+        PRIMARY KEY ((namespace, key_group))
+    )"#,
     r#"CREATE TABLE IF NOT EXISTS window_kg_buckets (
         namespace blob,
         key_group int,

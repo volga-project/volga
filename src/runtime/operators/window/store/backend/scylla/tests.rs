@@ -11,7 +11,7 @@ use crate::runtime::operators::window::model::{
     TimeGranularity, WindowTiles, WindowTrigger, WindowTriggerKind,
 };
 use crate::runtime::operators::window::store::backend::{
-    collect_due, WindowOperatorStore, WindowStoreTaskScope,
+    collect_due, WindowBackendSnapshot, WindowOperatorStore, WindowStoreTaskScope,
 };
 use crate::runtime::operators::window::store::data::cursors_from_batch;
 use crate::test_utils::window_aggs as test_utils;
@@ -91,6 +91,7 @@ async fn connect<'a>(
         contact_points: vec![contact],
         keyspace: keyspace.to_string(),
         datacenter: None,
+        serving_publish: None,
     })
     .await
     .expect("scylla connect via StateSessionHandle");
@@ -450,4 +451,72 @@ async fn scylla_overlay_hides_other_attempt() {
         .await
         .unwrap()
         .is_empty());
+}
+
+#[tokio::test]
+#[ignore]
+async fn scylla_restore_continues_epoch_and_overlays_checkpoint() {
+    let docker = clients::Cli::default();
+    let (_container, store) = connect(&docker, "volga_restore").await;
+    let ns = StateNamespace::new(b"op");
+    let a = store.client(scope(&ns, b"a"));
+    let partition = partition(&ns);
+    a.commit_events(
+        &partition,
+        0,
+        &batch(&[(1_000, 1)]),
+        &tiles(&[(TimeGranularity::Seconds(1), 1_000, 1)]),
+        &KeyState {
+            next_seq: 2,
+            ..Default::default()
+        },
+        &[WindowTrigger {
+            fire_at: Cursor::new(1_000, 1),
+            partition: partition.clone(),
+            kind: WindowTriggerKind::RowEmit,
+        }],
+    )
+    .await
+    .unwrap();
+    let snap = a.checkpoint().await.unwrap();
+    let WindowBackendSnapshot::Versioned { version } = &snap else {
+        panic!("expected versioned snapshot");
+    };
+    assert_eq!(version.attempt, b"a");
+    assert!(version.epoch >= 1);
+
+    let b = store.client(scope(&ns, b"b"));
+    b.restore(&snap).await.unwrap();
+    assert_eq!(b.load_key_state(&partition).await.unwrap().next_seq, 2);
+    assert_eq!(
+        raw_cursors(
+            &b.load_raw(&partition, &[raw_run((0, 0), (2_000, 0))])
+                .await
+                .unwrap()
+        ),
+        vec![Cursor::new(1_000, 1)]
+    );
+    let page = collect_due(&b, None, Cursor::new(2_000, u64::MAX))
+        .await
+        .unwrap();
+    assert_eq!(page[0].triggers.len(), 1);
+
+    b.commit_events(
+        &partition,
+        0,
+        &batch(&[(2_000, 2)]),
+        &Default::default(),
+        &KeyState {
+            next_seq: 3,
+            ..Default::default()
+        },
+        &[],
+    )
+    .await
+    .unwrap();
+    let snap2 = b.checkpoint().await.unwrap();
+    let WindowBackendSnapshot::Versioned { version: v2 } = snap2 else {
+        panic!("expected versioned snapshot");
+    };
+    assert!(v2.epoch > version.epoch);
 }

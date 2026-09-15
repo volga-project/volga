@@ -13,8 +13,8 @@ use crate::runtime::operators::window::metrics::collect_window_operator_snapshot
 use crate::runtime::operators::window::model::{WindowId, WindowTrigger, WindowTriggerKind};
 use crate::runtime::operators::window::store::data::cursors_from_batch;
 use crate::runtime::operators::window::store::{
-    PartitionKey, StateNamespace, WindowBackendSnapshot, WindowOperatorStore,
-    WindowStoreTaskScope,
+    PartitionKey, ScyllaWindowStoreClient, StateNamespace, WindowBackendSnapshot,
+    WindowOperatorStore, WindowStoreTaskScope,
 };
 use crate::runtime::operators::window::tile::{apply_batch_to_tiles, plan_update_runs_for_batch};
 use crate::runtime::operators::window::SEQ_NO_COLUMN_NAME;
@@ -108,6 +108,17 @@ impl WindowOperatorState {
         (v != WATERMARK_UNSET).then_some(v)
     }
 
+    pub fn advance_watermark(&self, wm: i64) {
+        self.watermark_frontier.store(wm, Ordering::Release);
+        self.sync_store_watermark();
+    }
+
+    fn sync_store_watermark(&self) {
+        if let Some(client) = self.store.as_any().downcast_ref::<ScyllaWindowStoreClient>() {
+            client.observe_watermark(self.watermark_frontier());
+        }
+    }
+
     /// `(watermark, data_floor)` when a frontier has been established.
     ///
     /// Data floor is `W - max_window_length - lateness` (both clamped to ≥ 0).
@@ -128,6 +139,7 @@ impl WindowOperatorState {
     }
 
     pub async fn checkpoint(&self) -> anyhow::Result<WindowStateSnapshot> {
+        self.sync_store_watermark();
         Ok(WindowStateSnapshot {
             namespace: self.scope.namespace.bytes.clone(),
             watermark_frontier: self.watermark_frontier(),
@@ -145,6 +157,7 @@ impl WindowOperatorState {
             restore.watermark_frontier.unwrap_or(WATERMARK_UNSET),
             Ordering::Release,
         );
+        self.sync_store_watermark();
         Ok(())
     }
 
