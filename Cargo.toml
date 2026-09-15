@@ -104,6 +104,7 @@ reqwest = { version = "0.11", features = ["json"] }
 base64 = "0.22"
 arrow-integration-test = "55.0.0"
 serde_yaml = "0.9"
+scylla = "1.0"
 
 [dev-dependencies]
 tower = "0.5"
