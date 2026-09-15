@@ -5,7 +5,7 @@
 serialization, and caching stay inside the backend.
 
 Versioned data tables are shared. Streaming WO uses overlay + checkpoint
-only. Request mode adds a per-`key_group` lease (`serving_*` / `prev_*`).
+only. Request mode adds a per-`key_group` lease (`serving_*` / `prev_E`).
 There is no per-key `window_head` and no `window_recovery_bases` table.
 See **Protocol (normative)** under Scylla backend.
 
@@ -382,46 +382,65 @@ Streaming WO overlay (no lease):
 
 ```text
 attempt == me
-OR (cp.attempt AND E <= cp_E)
+OR E <= cp_E          -- any attempt; checkpoint is one cutoff, not a chain
 ```
 
 Restore the **writer from checkpoint** (and source offsets), not from a serve
-pin. `load_triggers` uses the same overlay. Zombie extras are old `attempt`
-or `E > cp_E` → ignored.
+pin. `load_triggers` uses the same overlay. `E > cp_E` from a previous writer
+is ignored. Idle keys left on older attempts stay visible because they have
+smaller `E` (the blob is not `cp.attempt` only).
 
 Request serving (only if WRO is on) — one lease per `key_group`:
 
 ```text
 owner
 serving_E, serving_attempt, serving_wm
-prev_attempt, prev_E    -- copy of serving at steal; empty until first steal
+prev_E    -- serving_E at last steal; 0 if serving was empty. Publish does not touch it.
 ```
 
-- **Steal** (lazy, first write to that group): `prev ← serving`, then
-  `SET owner IF owner = previous`. Do not move `serving_*`.
+`prev_E` is the last **published** cut at steal, not “the previous owner.”
+Above that cut, only `serving.attempt` may appear.
+
+- **Steal** (lazy, first write to that group): `prev_E ← serving_E` (or `0`
+  if serving is empty), then `SET owner IF owner = previous`. Do not move
+  `serving_*`.
 - **Publish** (timer / OnCommit / checkpoint — **one** function): if
-  `current_wm >= serving_wm`, `SET serving_* IF owner = me`.
+  `current_wm >= serving_wm`, `SET serving_* IF owner = me`. Do not write
+  `prev_E`.
 - **WRO:** pin the lease **once**, then every cell uses
 
 ```text
 E <= serving_E
-AND NOT (attempt == prev.attempt AND E > prev.E)
+AND (prev_E unset OR E <= prev_E OR attempt == serving.attempt)
 ```
+
+  (`prev_E` unset = never stolen ⇒ `E <= serving_E` only.)
 
   then **latest per cell**: same `Cursor` / `(granularity, tile_start)` /
   `key_state` → `max(E)`, then `max(attempt)`. Mixing **different** cells from
   `A@80` and `B@160` is expected. Two payloads for the **same** cell is not.
 
 Outage: keep last `serving_E` (no dip to checkpoint). Grey window until steal:
-the old owner may still publish — accepted. Each steal **overwrites** `prev`;
-history is smaller `E`, not an attempt list.
+the old owner may still publish — accepted. Each steal **overwrites** `prev_E`
+with the then-current serving cut.
+
+The `serving_wm` gate is **not** per-key catch-up. If `serving_wm` is already
+`<=` the restored watermark, `publish()` may run on the first write. That
+snapshot is holes (`E <= prev_E`) plus whatever the new attempt has written
+— v1 accepts that. The gate only delays publish when serving is *ahead* of
+restored event time (last publish after the last checkpoint).
 
 Filter is **client-side** (clustering is time-first). CQL slices time;
 `attempt` / `E` is in-process.
 
 **Not doing:** per-key `window_head`, DashMaps / unbounded keyed claim maps,
 ingest CAS, `window_recovery_bases` chain, serve = checkpoint (unless later
-chosen), proving the old worker is dead.
+chosen), proving the old worker is dead, per-key catch-up freeze.
+
+**v1 limits (not holes to “fix” with a chain):** a writer that keeps
+inserting after its checkpoint, on keys nobody overwrote, can reappear at
+a later restore (`E <=` the new `cp_E`). Event-time GC vs a long WRO whose
+window is below `data_floor` needs request-budget grace, not a pin table.
 
 ### Versions and checkpoints
 
@@ -465,12 +484,12 @@ never-reset number line so holes are just smaller `E`.
 | --- | --- |
 | Writer allocator (local) | produces `E` for the group; no LWT |
 | Data rows | MVCC: this cell belongs to publish `E` |
-| Checkpoint cutoff | WO overlay: `cp.attempt` with `E <= cp_E` |
+| Checkpoint cutoff | WO overlay: any attempt with `E <= cp_E`, plus `attempt == me` |
 | Lease `serving_*` | WRO/GC pin — request reads only. Not updated on ingest |
-| Lease `prev_*` | steal bookmark: drop the displaced writer's extras `E > prev_E` |
+| Lease `prev_E` | steal cut: above it, only `serving.attempt` is visible |
 
 Checkpoint `E=7` means “for this writer's owned groups, newest row with
-`epoch <= 7` on `cp.attempt`, plus this attempt's own rows.” Numeric epochs
+`epoch <= 7` (any attempt), plus this attempt's own rows.” Numeric epochs
 may match across tasks; they write different key groups.
 
 `AttemptToken` in table keys and in `StateVersion` is job-level. All WO tasks
@@ -529,7 +548,6 @@ CREATE TABLE window_kg_lease (
     serving_attempt blob,
     serving_epoch bigint,
     serving_wm bigint,
-    prev_attempt blob,
     prev_epoch bigint,
     PRIMARY KEY ((namespace, key_group))
 );
@@ -634,8 +652,8 @@ CREATE TABLE window_triggers (
 
 - `window_kg_lease`: one row per **key_group**, not per business key, not
   versioned. Request-mode only. `owner_writer` is the publish fence.
-  `serving_*` is the published snapshot WRO always pins. `prev_*` is the
-  steal bookmark (displaced writer's extras). Point get by
+  `serving_*` is the published snapshot WRO always pins. `prev_E` is the
+  serving cut at last steal (`0` if serving was empty). Point get by
   `(namespace, key_group)`. Do not put `attempt` in this PK. Do **not**
   restore a per-key `window_head`.
 - **There is no `window_recovery_bases` table.** WO overlay uses the
@@ -695,15 +713,17 @@ ingest.
 | --- | --- |
 | `owner_writer` | Who may change serving. Fence. |
 | `serving_(attempt, epoch, wm)` | Snapshot WRO always pins. |
-| `prev_(attempt, epoch)` | Steal bookmark. Drop displaced extras. |
+| `prev_E` | Serving `E` at last steal (`0` if serving empty). Publish does not touch it. |
 
 `owner_writer` is length-prefixed `attempt || vertex` (`WriterId`). Claiming
-is **only** `SET owner` plus copying `prev ← serving`:
+is **only** `SET owner` plus `prev_E ← serving_E` (or `0`):
 
-- empty group: `INSERT … IF NOT EXISTS` (may set serving on first publish —
-  there is no prior cut);
-- restore / failover: `UPDATE … SET owner = me, prev_* = serving_* IF owner =
-  previous`. **Do not** change `serving_*`.
+- empty group / never published: `INSERT … IF NOT EXISTS`; steal sets
+  `prev_E = 0` so a predecessor's unpublished rows are not treated as holes.
+- restore / failover: `UPDATE … SET owner = me, prev_E = serving_E IF owner =
+  previous` (`prev_E = 0` if serving is unset). **Do not** change `serving_*`.
+  **Do not** copy `serving.attempt` into a “previous owner” slot — `prev_E`
+  is the published cut, not the displaced writer.
 
 CAS not applied fences; do not fall through to a second LWT. Restore is a
 key-group range and the lease is already per group, so steal is **lazy on
@@ -723,19 +743,23 @@ if current_wm < serving_wm: return
 SET serving_attempt, serving_epoch, serving_wm IF owner = me
 ```
 
-`serving_wm` is the task `watermark_frontier` at that promote. After restore,
-leave serving as-is; first legal publish is when event-time has caught the
-snapshot already being served. Do **not** compare per-key `next_seq` /
-`evaluation.through` on the ingest path. Do **not** freeze ingest.
+`serving_wm` is the task `watermark_frontier` at that promote. The gate
+delays publish only when serving is **ahead of** the restored watermark
+(last publish after the last checkpoint). If `serving_wm <= restored wm`,
+it can open on the first write — that is not a bug. `serving_E` prevents
+an epoch dip; it does **not** wait for the new writer to finish replay.
+v1 then serves holes (`E <= prev_E`) plus whatever `serving.attempt` has
+written. Do **not** compare per-key `next_seq` / `evaluation.through` on
+the ingest path. Do **not** freeze ingest.
 
 A background timer is not required: interval can be checked on the next
-ingest of that group, and checkpoint can flush owned groups. Do not spawn a
-publisher during restore before the watermark gate opens.
+ingest of that group, and checkpoint can flush owned groups.
 
 Grey window until steal is **accepted** (CAP): the previous owner may still
-publish. After steal, CAS blocks publish; `prev` drops zombie `INSERT`s.
-Do not design for a zombie that survives a second failover, and do not try
-to prove the old process is dead.
+publish. After steal, CAS blocks publish. Rows with `E > prev_E` are visible
+only for `serving.attempt`, so a displaced writer's unpublished rows do not
+leak when a later owner publishes — even if that displaced writer never
+became `serving.attempt`. Do not try to prove the old process is dead.
 
 ### WO write
 
@@ -748,7 +772,7 @@ For one key (streaming and request ingest are the same data path):
    `(job attempt, E)`. Upsert `window_kg_buckets` unversioned (not under
    `E`).
 5. Request-mode only, if this is the first write to the group after restore:
-   steal owner (`prev ← serving`). Do not move serving. Do not LWT ingest.
+   steal owner (`prev_E ← serving_E`, or `0`). Do not move serving. Do not LWT ingest.
 6. Request-mode only: maybe `publish()` according to cadence and the
    `serving_wm` gate. Not on the data batch. Not during watermark catch-up.
 
@@ -774,10 +798,20 @@ WO reads the writer snapshot, not the lease.
 ```text
 visible if
   attempt == me
-  OR (cp.attempt AND E <= cp_E)
+  OR E <= cp_E          -- any attempt
 ```
 
-After rescale, `cp` is the `VersionedRange` slice that covers this
+A single `StateVersion` is a cutoff, not a generation chain. After a second
+failover, keys last written on an older attempt still appear if their `E`
+is `<= cp_E`. Overlaying only `cp.attempt` would drop those idle keys
+(WRO would still see them). That split is inherent to `me | cp.attempt`
+and is **not** v1.
+
+v1 limit: a writer that keeps inserting after its own checkpoint, on keys
+the successor never overwrote, can reappear at a later restore (`E <=`
+the new `cp_E`). Same class as a process that outlives the next failover.
+
+After rescale, `cp_E` is the `VersionedRange` slice that covers this
 `key_group` (in memory). Because `attempt` is clustering, overlay is one
 `LOCAL_QUORUM` read per data partition: keep the newest row that matches,
 client-side. No extra partition hop. Restore does not copy rows.
@@ -816,17 +850,17 @@ still advances only after the full `(after, through]`. Prefetch is later
 WRO (request store only):
 
 1. Point-get `window_kg_lease` for the key's `key_group`. **Pin once** for
-   the request: `(serving_*, prev_*)`. Do not reread mid-request.
+   the request: `(serving_*, prev_E)`. Do not reread mid-request.
 2. Build exact raw/tile plans.
 3. Load from the same data partitions (time slice in CQL). Filter
    **client-side**:
 
    ```text
    E <= serving_E
-   AND NOT (attempt == prev.attempt AND E > prev.E)
+   AND (prev_E unset OR E <= prev_E OR attempt == serving.attempt)
    ```
 
-   (`prev` empty ⇒ the `NOT` clause is false.)
+   Never stolen (`prev_E` unset) ⇒ `E <= serving_E` only.
 4. Collapse **per cell**, not per business key: same `Cursor` /
    `(granularity, tile_start)` / `key_state` → `max(E)`, then `max(attempt)`.
    Different cells may come from different `(attempt, E)` under the same pin.
@@ -839,7 +873,11 @@ locality, not identity.
 
 Do not implement WRO as `attempt == serving.attempt && E <= serving_E` only
 (holes on older attempts disappear). Do not implement epoch-only
-`E <= serving_E` (zombie `INSERT`s after steal leak once `serving_E` moves).
+`E <= serving_E` (unpublished rows from a writer who stole but never
+published leak once a later owner publishes). Do not implement
+`NOT (attempt == prev.attempt AND E > prev.E)` — `prev_E` is the last
+**published** cut, not the last writer; a B-then-C steal before B
+publishes would leave `prev` as A and leak B.
 
 ### Checkpoint
 
@@ -878,17 +916,17 @@ serializes an operator-local pending-key set.
 3. Source restores its checkpoint offset and replays post-checkpoint input.
 4. Resume watermark work by streaming checkpoint-visible triggers above the
    restored watermark. Replay advances only writer state.
-5. Request-mode: on first write to a group, steal owner (`prev ← serving`).
-   Leave `serving_*` at the previous cut. `publish()` stays gated on
-   `serving_wm`.
+5. Request-mode: on first write to a group, steal owner (`prev_E ← serving_E`,
+   or `0` if serving empty). Leave `serving_*` at the previous cut.
+   `publish()` stays gated on `serving_wm` (event-time only; not catch-up).
 6. Streaming: no steal, no publish.
 
 During recovery, writer data and (if request) serving pins differ. Replay
 advances MVCC rows; WRO keeps using `serving_*`. Keys not touched after
-recovery keep their old serving snapshot. A zombie publish after steal does
-not apply. A zombie `INSERT` after steal is dropped by `prev` once
-`serving_E` has moved; until steal, grey window may include a last old-owner
-publish.
+recovery stay visible as holes (`E <= prev_E` / `E <= cp_E`). A zombie
+publish after steal does not apply. Unpublished rows from a displaced owner
+(`E > prev_E` and not `serving.attempt`) stay hidden after a later publish.
+Until steal, grey window may include a last old-owner publish.
 
 ### WO cache
 
@@ -956,17 +994,20 @@ owned range from `OperatorTaskState`.
   that key+bucket (each `granularity_ms` from task state), then the index
   row. Do not probe historical bucket ids. Do not rely on TWCS/TTL
   (write-time ≠ event-time; replay rewrites old buckets);
-- drop displaced extras: `attempt == prev.attempt AND E > prev.E` (request
-  lease). Do **not** drop unpublished current-writer rows (`E > serving_E`)
-  or `E <= serving_E` holes until event-time GC / compact. Do not drop
-  generations just because they are not `serving.attempt`;
+- drop extras above the steal cut that are not the current owner:
+  `E > prev_E AND attempt != owner` (request lease; `prev_E = 0` if never
+  published). In-flight WRO already filters those rows, so this is not a
+  pin-refcount. Do **not** drop unpublished current-writer rows
+  (`attempt == owner`, including `E > serving_E`) or `E <= prev_E` holes
+  until event-time GC / compact;
 - no `window_recovery_bases` walk.
 
-**In-flight WRO:** `load_window_data` pins the lease at start. `maintain`
-must not drop that version while the request can still read it. v1: never
-delete the current serving pointer; delay dropping a just-superseded
-`prev` tail by at least the maximum WRO request budget (grace). No pin
-table.
+**In-flight WRO:** `load_window_data` pins the lease at start. Dropping
+`E > prev_E` extras is safe for that pin (the filter excludes them). The
+remaining race is **event-time** GC vs a request whose window still sits
+below `data_floor`. v1: never delete the current serving pointer; delay
+dropping buckets below `floor_bucket` by at least the maximum WRO request
+budget (grace). No pin table.
 
 TTL/TWCS may expire physical SSTables only when consistent with logical
 `data_floor` **and** the serving-pin grace. InMem applies the same logical
@@ -1056,5 +1097,5 @@ partial split of an old range.
 
 `RestorePlanner` still needs this intersection; that planner change is separate
 from this store contract. Request-mode leases are re-stolen by the new
-`WriterId` on first write to each `key_group` (`prev ← serving`). Streaming
+`WriterId` on first write to each `key_group` (`prev_E ← serving_E`). Streaming
 does not touch the lease.
