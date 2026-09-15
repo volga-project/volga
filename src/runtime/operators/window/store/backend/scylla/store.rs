@@ -19,12 +19,14 @@ use crate::runtime::state::{OperatorStore, OperatorTaskState, StateSessionHandle
 
 use super::cql::{
     prepare_stmts, PreparedDml, INSERT_KEY_STATES, INSERT_KG_BUCKETS, INSERT_LEASE_IF_NOT_EXISTS,
-    INSERT_RAW, INSERT_TILES, INSERT_TRIGGERS, PUBLISH_LEASE, SELECT_KEY_STATE, SELECT_LEASE,
-    SELECT_RAW, SELECT_TILES, SELECT_TRIGGERS, STEAL_LEASE,
+    INSERT_RAW, INSERT_TILES, INSERT_TRIGGERS, PUBLISH_LEASE, SELECT_KEY_STATE, SELECT_KG_BUCKETS,
+    SELECT_KEY_STATE_VERSIONS, SELECT_LEASE, SELECT_RAW, SELECT_RAW_VERSIONS, SELECT_TILES,
+    SELECT_TILE_VERSIONS, SELECT_TRIGGERS, STEAL_LEASE, DELETE_KG_BUCKETS, DELETE_KEY_STATE_VERSION,
+    DELETE_RAW, DELETE_RAW_VERSION, DELETE_TILES, DELETE_TILE_VERSION,
 };
 use super::schema::TABLES;
 use super::vis::overlay_visible;
-use super::{checkpoint, read, triggers, write};
+use super::{checkpoint, maintain, read, triggers, write};
 use crate::runtime::operators::window::store::backend::{
     StateVersion, WindowBackendSnapshot, WindowOperatorStore, WindowStoreTaskScope,
 };
@@ -90,6 +92,16 @@ impl ScyllaWindowStore {
                     insert_lease_if_not_exists,
                     steal_lease,
                     publish_lease,
+                    select_kg_buckets,
+                    select_key_state_versions,
+                    select_raw_versions,
+                    select_tile_versions,
+                    delete_raw,
+                    delete_tiles,
+                    delete_kg_buckets,
+                    delete_key_state_version,
+                    delete_raw_version,
+                    delete_tile_version,
                 ] = prepare_stmts(
                     session.as_ref(),
                     [
@@ -106,6 +118,16 @@ impl ScyllaWindowStore {
                         INSERT_LEASE_IF_NOT_EXISTS,
                         STEAL_LEASE,
                         PUBLISH_LEASE,
+                        SELECT_KG_BUCKETS,
+                        SELECT_KEY_STATE_VERSIONS,
+                        SELECT_RAW_VERSIONS,
+                        SELECT_TILE_VERSIONS,
+                        DELETE_RAW,
+                        DELETE_TILES,
+                        DELETE_KG_BUCKETS,
+                        DELETE_KEY_STATE_VERSION,
+                        DELETE_RAW_VERSION,
+                        DELETE_TILE_VERSION,
                     ],
                 )
                 .await?;
@@ -123,6 +145,16 @@ impl ScyllaWindowStore {
                     insert_lease_if_not_exists,
                     steal_lease,
                     publish_lease,
+                    select_kg_buckets,
+                    select_key_state_versions,
+                    select_raw_versions,
+                    select_tile_versions,
+                    delete_raw,
+                    delete_tiles,
+                    delete_kg_buckets,
+                    delete_key_state_version,
+                    delete_raw_version,
+                    delete_tile_version,
                 })
             })
             .await
@@ -297,10 +329,10 @@ impl OperatorStore for ScyllaWindowStoreClient {
 
     async fn maintain(
         &self,
-        _ns: &crate::runtime::operators::window::model::StateNamespace,
-        _state: &dyn OperatorTaskState,
+        ns: &crate::runtime::operators::window::model::StateNamespace,
+        state: &dyn OperatorTaskState,
     ) -> Result<()> {
-        anyhow::bail!("Scylla maintain lands in feat/scylla-wo-maintain")
+        self.inner.maintain(ns, state).await
     }
 }
 
@@ -312,9 +344,9 @@ impl OperatorStore for ScyllaWindowStore {
 
     async fn maintain(
         &self,
-        _ns: &crate::runtime::operators::window::model::StateNamespace,
-        _state: &dyn OperatorTaskState,
+        ns: &crate::runtime::operators::window::model::StateNamespace,
+        state: &dyn OperatorTaskState,
     ) -> Result<()> {
-        anyhow::bail!("Scylla maintain lands in feat/scylla-wo-maintain")
+        maintain::maintain(self, ns, state).await
     }
 }
