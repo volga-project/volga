@@ -53,12 +53,26 @@ owner, serving_wm, serving_cut
 ```
 
 - Steal (restore, per owned group, in parallel): read `owner`, then
-  `SET owner = me IF owner = <observed>`; absent row ⇒
+  `SET owner = me IF owner =` the observed owner; absent row ⇒
   `INSERT ... IF NOT EXISTS`. Serving untouched. Fail the task on
   miss-after-reread or timeout.
 - Publish (OnCommit / periodic, **not** on CP): if `publish_ok`, one
   single-row LWT setting `serving_wm` and `serving_cut` `IF owner = me`. Fail
-  the task on miss or timeout.
+  the task on miss or timeout; a timeout is unknown, so do not retry it as a
+  fresh publish at a later prefix.
+
+**Publish payload is the clamp.** It is computed from `cp_cut`, never from
+the live serving cut:
+
+```text
+next = cp_cut[g].advance(my_generation, cut_top[g])
+```
+
+`advance` takes `&self`, returns a new history, and only adds or raises the
+caller's own entry. Basing it on the live cut keeps the predecessor's
+post-checkpoint prefix and serves it next to the successor's replay of the
+same input — duplicate raw rows. `cut_top[g] == None` contributes nothing;
+never write a `(me, 0)` entry.
 
 ```text
 publish_ok ⇔
@@ -76,12 +90,27 @@ publish_ok ⇔
   checkpoint prefix. The serving cut is monotonic in event-time coverage, not
   in row membership.
 
+**Writer torn commits.** Cut-filtered readers never see a torn commit, but
+WO reads of its own generation are uncapped, so the rule is per key: while a
+commit for key `K` is in flight, issue no read of `K` and no second commit
+for `K`. Cross-key concurrency inside a group stays legal. Do **not** cap the
+writer at the acked prefix — that hides another key's acked write behind a
+hole and breaks read-your-writes. `seq` needs an atomic per-group allocator;
+the prefix is a low-water mark and never skips a hole.
+
 **GC.** Per cell keep at most four versions: newest of `my_generation`,
-newest allowed by `cp_cut`, newest allowed by the current `serving_cut`, and
-newest allowed by a `serving_cut` published within the grace interval. Drop
-everything else, including above-cut rows of older generations. "In the cut or
-in a pin" is **not** a sufficient rule — it never collapses the writer's own
-superseded versions.
+newest allowed by `cp_cut`, newest allowed by `serving_cut`, and newest
+allowed by `prev_serving_cut` while `now < prev_expires_at`. Drop everything
+else, including above-cut rows of older generations. "In the cut or in a pin"
+is **not** a sufficient rule — it never collapses the writer's own superseded
+versions.
+
+`prev_serving_cut` / `prev_expires_at` are two extra columns on the pin row,
+written **only** by a publish that lowers or drops another generation's entry
+(in practice the first publish after a restore). Unconditional writes would
+push a clamped cut out of the slot while a reader is still pinned to it;
+omitting them entirely makes the grace rule unimplementable, because the pin
+row is overwritten on every publish.
 
 **Not doing:** publish on CP, `prev_E`, `high_E`, per-key pins, dirty-key
 sets, conditional BATCH publishes, ingest CAS, `recovery_bases`,
@@ -113,8 +142,8 @@ Each PR stacks on the previous. Do not merge adjacent PRs.
 | 1 | Due paging | `feat/wo-load-triggers` ([#296](https://github.com/volga-project/volga/pull/296)) | Store `load_triggers`; operator pages. Prefetch later: [#297](https://github.com/volga-project/volga/issues/297). Unaffected by the protocol change. |
 | 2 | InMemoryGrpc + request-mode runner | `feat/request-inmem-grpc` | [#162](https://github.com/volga-project/volga/issues/162). |
 | 3 | Scylla write path | `feat/scylla-wo-write` ([#287](https://github.com/volga-project/volga/pull/287)) | Session, DDL, unlogged versioned writes, due-work read. Cut history **empty** (visibility `my_generation` only). Acked-prefix tracking. **No pins, no ingest LWT.** Rewrite schema vs any `window_head` / `attempt`-blob leftover. |
-| 4 | Checkpoint / restore + pins | `feat/scylla-wo-checkpoint` ([#288](https://github.com/volga-project/volga/pull/288)) | `CutHistory` per owned group in `Versioned`. WO filter `my_generation \| cp_cut[g].allows(..)`. Request: single-row `window_pins`; read-then-CAS steal; `publish_ok`; single-row publish LWT. **Rewrite:** drop `prev_E`, `recovery_bases`, HeadClaim, pin=CP, per-key pins, dirty sets. |
-| 5 | `maintain` / GC | `feat/scylla-wo-maintain` ([#289](https://github.com/volga-project/volga/pull/289)) | `window_kg_buckets`, `floor_bucket`, **per-cell version retention**, grace. |
+| 4 | Checkpoint / restore + pins | `feat/scylla-wo-checkpoint` ([#288](https://github.com/volga-project/volga/pull/288)) | `CutHistory` per owned group in `Versioned`. WO filter `my_generation \| cp_cut[g].allows(..)`. Request: single-row `window_pins` (incl. `prev_serving_cut` / `prev_expires_at`); read-then-CAS steal; `publish_ok`; single-row publish LWT with the payload computed from `cp_cut`. **Rewrite:** drop `prev_E`, `recovery_bases`, HeadClaim, pin=CP, per-key pins, dirty sets. |
+| 5 | `maintain` / GC | `feat/scylla-wo-maintain` ([#289](https://github.com/volga-project/volga/pull/289)) | `window_kg_buckets`, `floor_bucket`, **per-cell version retention** (four versions), grace driven by `prev_serving_cut` / `prev_expires_at`. |
 | 6 | Scylla request store | `feat/scylla-request-store` ([#290](https://github.com/volga-project/volga/pull/290)) | Read the pin row once. Client-side `serving_cut.allows(..)` + per-cell greatest `(generation, seq)`. |
 
 #287–#290 were stacked on the #157 protocol and partly restacked onto #298.
@@ -179,7 +208,17 @@ allocator.
 3. **Zombie exclusion is permanent.** `A`'s post-checkpoint writes must be
    invisible to `B`, to `C`, and to WRO after every subsequent publish.
 4. **Clamp.** After `B`'s first publish, `A`'s rows above the checkpoint
-   prefix stop being served; event-time coverage does not regress.
+   prefix stop being served; event-time coverage does not regress. Assert the
+   published cut equals `cp_cut.advance(B, cut_top)` and **not**
+   `live_serving.advance(...)` — the second form leaves `A`'s post-checkpoint
+   rows visible next to `B`'s replay, which is duplicate raw data. Include a
+   generation that published but never checkpointed, so its entry is
+   *dropped* rather than lowered.
+4b. **GC grace after a clamp.** Pin a WRO read at the pre-clamp cut, publish
+   the clamp, run `maintain`, then finish the read: the rows it needs must
+   still be there. Then advance past `prev_expires_at` and assert they are
+   collected. Also assert an ordinary (non-clamping) publish does not
+   overwrite the grace slot.
 5. **Torn commit.** Kill between the raw write and the tile write of one
    commit; assert no reader sees the partial commit and that the cut did not
    advance past it.
@@ -187,7 +226,9 @@ allocator.
    checkpoint and the publish both refuse to name that prefix.
 7. **Version retention.** Rewrite one tile and one `key_state` `N` times,
    run `maintain`, assert at most four versions per cell remain and that
-   `load_key_state` is one CQL query.
+   `load_key_state` is one CQL query. Separately assert `load_key_state` is
+   still one query on an idle key after many generations — the failure mode
+   is a per-generation walk costing `1 + |history|` round trips.
 8. **Generation monotonicity.** Restore twice from the same checkpoint;
    assert the two generations differ and that the first one's writes are
    excluded from the second. Assert the backend refuses to open on a

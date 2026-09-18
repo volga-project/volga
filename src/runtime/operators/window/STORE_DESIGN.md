@@ -328,6 +328,7 @@ pub struct Version {
 }
 
 /// One per key group. Sorted ascending by generation, generations unique.
+#[derive(Clone)]
 pub struct CutHistory {
     entries: Vec<Version>,
 }
@@ -341,9 +342,50 @@ impl CutHistory {
         }
     }
 
-    /// Append or raise this writer's own entry. Entries for older
-    /// generations are never raised (see *Clamp invariant*).
-    pub fn advance(&mut self, top: Version) { /* ... */ }
+    /// Add or raise **only the caller's own** entry, and return a new
+    /// history. Never raises, lowers, or removes another generation's entry:
+    /// clamping is what the *caller's choice of base* does, not this
+    /// function. See *Clamp invariant*.
+    ///
+    /// Takes `&self` on purpose. Publish computes its payload from `cp_cut`,
+    /// which is also the live WO read filter; an `&mut self` signature makes
+    /// it trivial to turn the restored checkpoint cut into the serving
+    /// prefix by accident.
+    pub fn advance(&self, me: Generation, acked_prefix: Option<u64>) -> CutHistory {
+        let mut next = self.clone();
+        // No acked write for this group in this generation: contribute
+        // nothing. Never insert `(me, 0)` — `seq` is 0-based, so a zero
+        // entry is indistinguishable from "seq 0 is committed".
+        let Some(seq) = acked_prefix else { return next };
+        match next.entries.binary_search_by_key(&me, |e| e.generation) {
+            Ok(i) => {
+                assert!(
+                    next.entries[i].seq <= seq,
+                    "own prefix must not go backwards",
+                );
+                next.entries[i].seq = seq;
+            }
+            Err(i) => {
+                assert!(
+                    next.entries.get(i).map_or(true, |e| e.generation > me),
+                    "generation must dominate every inherited entry",
+                );
+                next.entries.insert(i, Version { generation: me, seq });
+            }
+        }
+        next
+    }
+
+    /// True if `self` allows a version that `other` does not. Publish uses
+    /// it to decide whether it is removing coverage (*GC grace*).
+    pub fn outlives(&self, other: &CutHistory) -> bool {
+        self.entries.iter().any(|e| {
+            match other.entries.binary_search_by_key(&e.generation, |o| o.generation) {
+                Ok(i) => other.entries[i].seq < e.seq,
+                Err(_) => true,
+            }
+        })
+    }
 }
 ```
 
@@ -359,20 +401,33 @@ retire entries; see *Accepted divergences*.
 A cut may only name a `seq` whose writes are all durable:
 
 ```text
-cut_top[g] = max seq such that every write at (my_generation, s <= seq)
+cut_top[g] : Option<u64>
+           = max seq such that EVERY write at (my_generation, s <= seq)
              for group g has been ACKED
+           = None if no write in this generation has acked yet
 ```
 
-Track it as a low-water mark over in-flight `seq` values per group. This is
-the single rule that makes cross-partition commits safe (*Commit atomicity*)
-and torn commits invisible. It applies to both the checkpoint cut and the
-serving cut.
+Track it as a **low-water mark** over in-flight `seq` values per group. This
+is the single rule that makes cross-partition commits safe (*Commit
+atomicity*) and torn commits invisible. It applies to both the checkpoint cut
+and the serving cut, and `None` contributes no history entry.
 
-A write that times out has an unknown outcome and therefore **blocks** the
+`seq` is allocated by an **atomic** per-group counter, because ingest runs up
+to `ingest_key_concurrency` keys concurrently and they can share a group.
+Concurrent in-flight `seq` values in one group are allowed; the prefix is
+what makes them safe.
+
+The prefix is a prefix, **never a skip**. If `seq=5` times out and `seq=6`
+acks, `cut_top` is `4`: key Y's committed data at `6` is durable and visible
+to the writer, but no cut may name it until `5` resolves. Do not "skip the
+hole"; do not allocate around it.
+
+A write that times out has an unknown outcome and therefore blocks the
 prefix. Retry it at the **same** `Version` until it is acked, or fail the
-task. Do not skip to the next `seq` and publish over it. (#298's "a new epoch
-starts only after the previous write outcome is known" is unsatisfiable on
-timeout; this is the replacement rule.)
+task. (#298's "a new epoch starts only after the previous write outcome is
+known" is unsatisfiable on timeout; this is the replacement rule.) The
+resulting head-of-line blocking of that group's checkpoint and publish is
+accepted — see *Accepted divergences*.
 
 ### WO visibility
 
@@ -407,23 +462,45 @@ The version is what restores atomicity:
 - All writes of one commit carry the **same** `Version`.
 - A torn commit leaves a partial set at `(generation, seq)`. Because the
   acked-prefix rule never advances a cut past an unacked write, a torn
-  commit always sits **above** every cut. No reader ever observes it.
-- The writer itself can see its own torn commit (`generation == my_generation`)
-  and must therefore complete or fail it before checkpointing or publishing.
+  commit always sits **above** every cut. No **cut-filtered** reader — any
+  successor, and WRO — ever observes it.
 
-State this in the trait docs. "Atomic" without the version qualifier will be
-built on and is wrong.
+WO reads of its own generation are **not** capped by the prefix, so the
+writer *can* see its own torn commit. Requiring it to be resolved before the
+next checkpoint or publish is not enough: the advance/emit path reads before
+either of those. The rule is **per key**:
+
+> While a commit for key `K` is in flight, the writer issues no read of `K`
+> and no second commit for `K`. `commit_events` either returns with every
+> write acked, or the task fails.
+
+Cross-key concurrency inside a group stays legal, which is the point. A torn
+commit then blocks exactly two things: reads of its own key (for the writer)
+and the group's acked prefix (for cuts).
+
+Do **not** instead cap the writer at `seq <= cut_top[g]`. With key X's
+`seq=5` unresolved and key Y's `seq=6` acked, the group prefix is `4`, so
+Y's own committed state would become invisible to its writer, which would
+then re-ingest and re-apply it. Read-your-writes for the current generation
+is uncapped on purpose.
+
+State all of this in the trait docs. "Atomic" without the version qualifier
+will be built on and is wrong.
 
 ### Request ownership and serving cut
 
 ```sql
 -- Request mode only. Streaming WO does not read or write this table.
 CREATE TABLE window_pins (
-    namespace    blob,
-    key_group    int,
-    owner        blob,     -- WriterId allowed to publish
-    serving_wm   bigint,   -- task wm at the last successful publish
-    serving_cut  blob,     -- encoded CutHistory for this key group
+    namespace        blob,
+    key_group        int,
+    owner            blob,     -- WriterId allowed to publish
+    serving_wm       bigint,   -- task wm at the last successful publish
+    serving_cut      blob,     -- encoded CutHistory for this key group
+    prev_serving_cut blob,     -- cut replaced by the last coverage-removing
+                               -- publish; GC grace only
+    prev_expires_at  bigint,   -- wall-clock ms after which prev may be
+                               -- ignored
     PRIMARY KEY ((namespace, key_group))
 );
 ```
@@ -500,15 +577,43 @@ guarded was truncated. With a complete cut history it **is** sufficient: see
 
 ### Publish LWT (request)
 
+The payload is computed from **`cp_cut[g]`**, not from the live serving cut:
+
+```text
+next = cp_cut[g].advance(my_generation, cut_top[g])     -- non-mutating
+```
+
+This one line is the clamp. `advance` only ever adds or raises the caller's
+own entry, so basing it on the live serving cut would keep
+`(A, serving_seq_A)` and merely append `B` — the clamp would never happen and
+WRO would serve `A`'s post-checkpoint rows next to `B`'s replay of the same
+input, with different `Cursor`s. That is duplicate raw data, i.e. a wrong
+answer, and it is the trap #298 fell into from the other direction. Basing it
+on `cp_cut[g]` gets all three restore cases right:
+
+| Live serving vs CP | `next` | Effect |
+|---|---|---|
+| ahead (`A:5000` vs `A:100`) | `{A:100, B:n}` | clamps `A` down |
+| behind (`A:80` vs `A:100`) | `{A:100, B:n}` | fills `A` up to the acked blob prefix |
+| later publishes of mine | `{A:100, B:n'}` | raises only `B`; `cp_cut` is stable between barriers |
+
 One single-row conditional update per group:
 
 ```text
 UPDATE window_pins
-   SET serving_wm = current_wm,
-       serving_cut = serving_cut.advance(Version { my_generation, cut_top[g] })
+   SET serving_wm       = current_wm,
+       serving_cut      = next,
+       -- only when `removes_coverage` (see below):
+       prev_serving_cut = <the serving_cut being replaced>,
+       prev_expires_at  = now_ms + grace_ms
  WHERE namespace = ? AND key_group = ?
     IF owner = me
+
+removes_coverage = observed_serving_cut.outlives(next)
 ```
+
+The publisher already holds `observed_serving_cut`: it read the row at steal
+and knows every value it has written since. No extra read.
 
 One Paxos round, one row, payload bounded by `O(generations)` × 16 bytes. No
 conditional BATCH, no chunking, no partial-publish semantics, no per-key
@@ -516,11 +621,13 @@ condition list. #298 needed "statics plus all dirty keys in one Paxos", which
 exceeds Scylla's batch thresholds for a large dirty set and then has to be
 chunked, which in turn makes a publish non-atomic.
 
-`Not applied` or timeout → **fail this task**. Writers always publish on a
-policy (eager OnCommit and/or periodic), so a zombie that is still ingesting
-eventually hits this CAS. That is a **backup** to master kill, not the
-primary fence. Grey window **before** steal: the old owner may still
-publish — accepted.
+`Not applied` or timeout → **fail this task**. A timeout is *unknown*, the
+same as a steal timeout: do **not** retry it as a fresh publish at a later
+`cut_top`, because the first attempt may yet apply and a second payload would
+race it. Writers always publish on a policy (eager OnCommit and/or periodic),
+so a zombie that is still ingesting eventually hits this CAS. That is a
+**backup** to master kill, not the primary fence. Grey window **before**
+steal: the old owner may still publish — accepted.
 
 **Hops:** async ingest = 1 (data). OnCommit = 2 (data, then pin LWT). No
 ingest LWT.
@@ -534,9 +641,15 @@ therefore **clamps `A`'s entry down** to `cp_seq_A`, and rows `A` wrote in
 `(cp_seq_A, serving_seq_A]` stop being served.
 
 That clamp is mandatory: those are `A`'s post-checkpoint writes, which may be
-torn or may diverge from `B`'s replay, and `B` replays the same input.
-`CutHistory::advance` must never raise an entry for a generation other than
-the caller's own.
+torn or may diverge from `B`'s replay, and `B` replays the same input. It is
+produced by basing the publish payload on `cp_cut[g]`, **not** by `advance`
+touching another generation — `advance` never does.
+
+A generation's entry can also be **dropped** outright, not just lowered. A
+generation that stole and published but died before any checkpoint never
+enters any `cp_cut`, so the next publish omits it entirely. That is correct
+for the same reason (its writes are all post-checkpoint and get replayed),
+and it is why the GC grace test is "lowers **or** drops", not "lowers".
 
 So the published **row set** moves backwards at that instant. What does not
 move backwards is **event-time coverage**, because `publish_ok` holds `B`'s
@@ -589,10 +702,15 @@ CQL slices time; version comparison is in-process.
 |---|---|
 | `my_generation` | task |
 | `cp_cut[g]`, `cp_wm` | restore, once; `O(groups x generations)` |
-| `next_seq[g]`, in-flight low-water mark | per owned group |
+| `next_seq[g]` (atomic), in-flight seqs, low-water mark | per owned group |
 | `serving_wm` / `published_top[g]` | request; scalars |
+| `observed_serving_cut[g]` | request; from steal, then own publishes |
 
 No per-business-key epoch map. No dirty-key set. No `HeadClaim`.
+
+`cp_cut[g]` is the live WO read filter **and** the base of every publish
+payload. Publish must not mutate it; `advance` returns a new value for
+exactly this reason.
 
 ---
 
@@ -636,7 +754,7 @@ pub struct VersionedSlice {
 
 `Versioned` does not store the range: the payload is already keyed by task on
 the master, and the client has a bound assignment. On rescale the **planner**
-produces `Vec<VersionedSlice>` as restore input, not a second checkpoint
+produces a vector of `VersionedSlice` as restore input, not a second checkpoint
 format.
 
 `generation` in the blob is the writing generation. Restore asserts
@@ -924,9 +1042,25 @@ visible(row) ⇔ row.generation == my_generation OR cp_cut[g].allows(row.version
 Until the first restore, `cp_cut[g]` is empty and visibility is
 `my_generation` only.
 
-**`key_state` (hot path, once per key per batch).** Do not scan the
-partition. Walk candidate generations newest-first and let CQL do the
-restriction:
+**`key_state` (hot path, once per key per batch).** Clustering is
+`(generation DESC, seq DESC)` and per-cell retention bounds the partition to
+four versions, so **one** bounded read resolves it:
+
+```cql
+SELECT generation, seq, key_state FROM window_key_states
+ WHERE namespace = ? AND key_group = ? AND business_key = ?
+ LIMIT 8
+```
+
+Keep the first returned row that passes the filter. Do **not** walk one
+query per candidate generation: that is `1 + |history|` round trips on an
+idle key whose last writer sits at the bottom of a long history, which is
+100 queries after 100 failovers.
+
+Fallback, only if every returned row is filtered out — a zombie rewrote this
+key many times after the checkpoint and GC has not swept the partition yet:
+double the `LIMIT` up to a cap, then issue one restricted query per history
+entry, newest generation first:
 
 ```cql
 SELECT key_state FROM window_key_states
@@ -935,9 +1069,7 @@ SELECT key_state FROM window_key_states
  LIMIT 1
 ```
 
-Try `generation = my_generation` with `seq <= u64::MAX` first, then each
-`cp_cut[g]` entry from the newest generation down. One query in steady state,
-two just after restore. Never `SELECT *` on the partition.
+Never `SELECT *` unbounded on the partition.
 
 **Raw and tiles.** Slice time in CQL, filter versions client-side, keep the
 first (newest) visible row per cell. Logical runs are mapped to time buckets,
@@ -993,8 +1125,11 @@ every key in the group.
 At an aligned barrier:
 
 1. Complete pending writes; resolve or fail any timed-out write.
-2. Capture `generation` plus `cuts[g].advance((generation, cut_top[g]))` for
-   every owned group.
+2. Capture `generation` plus `cuts[g].advance(generation, cut_top[g])` for
+   every owned group. `cut_top[g] == None` (no acked write in this generation)
+   leaves the inherited entries untouched and adds nothing — do not write a
+   `(generation, 0)` entry, which would be indistinguishable from "seq 0 is
+   committed".
 3. Return `WindowBackendSnapshot::Versioned`. The operator wraps it with
    namespace + `watermark_frontier` in `WindowStateSnapshot`.
 4. Continue processing at later `seq` values.
@@ -1007,7 +1142,8 @@ operator-local pending-key set.
 
 ## Recovery
 
-1. Planner produces `Vec<VersionedSlice>` (same assignment: one slice).
+1. Planner produces one `VersionedSlice` per inherited slice (same
+   assignment: exactly one).
 2. Client takes the master-allocated `generation`, asserts it dominates every
    inherited generation, and loads `cp_cut[g]`. `next_seq[g] = 0`.
 3. Source restores its checkpoint offset and replays post-checkpoint input.
@@ -1110,15 +1246,36 @@ Replace it. For each cell, keep exactly:
    current value, possibly still uncommitted);
 2. the newest version allowed by `cp_cut[g]`;
 3. the newest version allowed by the current `serving_cut` (request mode);
-4. the newest version allowed by any `serving_cut` published within the last
-   **grace** interval (in-flight WRO reads pinned before the last publish).
+4. the newest version allowed by `prev_serving_cut`, while
+   `now_ms < prev_expires_at` (request mode).
 
 Drop everything else, including rows of older generations **above** their
 cut entry — which is what collects zombie writes and the rows dropped by a
 clamp, usually within one sweep of the partition.
 
-Bound: four versions per cell. Grace is the maximum WRO request budget; the
-optional WRO pin cache TTL must not exceed it.
+Bound: four versions per cell.
+
+**Rule 4 must be a procedure, not a predicate over history.** "Any
+`serving_cut` published within grace" is not implementable: the pin row is
+overwritten on every publish, so after a clamp the old cut exists nowhere
+that GC can read, and an in-flight WRO that pinned `{A:5000}` still needs
+`A`'s `(100, 5000]` rows until its request ends.
+
+A single `prev_serving_cut` slot is sufficient **because it is written only
+by a coverage-removing publish** (`removes_coverage` in *Publish LWT*).
+Ordinary publishes only raise the publisher's own entry, so their predecessor
+is a strict subset of the new cut and retaining it would be a no-op. Writing
+`prev` unconditionally would be wrong for the opposite reason: a clamp
+followed by two ordinary publishes would push the clamped cut out of the slot
+while a reader is still pinned to it. Coverage-removing publishes happen once
+per failover, so one slot with an expiry covers every case.
+
+The slot lives in the pin row rather than in the owner's RAM so that a
+successor's GC honours a grace window opened by its predecessor.
+
+Grace is the maximum WRO request budget **plus a clock-skew allowance**:
+`prev_expires_at` is absolute wall-clock, written by one node and compared by
+another. The optional WRO pin-cache TTL must not exceed grace.
 
 ### Rest of `maintain`
 
@@ -1150,7 +1307,7 @@ immediately inside `maintain`.
 
 | Operation | Scylla round trips | LWT |
 |---|---|---|
-| Streaming ingest, one key-batch | 1 read (`key_state`, `LIMIT 1`) + 1 read per (granularity, bucket) tile set; writes: 1 per touched partition, issued concurrently | none |
+| Streaming ingest, one key-batch | 1 bounded read (`key_state`, `LIMIT 8`) + 1 read per (granularity, bucket) tile set; writes: 1 per touched partition, issued concurrently | none |
 | Request ingest | same, plus 1 single-row LWT per group per publish cadence | 1, amortized |
 | WO advance page | 1 due-work read + per-key reads it already needed | none |
 | WRO lookup | 1 pin read + planned raw/tile reads | none |
@@ -1181,23 +1338,33 @@ Storage per cell after GC: at most four versions. Control-plane blob:
    `event_ts` is retained by design. Entries are 16 bytes; 1000 generations
    across 128 groups is ~2 MB of control plane and a binary search per row.
    Cap the list and fail loudly if the cap is hit; the mitigation (forced
-   version compaction) is future work.
+   version compaction) is future work. The cap bounds **four** things: the
+   checkpoint blob, the `serving_cut` payload on the publish LWT, the
+   client-side filter cost per row, and the pathological `key_state`
+   fallback. It does not bound steady-state query counts — the bounded
+   `LIMIT` read does that.
 4. **Grey window before steal.** Until the steal is accepted, the old owner
    can still publish. WRO can jump forward on the old cut after `B` has
    started. Accepted; do not start ingest before steal completes, or the
    window widens.
 5. **Streaming write zombies are unfenced.** No `owner` row, no ingest LWT.
    The cut fences every **reader**, permanently. The dead worker can still
-   write unlogged rows (collected by retention rule 5 above) and still emit
-   downstream until master kill. Output fencing is the job attempt on the
-   data plane, not `window_pins`.
-6. **Publish freshness has head-of-line blocking.** The serving cut is
-   per group, so one slow in-flight write delays the whole group's publish.
-   Bounded by write timeout, and an unresolvable write fails the task. This
-   is the cost of dropping per-key pins; per-key pins would isolate it, at
-   the price of everything in *What changed and why*.
+   write unlogged rows (collected by the drop-everything-else clause of
+   per-cell retention) and still emit downstream until master kill. Output
+   fencing is the job attempt on the data plane, not `window_pins`.
+6. **Publish and checkpoint freshness have head-of-line blocking.** Cuts are
+   per group and the prefix is a low-water mark, so one slow or timed-out
+   write holds back that group's whole cut — including acked writes to other
+   keys at a higher `seq`. Bounded by write timeout, and an unresolvable
+   write fails the task. This is the cost of dropping per-key pins; per-key
+   pins would isolate it, at the price of everything in *What changed and
+   why*. Skipping the hole instead is not an option — see *Acked prefix*.
 7. **Generation allocation is a master prerequisite.** See above. The backend
    must refuse to open until it exists.
+8. **GC grace compares wall clock across nodes.** `prev_expires_at` is
+   written by the publishing owner and may be read by a successor's GC, so
+   grace must include a clock-skew allowance on top of the WRO request
+   budget.
 
 ---
 
