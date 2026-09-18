@@ -11,6 +11,9 @@ Both roles use the same logical raw rows and optional aggregate tiles through
 separate store contracts. Raw rows are authoritative. Tiles only reduce raw I/O
 and accumulator CPU work.
 
+Remote-store layout, versioning, checkpoint/restore, and GC are specified in
+[`STORE_DESIGN.md`](STORE_DESIGN.md).
+
 ## Core model
 
 State is isolated by `PartitionKey { namespace, business_key }`. The namespace
