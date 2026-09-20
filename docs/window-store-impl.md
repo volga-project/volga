@@ -71,14 +71,19 @@ missing is only the path back to the tasks.
 | C3 | Coverage guard: refuse a request whose `lo < retention_floor`. Replaces the `// No lateness filter. Answer from whatever state the backend still retains.` comment | `window/request.rs` |
 | C4 | Request-mode admission on `ts > retention_floor` instead of `ts > watermark`, for `StateOnly` operators only | `window/state.rs`, `window/operator.rs` |
 | C5 | Derive retention from the **committed** watermark and publish the floor; GC gated on the published floor, never the live one | `window/state.rs`, backend `maintain` |
+| C8 | WRO request deadline, asserted below the checkpoint interval at configure time. One `prev_cut` slot only covers a reader one generation stale, so a longer request silently undercounts | request path, config |
 | C6 | Fresh mode: head-scoped read as specified | InMem + Scylla read paths |
 | C7 | Deduplicate **after** version filtering, not before | `window/store/data.rs` |
 
 Tests to add with these:
 
-- WO emitted rows for `[lo, hi]` == WRO `Committed` read of `[lo, hi]`. This
-  equivalence is the split-path contract and is currently untested
-  (`window/tests/semantics.rs`).
+- Split-path equivalence, **quiesced**: drain the input, let one checkpoint
+  complete, then assert WO emitted rows for `[lo, hi]` == WRO `Committed`
+  read of `[lo, hi]` (`window/tests/semantics.rs`). Do not assert this
+  against a live emit path — a running `Emit` WO computes from
+  `my_attempt | cp_cut` and is legitimately ahead of the published cut, so
+  the live form asserts zero publication lag, which the design does not
+  promise.
 - Coverage guard refuses below the floor and answers at the floor. Removes
   the `lateness: 300_000` workaround and the *WRO query horizon is not
   modeled yet* comment in `window/tests/matrix.rs`.
@@ -95,9 +100,9 @@ Each row is a rewrite of an open PR, not a new PR on top.
 | | PR | What changes |
 |---|---|---|
 | S1 | [#287](https://github.com/volga-project/volga/pull/287) write path | Add `attempt` to the clustering key of all four data tables, version clustering `DESC`. Per-group atomic `next_epoch` from 0. Acked-prefix low-water tracking. Per-key in-flight rule (no read or second commit for a key with a commit in flight). Drop `window_head` and any ingest LWT. |
-| S2 | [#288](https://github.com/volga-project/volga/pull/288) checkpoint/restore | `Versioned { attempt, cuts }` replaces `Versioned { version }`; delete `window_recovery_bases`. Restore takes the master attempt, asserts dominance, `next_epoch = 0`. **Delete** steal, promote, `serving_publish`, catch-up freeze. Add `window_kg_meta` and the completion-triggered publish. |
+| S2 | [#288](https://github.com/volga-project/volga/pull/288) checkpoint/restore | `Versioned { attempt, cuts }` replaces `Versioned { version }`; delete `window_recovery_bases`. Restore takes the master attempt, asserts dominance, `next_epoch = 0`. **Delete** steal, promote, `serving_publish`, catch-up freeze. Add `window_kg_meta` with one read-then-CAS routine on two triggers: checkpoint completion, and open (heal if the row is behind the restored checkpoint). `prev_cut` comes from the replaced row; the condition is `cur_attempt <= me AND checkpoint_id = observed`, since `cur_attempt` alone cannot order two writes and completions are not ordered against each other. |
 | S3 | [#289](https://github.com/volga-project/volga/pull/289) maintain/GC | Per-cell version retention, three slots (`cur_attempt`, `cut`, `prev_cut`). Gate every delete on the published floor. No wall-clock grace anywhere. |
-| S4 | [#290](https://github.com/volga-project/volga/pull/290) request store | Read `window_kg_meta` per request (not cached in v1) instead of a pin; `ReadOptions`; coverage guard; wire WRO to the worker `StateSessionHandle` instead of opening a second driver pool. |
+| S4 | [#290](https://github.com/volga-project/volga/pull/290) request store | Read `window_kg_meta` per request (not cached in v1) instead of a pin; `ReadOptions`; coverage guard; enforced `wro_request_timeout < checkpoint_interval` with a configure-time assert; wire WRO to the worker `StateSessionHandle` instead of opening a second driver pool. |
 | S5 | [#292](https://github.com/volga-project/volga/pull/292) retry profile | Mostly stands. LWT now appears only on `window_kg_meta` writes. Keep: timeout fails the task, no epoch bump, no republish. |
 | S6 | [#293](https://github.com/volga-project/volga/pull/293) kube schema | Drop `serving_publish` from `ScyllaConfig` — there is no cadence. Rest stands. |
 | S7 | [#296](https://github.com/volga-project/volga/pull/296) due paging | Independent of the protocol change; `load_triggers` uses the same filter. Land it on its own schedule. |

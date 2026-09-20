@@ -439,16 +439,61 @@ CREATE TABLE window_kg_meta (
 );
 ```
 
-Two writers, both cheap:
+### Writing it
 
-- **WO open, request mode, per owned group, in parallel.** Set `cur_attempt`
-  under `IF cur_attempt < ?` (or `IF NOT EXISTS`). One LWT per group at open,
-  `O(max_p / p)` total. This is what lets a fresh read fence zombies without
-  WRO knowing anything about the topology.
-- **On checkpoint completion, per owned group.** Write `cut`, `prev_cut`,
-  `committed_wm`, `retention_floor`, `checkpoint_id` under `IF cur_attempt =
-  ?`. One LWT per group per checkpoint — at `max_p = 128` and a 30s interval
-  that is a few per second.
+One routine, two triggers. Both are read-then-CAS on a single row, per owned
+key group, issued in parallel across groups.
+
+`prev_cut` must come from the **row being replaced**, never from the writer's
+memory of what it last published. After a failover the successor has
+published nothing, so a RAM-derived `prev_cut` would be empty exactly when
+readers are most likely to be holding an older cut — see *Per-cell version
+retention*. That is why this is a read-then-CAS and not a blind write.
+
+```text
+row = SELECT * FROM window_kg_meta WHERE namespace = ? AND key_group = ?
+
+publish(payload):                       -- payload = cut, wm, floor, cp_id
+    UPDATE window_kg_meta
+       SET cur_attempt   = me,
+           prev_cut      = row.cut,     -- the value being replaced
+           cut           = payload.cut,
+           committed_wm  = payload.wm,
+           retention_floor = payload.floor,
+           checkpoint_id = payload.cp_id
+     WHERE namespace = ? AND key_group = ?
+       IF cur_attempt <= me AND checkpoint_id = row.checkpoint_id
+```
+
+Absent row ⇒ `INSERT ... IF NOT EXISTS`. Not applied ⇒ re-read and retry, or
+skip if the row already carries a `checkpoint_id >= payload.cp_id`. This runs
+once per group per checkpoint, so a retry costs nothing.
+
+The `checkpoint_id` condition is doing the real work. `IF cur_attempt = me`
+alone is not a fence: `attempt` is job-wide, so it cannot order two writes
+from the **same** attempt, and completion notifications are not ordered
+against each other — a delayed publish for checkpoint `N` can land after
+`N+1` and walk the published cut backwards. Making the condition a
+compare-and-swap on `checkpoint_id` makes publication monotonic regardless of
+delivery order, and incidentally makes it irrelevant whether two writers of
+one attempt can ever own the same group.
+
+**Trigger 1 — checkpoint completion.** Publish the cut captured at that
+barrier. One LWT per group per checkpoint; at `max_p = 128` and a 30s
+interval that is a few per second.
+
+**Trigger 2 — WO open, request mode.** Publish the **restored** cut if
+`row.checkpoint_id < restored_checkpoint_id`, otherwise just take
+`cur_attempt`. Same statement, same condition.
+
+Trigger 2 is what makes at-most-once completion delivery safe. A missed
+notification or a failed CAS otherwise leaves the published row at `N-1`
+while the durable blob is at `N`, and nothing repairs it until the next
+checkpoint completes — which, for a job that is crash-looping before it can
+checkpoint, is never. Healing at open bounds published staleness to the
+checkpoint the attempt actually restored from. The restored cut is by
+definition a completed checkpoint's cut, so publishing it is safe for the
+same reason trigger 1 is.
 
 `retention_floor = committed_wm - max_window_length - lateness`, the same
 expression WO uses for retention eligibility, evaluated on the **committed**
@@ -508,9 +553,26 @@ Read `window_kg_meta` once per request and use that cut for every page. Absent
 row or empty cut ⇒ empty result, no data reads. If WO is down, WRO keeps
 serving the last completed checkpoint.
 
-This is the mode that makes the split-path abstraction hold: a WO emitting a
-window over `[lo, hi]` and a WRO asked for `[lo, hi]` in `Committed` mode
-return the same rows, so the two surfaces cannot disagree by accident.
+This is the mode that makes the split-path abstraction hold, but the
+equivalence is **at the cut, not at the instant**. A live `Emit` WO computes
+from `my_attempt | cp_cut`, which includes its own post-checkpoint writes; a
+`Committed` read sees only the last completed cut. So at any given moment the
+emitted value for a window can be ahead of what `Committed` returns for the
+same range, and the two converge when the checkpoint covering those writes
+completes.
+
+The property to hold onto — and to test — is that both surfaces compute the
+same function of the same input set:
+
+> For a range `[lo, hi]` whose events are all inside the published cut, a
+> `Committed` read returns what the WO emitted for `[lo, hi]`.
+
+Which makes the test a quiesce, not a race: drain the input, let one
+checkpoint complete, then compare emitted rows against `Committed` reads. At
+that point the WO's own view and the published cut coincide, so any
+difference is a real defect rather than publication lag. Asserting the
+equivalence against a live emit path would be asserting that lag is zero,
+which this design deliberately does not promise.
 
 ### Fresh
 
@@ -550,18 +612,29 @@ Zombie fencing on the read path is `v.attempt == cur_attempt`, read from
 v1 reads `window_kg_meta` on every request: two hops, the first into a
 single-row partition, one of `max_parallelism` in a tiny table.
 
-Caching it per WRO task would remove that hop, and is deliberately left for
-later because it turns a structural bound into a tuning one. A request pins
-its cut when it reads the row, and GC retains the version named by `prev_cut`
-— **one** generation of slack (see *Retention and GC*). Uncached, the only
-exposure is the request itself, so the requirement is
-`max request duration < checkpoint interval`: milliseconds against tens of
-seconds, with no knob to get wrong. Cached, it becomes
-`TTL + max request duration < checkpoint interval`, and exceeding it means a
-reader filters on a two-generation-stale cut whose versions GC has already
-collected — which reads as an undercount, not an error. Adding the cache
-means either accepting that bound explicitly or widening retention to more
-than one previous cut.
+A request pins its cut when it reads the row, and GC retains the version
+named by `prev_cut` — **one** generation of slack (see *Per-cell version
+retention*). So a request that outlives a checkpoint interval can end up
+filtering on a cut whose versions GC has already collected, and the symptom
+is a silent undercount rather than an error.
+
+That makes the bound a real limit, not an assumption:
+
+```text
+wro_request_timeout < checkpoint_interval
+```
+
+Enforce it. Give WRO an explicit request deadline, assert the inequality at
+configure time, and fail the request on expiry rather than letting it read
+against a cut that is two generations old. The margin is wide — milliseconds
+against tens of seconds — which is precisely why it should be checked rather
+than assumed.
+
+Caching the row per WRO task would remove the second hop, and is left for
+later because it turns that structural bound into a tuning one:
+`TTL + request timeout < checkpoint_interval`. Adding the cache means either
+accepting that bound explicitly or widening retention beyond one previous
+cut.
 
 A stale `cur_attempt` would only affect Fresh, which is best effort by
 definition, so it is not the constraint here.
@@ -681,21 +754,24 @@ all of them.
 2. `cp_cut[g]` and slice `cp_wm` from the slice containing `g`.
 3. Task frontier = `min(slice cp_wm)`.
 4. `next_epoch[g] = 0`.
-5. Request: set `cur_attempt` per owned group, in parallel. Leave the
-   published cut and floor alone.
+5. Request: one `window_kg_meta` CAS per owned group, in parallel — take
+   `cur_attempt`, and publish the restored cut if the row is behind it
+   (*Writing it*, trigger 2).
 6. Replay sources from this barrier. **Do not copy** cells.
 
 **Bootstrap (first start):** `cp_cut[g]` empty so WO visibility is
 `my_attempt` only; `cp_wm` unset; `next_epoch[g] = 0`; `window_kg_meta` row
 absent, so WRO returns empty until the first checkpoint completes.
 
-**What WRO sees across a failover.** It serves the last completed checkpoint's
-cut throughout — the same state the new attempt restored from — and switches
-to the new attempt's cut when that attempt's first checkpoint completes. There
-is no window in which the published cut names rows that get replayed, so no
-clamp. Freshness cost of a failover is recovery time plus one checkpoint
-interval, or, in Fresh mode, recovery time (with replay possibly partially
-applied — accepted).
+**What WRO sees across a failover.** It serves the last completed
+checkpoint's cut throughout — the same state the new attempt restored from —
+and switches to the new attempt's cut when that attempt's first checkpoint
+completes. If the published row had fallen behind the restored checkpoint,
+the successor's open advances it forward immediately rather than leaving it
+stale for another interval. There is no window in which the published cut
+names rows that get replayed, so no clamp. Freshness cost of a failover is
+recovery time plus one checkpoint interval, or, in Fresh mode, recovery time
+(with replay possibly partially applied — accepted).
 
 ---
 
@@ -986,10 +1062,14 @@ and the second is legitimate.
 
 `prev_cut` is a published column rather than owner RAM so that a successor's
 GC honours grace opened by its predecessor — a restart is exactly when
-readers hold the oldest cuts. Because the cut is now monotonic,
-`prev_cut ⊆ cut` always, so one slot is enough and no wall-clock comparison
-appears anywhere. One slot covers readers at most one generation stale, which
-is why the metadata row is not cached in v1.
+readers hold the oldest cuts, and a successor has published nothing of its
+own. It is written from the row it replaces, never from the writer's memory
+(see *Writing it*). Because the cut is monotonic, `prev_cut ⊆ cut` always, so
+one slot suffices and no wall-clock comparison appears anywhere.
+
+One slot covers readers at most **one** generation stale. That is the whole
+reason `wro_request_timeout < checkpoint_interval` is enforced and the
+metadata row is not cached in v1.
 
 ### Rest of `maintain`
 
@@ -1021,7 +1101,7 @@ floor. InMem applies the same logical rules immediately inside `maintain`.
 | Checkpoint barrier | 0 | none |
 | Checkpoint completion | 1 per owned group | 1 per owned group |
 | Restore, streaming | 0 | none |
-| Restore, request | `O(max_p / p)` parallel `cur_attempt` writes | 1 per owned group |
+| Restore, request | `O(max_p / p)` parallel metadata CAS (attempt + heal) | 1 per owned group |
 
 Storage per cell after GC: at most three versions. Control-plane blob:
 `O(groups x attempts)` × 16 bytes.
