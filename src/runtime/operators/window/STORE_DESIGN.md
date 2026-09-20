@@ -342,8 +342,14 @@ them safe.
 The prefix is a prefix, **never a skip**. If epoch 5 times out and 6 acks,
 `cut_top` is 4. Key Y's data at 6 is durable and visible to its writer, but no
 cut may name it until 5 resolves. Do not skip the hole; do not allocate around
-it. A write that times out has an unknown outcome, so retry it at the **same**
-`Version` until acked, or fail the task.
+it. A write that times out has an unknown outcome, so retry it at the
+**same** `Version` until acked, or fail the task.
+
+That retry happens **inside `commit_events`**, which does not return until
+every write is acked or it gives up and fails. Returning a timeout to the
+caller would let the operator proceed to `load_key_state` for that key while
+the commit is still in flight, which is exactly what the per-key rule in
+*Commit atomicity* forbids.
 
 ### WO visibility
 
@@ -411,7 +417,12 @@ time, version comparison happens in process. Deduplication by key must run
 | `my_attempt` | task |
 | `cp_cut[g]`, `cp_wm` | restore, once; `O(groups x attempts)` |
 | `next_epoch[g]` (atomic), in-flight epochs, low-water mark | per owned group |
+| keys with a commit in flight | bounded by `ingest_key_concurrency` |
 | last published checkpoint id | task; scalar |
+
+The in-flight **key** set is what enforces the per-key rule in *Commit
+atomicity*; the in-flight **epoch** set is what computes the acked prefix.
+They are different sets and both are needed.
 
 No per-business-key epoch map, no dirty-key set, no claim/lease maps.
 
@@ -430,6 +441,7 @@ CREATE TABLE window_kg_meta (
     cur_attempt     bigint,   -- live execution, for fresh reads
     cut             blob,     -- encoded CutHistory of the last COMPLETED cp
     prev_cut        blob,     -- the cut this one replaced; GC grace
+    prev_checkpoint_id bigint, -- its checkpoint_id; reader staleness test
     committed_wm    bigint,   -- task watermark_frontier at that checkpoint
     retention_floor bigint,   -- nothing below this is guaranteed to exist
     checkpoint_id   bigint,
@@ -456,6 +468,7 @@ publish(payload):                       -- payload = cut, wm, floor, cp_id
     UPDATE window_kg_meta
        SET cur_attempt   = me,
            prev_cut      = row.cut,     -- the value being replaced
+           prev_checkpoint_id = row.checkpoint_id,
            cut           = payload.cut,
            committed_wm  = payload.wm,
            retention_floor = payload.floor,
@@ -518,11 +531,9 @@ one rule for both modes: WRO returns empty until the first checkpoint
 completes.
 
 `retention_floor = committed_wm - max_window_length - lateness`, the same
-expression WO uses for retention eligibility, evaluated on the **committed**
-watermark rather than the live one. Publishing it is what turns retention into
-something a decoupled reader can reason about, and it is why **GC deletes only
-below the published floor** (see *Retention and GC*). Both properties come
-from one rule.
+expression and the same committed watermark the WO already uses to gate
+deletion (*Retention and GC*). Publishing it does not change what GC may
+delete; it is how a decoupled reader learns the bound that already holds.
 
 Nothing here is on the ingest hot path.
 
@@ -627,7 +638,19 @@ Two bounded consequences, both stated to callers rather than engineered away:
   request, which is the cost this scoping exists to avoid.
 
 Zombie fencing on the read path is `v.attempt == cur_attempt`, read from
-`window_kg_meta`.
+`window_kg_meta`. Two edges follow from where that value comes from, and
+both belong in user-facing freshness docs rather than only here:
+
+- **Before the first completed checkpoint of a job there is no row**, so
+  `Fresh` is empty, not live. Open deliberately does not create the row
+  (*Writing it*), so a brand-new pipeline serves nothing from either mode
+  until its first checkpoint completes.
+- **There is a grey window after a failover** until the new attempt's
+  `take_attempt` CAS lands: `cur_attempt` still names the dead attempt, so
+  `Fresh` can surface the zombie's post-cut rows. Bounded and best effort, in
+  keeping with the mode — but it is why `take_attempt` must complete
+  **before the new attempt starts ingesting**, the same ordering the old
+  steal-before-ingest rule had. `Committed` is unaffected throughout.
 
 ### Metadata read, and why it is not cached in v1
 
@@ -636,27 +659,36 @@ single-row partition, one of `max_parallelism` in a tiny table.
 
 A request pins its cut when it reads the row, and GC retains the version
 named by `prev_cut` — **one** generation of slack (see *Per-cell version
-retention*). So a request that outlives a checkpoint interval can end up
-filtering on a cut whose versions GC has already collected, and the symptom
-is a silent undercount rather than an error.
+retention*). A request that is still running two publishes later is
+filtering against a cut whose versions GC may already have collected, and the
+symptom is a silent undercount rather than an error.
 
-That makes the bound a real limit, not an assumption:
+**The check is exact, and it is on publication count, not wall clock.** A
+reader that pinned `checkpoint_id = P` re-reads the row and fails the request
+if the pinned cut has aged out of both retained slots:
 
 ```text
-wro_request_timeout < checkpoint_interval
+stale ⇔ P < row.prev_checkpoint_id
 ```
 
-Enforce it. Give WRO an explicit request deadline, assert the inequality at
-configure time, and fail the request on expiry rather than letting it read
-against a cut that is two generations old. The margin is wide — milliseconds
-against tens of seconds — which is precisely why it should be checked rather
-than assumed.
+Do not approximate this with a time bound. Publication cadence is not the
+configured checkpoint interval: a barrier can already be in flight, and a
+heal at open followed by a quick first checkpoint can produce two publishes
+in close succession. Any rule of the form "requests are shorter than the
+interval" is guessing at a quantity the store can simply observe.
+
+Re-read only when it might matter — when the request has outlived some
+fraction of the interval — so the common fast request keeps its two hops and
+long requests pay one more.
+
+A request deadline is still worth having as an operational bound, but it is
+resource hygiene, not the correctness mechanism.
 
 Caching the row per WRO task would remove the second hop, and is left for
-later because it turns that structural bound into a tuning one:
-`TTL + request timeout < checkpoint_interval`. Adding the cache means either
-accepting that bound explicitly or widening retention beyond one previous
-cut.
+later. With the staleness test above a cache is safe rather than
+unsound — a stale pin is detected on re-read — but it converts a silent
+non-issue into a visible failure rate, so it wants the retention widened
+beyond one previous cut to be worth enabling.
 
 A stale `cur_attempt` would only affect Fresh, which is best effort by
 definition, so it is not the constraint here.
@@ -778,7 +810,8 @@ all of them.
 4. `next_epoch[g] = 0`.
 5. Request: one `window_kg_meta` CAS per owned group, in parallel — take
    `cur_attempt`, and publish the restored cut if the row is behind it
-   (*Writing it*, trigger 2).
+   (*Writing it*, trigger 2). **Complete this before step 6**, or `Fresh`
+   readers keep seeing the dead attempt as live.
 6. Replay sources from this barrier. **Do not copy** cells.
 
 **Bootstrap (first start):** `cp_cut[g]` empty so WO visibility is
@@ -943,11 +976,29 @@ SELECT attempt, epoch, key_state FROM window_key_states
 ```
 
 Keep the first row that passes the filter. Do **not** walk one query per
-candidate attempt: that is `1 + |history|` round trips on an idle key whose
-last writer sits at the bottom of a long history. Only if every returned row
-is filtered out (a zombie rewrote the key many times and GC has not swept yet)
-double the `LIMIT` to a cap, then fall back to one restricted query per
-history entry, newest attempt first. Never `SELECT *` unbounded.
+candidate attempt up front: that is `1 + |history|` round trips on an idle
+key whose last writer sits at the bottom of a long history.
+
+**If every returned row is filtered out, the fallback is mandatory**: double
+the `LIMIT` to a cap, and if the rows are still all filtered, issue one
+restricted query per history entry, newest attempt first, until a row is
+found or the history is exhausted.
+
+```cql
+SELECT key_state FROM window_key_states
+ WHERE namespace = ? AND key_group = ? AND business_key = ?
+   AND attempt = ? AND epoch <= ?
+ LIMIT 1
+```
+
+"All rows filtered" is **not** evidence that the key has no state. It is the
+expected shape when a zombie rewrote the key many times after the checkpoint
+and GC has not swept the partition yet: the newest versions are all above
+their attempt's cut entry, and the committed row sits below them. Treating
+that as `KeyState::default()` resets `next_seq` and drops
+`evaluation.through`, which produces duplicate emits and colliding raw
+cursors — a silent correctness failure, not a slow path. Only an exhausted
+history may conclude the key is absent. Never `SELECT *` unbounded.
 
 **Raw and tiles.** Slice time in CQL, filter versions client-side, keep the
 first (newest) visible row per cell, then deduplicate raw by `Cursor`. Read
@@ -980,10 +1031,12 @@ or an unpaged read of the whole range.
    in CQL), filter client-side per `ReadOptions`.
 4. Collapse per cell by greatest `Version`; merge, order, deduplicate,
    rebuild.
-5. Return the data with `committed_wm` and `checkpoint_id`.
+5. If the request outlived the re-read threshold, re-read the metadata row
+   and fail on `pinned_id < row.prev_checkpoint_id` (*Metadata read*).
+6. Return the data with `committed_wm` and `checkpoint_id`.
 
-Two hops. WRO reads no due work, no WO cache, no master, no checkpoint
-metadata.
+Two hops, three for a request slow enough to need the staleness check. WRO
+reads no due work, no WO cache, no master, no checkpoint metadata.
 
 ---
 
@@ -1043,15 +1096,42 @@ Not v1: `USING TIMESTAMP` instead of the metadata CAS; ingest CAS
 ## Retention and GC
 
 **Eligibility.** `retention_floor = committed_wm - max_window_length -
-lateness`, computed at checkpoint completion and published. **Physical
-deletion is gated on the published floor, never on the live watermark.** That
-single rule gives both the reader's coverage guarantee (anything above the
-published floor is present) and restart safety (the floor is derived from
-durable state, so it never moves backwards across a failover).
+lateness`. **Physical deletion is gated on the committed floor in both
+modes, never on the live watermark.** Only where the floor comes from
+differs:
+
+| Mode | Source of `committed_wm` | Also published? |
+|---|---|---|
+| Streaming | local: the task's own last **completed** checkpoint, seeded at restore from `cp_wm` and advanced on completion | no — there is no `window_kg_meta` row |
+| Request | the same local value | yes, into `window_kg_meta` for readers |
+
+It is one quantity with two consumers, not two rules. The published column is
+how a decoupled reader learns the floor; it is not what makes deletion safe.
+
+**Using the live watermark in streaming is not a permitted simplification**,
+even though streaming has no external reader. GC on the live watermark
+deletes below `W_live - max_window_length - lateness`, and a restore drops
+the task back to `cp_wm < W_live`. The restored attempt then re-fires windows
+in `(cp_wm, W_live]` — its `KeyState` last-fired was captured at `cp_wm` —
+and those windows reach back below the floor GC already applied. Replay does
+not repopulate that range, because sources replay forward from the
+checkpoint offset. Coverage planning reads the missing tiles as empty
+intervals, so the result is a silent undercount. Deriving the floor from the
+committed watermark is exactly what makes it impossible for GC to outrun what
+a restore will need.
+
+This applies to consumed due-row deletes on the same terms: `fire_at.ts <=
+committed floor`, not the live watermark.
 
 Retention is asynchronous and lags the floor; that is fine in both directions
 — the floor is what readers are promised, and GC only ever has less deleted
 than the floor allows.
+
+Streaming therefore depends on the completion signal
+([#300](https://github.com/volga-project/volga/issues/300)) too, though only
+to advance retention rather than for correctness of reads. Without it the
+floor stays at the restored `cp_wm` for the life of the attempt and GC simply
+falls behind, which is safe.
 
 **Executor:** `StateRegistry::run_maintenance_once` — parallel loop per
 `OperatorKind`, then per-task `OperatorStore::maintain(ns, state)`, limited to
@@ -1095,7 +1175,7 @@ metadata row is not cached in v1.
 
 ### Rest of `maintain`
 
-- drop consumed due rows (`fire_at.ts <= published floor`) with a `fire_ts`
+- drop consumed due rows (`fire_at.ts <= committed floor`) with a `fire_ts`
   clustering-range delete on shards overlapping the owned range;
 - scan `window_kg_buckets` for `bucket_start < floor_bucket` per owned group
   and delete the matching raw/tile partitions and index row;
