@@ -1210,9 +1210,12 @@ own. It is written from the row it replaces, never from the writer's memory
 (see *Writing it*). Because the cut is monotonic, `prev_cut ⊆ cut` always, so
 one slot suffices and no wall-clock comparison appears anywhere.
 
-One slot covers readers at most **one** generation stale. That is the whole
-reason `wro_request_timeout < checkpoint_interval` is enforced and the
-metadata row is not cached in v1.
+One slot covers readers at most **one** generation stale, which is why
+`prev_checkpoint_id` is published alongside it: a reader that pinned `P`
+tests `P < row.prev_checkpoint_id` and fails the request rather than
+filtering against versions this rule has already dropped (*Metadata read*).
+The retention bound and the reader's test are the same statement seen from
+the two ends. A request deadline is operational hygiene, not the fence.
 
 ### Rest of `maintain`
 
