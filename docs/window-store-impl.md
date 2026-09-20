@@ -97,7 +97,7 @@ Each row is a rewrite of an open PR, not a new PR on top.
 | S1 | [#287](https://github.com/volga-project/volga/pull/287) write path | Add `attempt` to the clustering key of all four data tables, version clustering `DESC`. Per-group atomic `next_epoch` from 0. Acked-prefix low-water tracking. Per-key in-flight rule (no read or second commit for a key with a commit in flight). Drop `window_head` and any ingest LWT. |
 | S2 | [#288](https://github.com/volga-project/volga/pull/288) checkpoint/restore | `Versioned { attempt, cuts }` replaces `Versioned { version }`; delete `window_recovery_bases`. Restore takes the master attempt, asserts dominance, `next_epoch = 0`. **Delete** steal, promote, `serving_publish`, catch-up freeze. Add `window_kg_meta` and the completion-triggered publish. |
 | S3 | [#289](https://github.com/volga-project/volga/pull/289) maintain/GC | Per-cell version retention, three slots (`cur_attempt`, `cut`, `prev_cut`). Gate every delete on the published floor. No wall-clock grace anywhere. |
-| S4 | [#290](https://github.com/volga-project/volga/pull/290) request store | Read `window_kg_meta` (cacheable, TTL ≤ one checkpoint interval) instead of a pin; `ReadOptions`; coverage guard; wire WRO to the worker `StateSessionHandle` instead of opening a second driver pool. |
+| S4 | [#290](https://github.com/volga-project/volga/pull/290) request store | Read `window_kg_meta` per request (not cached in v1) instead of a pin; `ReadOptions`; coverage guard; wire WRO to the worker `StateSessionHandle` instead of opening a second driver pool. |
 | S5 | [#292](https://github.com/volga-project/volga/pull/292) retry profile | Mostly stands. LWT now appears only on `window_kg_meta` writes. Keep: timeout fails the task, no epoch bump, no republish. |
 | S6 | [#293](https://github.com/volga-project/volga/pull/293) kube schema | Drop `serving_publish` from `ScyllaConfig` — there is no cadence. Rest stands. |
 | S7 | [#296](https://github.com/volga-project/volga/pull/296) due paging | Independent of the protocol change; `load_triggers` uses the same filter. Land it on its own schedule. |
@@ -110,6 +110,10 @@ Each row is a rewrite of an open PR, not a new PR on top.
   fails loudly.
 - `RestorePlanner` range intersection for rescale ([#121](https://github.com/volga-project/volga/issues/121)); v1 is same assignment.
 - Foyer WO cache, namespaced quota, `StateResourceTracker` backpressure.
+- WRO-side caching of the `window_kg_meta` row. One slot of GC grace covers
+  readers one generation stale, so caching needs an explicit
+  `TTL + max request duration < checkpoint interval` bound or a second
+  retention slot. Measure the hop before adding the knob.
 - Request workers ([#247](https://github.com/volga-project/volga/issues/247)); Layer C uses `Pipelined` placement until they exist.
 - Keyspace DDL is hardcoded `SimpleStrategy` RF=1 in `StateSessionHandle::connect`; production needs `NetworkTopologyStrategy`, or assume the keyspace exists.
 - No auth/TLS on `ScyllaConfig`.

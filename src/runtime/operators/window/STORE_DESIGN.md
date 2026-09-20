@@ -431,7 +431,7 @@ CREATE TABLE window_kg_meta (
     key_group       int,
     cur_attempt     bigint,   -- live execution, for fresh reads
     cut             blob,     -- encoded CutHistory of the last COMPLETED cp
-    prev_cut        blob,     -- the cut this one replaced; read-cache grace
+    prev_cut        blob,     -- the cut this one replaced; GC grace
     committed_wm    bigint,   -- task watermark_frontier at that checkpoint
     retention_floor bigint,   -- nothing below this is guaranteed to exist
     checkpoint_id   bigint,
@@ -545,13 +545,26 @@ Two bounded consequences, both stated to callers rather than engineered away:
 Zombie fencing on the read path is `v.attempt == cur_attempt`, read from
 `window_kg_meta`.
 
-### Metadata caching
+### Metadata read, and why it is not cached in v1
 
-v1 may cache the `window_kg_meta` row per WRO task to keep the read at one hop
-instead of two. Bound: **TTL ≤ one checkpoint interval**, and GC retains the
-version named by `prev_cut` (see *Retention and GC*), so a reader on a
-one-generation-stale cut cannot point at collected rows. A stale `cur_attempt`
-only affects Fresh, which is best effort by definition.
+v1 reads `window_kg_meta` on every request: two hops, the first into a
+single-row partition, one of `max_parallelism` in a tiny table.
+
+Caching it per WRO task would remove that hop, and is deliberately left for
+later because it turns a structural bound into a tuning one. A request pins
+its cut when it reads the row, and GC retains the version named by `prev_cut`
+— **one** generation of slack (see *Retention and GC*). Uncached, the only
+exposure is the request itself, so the requirement is
+`max request duration < checkpoint interval`: milliseconds against tens of
+seconds, with no knob to get wrong. Cached, it becomes
+`TTL + max request duration < checkpoint interval`, and exceeding it means a
+reader filters on a two-generation-stale cut whose versions GC has already
+collected — which reads as an undercount, not an error. Adding the cache
+means either accepting that bound explicitly or widening retention to more
+than one previous cut.
+
+A stale `cur_attempt` would only affect Fresh, which is best effort by
+definition, so it is not the constraint here.
 
 ---
 
@@ -862,7 +875,7 @@ or an unpaged read of the whole range.
 
 ## WRO reads
 
-1. Hash the key → `key_group`. Read (or use the cached) `window_kg_meta` row.
+1. Hash the key → `key_group`. Read the `window_kg_meta` row.
    Absent or empty cut ⇒ empty.
 2. Apply the coverage guard against `retention_floor`; refuse if uncovered.
 3. Build exact raw/tile plans, load from the same data partitions (time slice
@@ -871,8 +884,8 @@ or an unpaged read of the whole range.
    rebuild.
 5. Return the data with `committed_wm` and `checkpoint_id`.
 
-Two hops uncached, one when the metadata row is cached. WRO reads no due work,
-no WO cache, no master, no checkpoint metadata.
+Two hops. WRO reads no due work, no WO cache, no master, no checkpoint
+metadata.
 
 ---
 
@@ -907,8 +920,7 @@ data: (PartitionKey, family, bucket) -> materialized writer-view data
 due:  (namespace, bucket, kg_shard) -> immutable due entries
 ```
 
-Cleared before each execution attempt. WRO bypasses it and uses the metadata
-cache described above instead.
+Cleared before each execution attempt. WRO bypasses it entirely.
 
 ---
 
@@ -956,17 +968,28 @@ path. For each cell keep exactly:
 
 1. the newest version with `attempt == cur_attempt` (possibly uncommitted);
 2. the newest version allowed by the published `cut`;
-3. the newest version allowed by `prev_cut` (covers in-flight requests and the
-   metadata read cache).
+3. the newest version allowed by `prev_cut` (covers requests in flight across
+   a publish).
 
 Drop everything else, including rows of older attempts **above** their cut
 entry, which is how zombie writes are collected. Bound: three versions per
 cell.
 
+Slot 3 is not optional either. A tile rewritten between two checkpoints has
+one version allowed by `cut` and an older one allowed by `prev_cut`; without
+the slot, a request that pinned the earlier cut finds the partition non-empty
+and every row filtered out, and returns nothing for that tile. That is a
+silent undercount on the normal path, and the reader cannot detect it: "no
+version at my cut because it was collected" and "no version at my cut because
+the cell was first written after my cut" are indistinguishable from the data,
+and the second is legitimate.
+
 `prev_cut` is a published column rather than owner RAM so that a successor's
-GC honours grace opened by its predecessor, and because the cut is now
-monotonic, `prev_cut ⊆ cut` always — one slot is enough, with no wall-clock
-comparison anywhere.
+GC honours grace opened by its predecessor — a restart is exactly when
+readers hold the oldest cuts. Because the cut is now monotonic,
+`prev_cut ⊆ cut` always, so one slot is enough and no wall-clock comparison
+appears anywhere. One slot covers readers at most one generation stale, which
+is why the metadata row is not cached in v1.
 
 ### Rest of `maintain`
 
@@ -993,7 +1016,7 @@ floor. InMem applies the same logical rules immediately inside `maintain`.
 |---|---|---|
 | Ingest, one key-batch | 1 bounded `key_state` read + 1 read per (granularity, bucket) tile set; writes 1 per touched partition, concurrent | none |
 | WO advance page | 1 due-work read + the per-key reads it already needed | none |
-| WRO lookup, `Committed` | 1 metadata read (cacheable) + planned raw/tile reads | none |
+| WRO lookup, `Committed` | 1 metadata read + planned raw/tile reads | none |
 | WRO lookup, `Fresh` | same + 1 bounded raw slice over the head | none |
 | Checkpoint barrier | 0 | none |
 | Checkpoint completion | 1 per owned group | 1 per owned group |
@@ -1056,11 +1079,18 @@ Storage per cell after GC: at most three versions. Control-plane blob:
 - Ingest LWT, periodic owner suicide, `USING TIMESTAMP` LWW.
 - Cut history retirement, skinny due index, stable source event identity.
 - Zero-lag visibility for late events in `Fresh`.
+- Caching the `window_kg_meta` row on the WRO side.
 
 ## Future next steps
 
 `RestorePlanner` identity mapping on master must grow the range intersection
 described above; Scylla's `maintain` implementation remains TODO.
+
+**WRO metadata cache.** Removes one hop from every request. Needs either an
+explicit `TTL + max request duration < checkpoint interval` bound or a second
+retention slot; see *Metadata read*. Measure the hop first — it is a
+single-row read from a `max_parallelism`-row table, so it may not be worth a
+tuning knob.
 
 **Namespaced cache quota.** Give each state consumer its own memory and
 local-disk quota; `StateResourceTracker` is the scaffold.
