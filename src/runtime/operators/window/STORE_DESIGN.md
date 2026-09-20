@@ -102,14 +102,15 @@ key_group = hash % max_parallelism
 subtask   = key_group * p / max_parallelism
 ```
 
-Each WO/WRO task owns a contiguous `KeyGroupRange`. `max_parallelism` is
-job-wide and must not change for a pipeline incarnation.
+Each **WO** task owns a contiguous `KeyGroupRange`. **WRO owns nothing** —
+see *Ownership is write-side only*. `max_parallelism` is job-wide and must
+not change for a pipeline incarnation.
 
 - `StateNamespace` is the operator state space, not a task. It is fixed at
   compile time and shared by the WO and WRO sides of one operator, which is
   what lets request serving be deployed independently of the streaming
-  topology. Task isolation is the owned key-group range, bound on the
-  per-task store client at open.
+  topology. Write-side task isolation is the owned key-group range, bound on
+  the per-task WO client at open.
 - `PartitionKey` must stay collision-safe. Persist the serialized
   business-key bytes; derive `key_group` from `Key.hash` and
   `max_parallelism`.
@@ -140,14 +141,46 @@ Attempt         = durably monotonic execution attempt (see below)
 The client derives `key_group` from `Key.hash` and the bound `max_p`. Per-key
 calls must land in the bound range.
 
-WRO reuses the same namespace and addresses rows by `PartitionKey`. It shares
-no runtime context with WO: it reads `window_kg_meta` for everything it needs
-about the live execution. Request routing still sends a lookup to the WRO task
-that owns the key, but that is locality only — any WRO task can answer any key
-in the namespace.
-
 `OperatorStore` is the generic maintenance port on the shared physical
 backend.
+
+### Ownership is write-side only
+
+Key-group ownership exists to give each cell a single writer. Reads need no
+such thing, and WRO is stateless: it has **no** owned range, no assignment,
+no `restore`, no `checkpoint`, no `maintain`, and no epoch or cut of its own.
+It addresses rows by `PartitionKey`, derives `key_group` from the key hash
+purely to locate the partition and the right `window_kg_meta` row, and reads
+that row for everything it needs to know about the live execution.
+
+Its entire input is static configuration:
+
+```text
+StateNamespace  = (pipeline, owner operator)   -- fixed at compile time
+max_parallelism = job-wide                     -- to derive key_group
+store session   = endpoint / credentials
+read policy     = ReadOptions default, staleness re-read threshold
+```
+
+No `task_index`, no attempt, no runtime context, no handshake with the
+master, and no knowledge of which WO task owns a key. Any WRO task can answer
+any key in the namespace; routing a request to a particular one is a locality
+choice, not a correctness constraint, and a serving tier may be scaled or
+redeployed without touching the streaming topology.
+
+That list is the contract that makes
+[#247](https://github.com/volga-project/volga/issues/247) (splitting
+streaming and request workers) a deployment change rather than a protocol
+change. Two things in the current code still violate it and are part of that
+work, not this one: request-mode placement is forced to `Pipelined` so the
+HTTP source and sink share a process, and `open_window_request_store` opens
+its own driver pool instead of using the worker session. Neither is visible
+in the protocol.
+
+**Do not reintroduce a read-side range bound as an optimization.** Binding
+WRO to a slice would make the serving tier's parallelism a function of the
+streaming topology again, which is the coupling this design exists to
+remove.
 
 ## Store traits
 
@@ -168,6 +201,14 @@ behavior this protocol relies on:
   slices and must not clobber keys outside the bound range.
 - `load_window_data` takes `ReadOptions` and returns one coherent snapshot
   plus the metadata needed to judge it (see *Read contract*).
+
+The split runs along ownership. `WindowOperatorStore` is a per-task client
+bound to an owned key-group range, and everything range-scoped —
+`checkpoint`, `restore`, `maintain`, epoch allocation — lives there.
+`WindowRequestStore` is `load_window_data` and nothing else: no lifecycle
+methods, no bound range, no mutation. Keep it that way; a lifecycle method on
+the read trait is the first step back toward coupling serving to the
+streaming topology.
 
 `InMemWindowStore` is the reference physical backend; one lock provides the
 snapshot boundary. Scylla implements the same client contract with MVCC.

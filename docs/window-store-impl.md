@@ -102,7 +102,7 @@ Each row is a rewrite of an open PR, not a new PR on top.
 | S1 | [#287](https://github.com/volga-project/volga/pull/287) write path | Add `attempt` to the clustering key of all four data tables, version clustering `DESC`. Per-group atomic `next_epoch` from 0. Acked-prefix low-water tracking. Per-key in-flight rule (no read or second commit for a key with a commit in flight). Drop `window_head` and any ingest LWT. |
 | S2 | [#288](https://github.com/volga-project/volga/pull/288) checkpoint/restore | `Versioned { attempt, cuts }` replaces `Versioned { version }`; delete `window_recovery_bases`. Restore takes the master attempt, asserts dominance, `next_epoch = 0`. **Delete** steal, promote, `serving_publish`, catch-up freeze. Add `window_kg_meta` with **two** statements: publish (`prev_cut = row.cut`, `prev_checkpoint_id = row.checkpoint_id`, `IF cur_attempt <= me AND checkpoint_id = observed`) and take-attempt (`SET cur_attempt = me IF cur_attempt <= me`). Triggers: checkpoint completion publishes; open publishes the restored cut if the row is behind it, else takes the attempt only, and must finish before ingest starts or `Fresh` keeps seeing the dead attempt. Do not publish with an unchanged cut — that sets `prev_cut = cut` and collapses the two GC retention slots. Open does not create the row on a fresh job. |
 | S3 | [#289](https://github.com/volga-project/volga/pull/289) maintain/GC | Per-cell version retention, three slots (`cur_attempt`, `cut`, `prev_cut`). Gate every delete on the committed floor, both modes. No wall-clock grace anywhere. |
-| S4 | [#290](https://github.com/volga-project/volga/pull/290) request store | Read `window_kg_meta` per request (not cached in v1) instead of a pin; `ReadOptions`; coverage guard; enforced `wro_request_timeout < checkpoint_interval` with a configure-time assert; wire WRO to the worker `StateSessionHandle` instead of opening a second driver pool. |
+| S4 | [#290](https://github.com/volga-project/volga/pull/290) request store | Read `window_kg_meta` per request (not cached in v1) instead of a pin; `ReadOptions`; coverage guard; staleness re-read (C8); wire WRO to the worker `StateSessionHandle` instead of opening a second driver pool. The request store takes **no** key-group range and no lifecycle methods — its whole input is namespace, `max_parallelism`, session, read policy. |
 | S5 | [#292](https://github.com/volga-project/volga/pull/292) retry profile | Mostly stands. LWT now appears only on `window_kg_meta` writes. Keep: timeout fails the task, no epoch bump, no republish. |
 | S6 | [#293](https://github.com/volga-project/volga/pull/293) kube schema | Drop `serving_publish` from `ScyllaConfig` — there is no cadence. Rest stands. |
 | S7 | [#296](https://github.com/volga-project/volga/pull/296) due paging | Independent of the protocol change; `load_triggers` uses the same filter. Land it on its own schedule. |
@@ -119,7 +119,7 @@ Each row is a rewrite of an open PR, not a new PR on top.
   readers one generation stale, so caching needs an explicit
   `TTL + max request duration < checkpoint interval` bound or a second
   retention slot. Measure the hop before adding the knob.
-- Request workers ([#247](https://github.com/volga-project/volga/issues/247)); Layer C uses `Pipelined` placement until they exist.
+- Request workers ([#247](https://github.com/volga-project/volga/issues/247)). The protocol is already compatible — rule 4 is exactly the interface that split needs — so what remains is deployment, not design: request-mode placement is pinned to `Pipelined` so the HTTP source and sink share a process, and Layer C therefore cannot yet put write and read paths on separate workers. Neither shows up in the store contract.
 - Keyspace DDL is hardcoded `SimpleStrategy` RF=1 in `StateSessionHandle::connect`; production needs `NetworkTopologyStrategy`, or assume the keyspace exists.
 - No auth/TLS on `ScyllaConfig`.
 - Checkpoint store is still `in_memory`; operator state can be Scylla while job checkpoints live in the master.
@@ -136,8 +136,15 @@ Each row is a rewrite of an open PR, not a new PR on top.
    `(pipeline, operator)` and is fixed at compile time, so WO and WRO agree
    without sharing runtime context — that is what makes serving deployable
    independently ([#285](https://github.com/volga-project/volga/pull/285), merged).
-4. Shared-worker restore and maintain must not clobber sibling tasks.
-5. v1 restore is **same assignment**.
+4. **Ownership is write-side only.** WO tasks own key-group ranges; WRO owns
+   nothing and is stateless. Its whole input is `StateNamespace`,
+   `max_parallelism`, a store session and a read policy — no `task_index`,
+   no attempt, no assignment, no lifecycle methods, no master handshake. Any
+   WRO task can answer any key; routing is locality. Do not add a read-side
+   range bound as an optimization: that makes serving parallelism a function
+   of the streaming topology again.
+5. Shared-worker restore and maintain must not clobber sibling tasks.
+6. v1 restore is **same assignment**.
 
 ---
 
