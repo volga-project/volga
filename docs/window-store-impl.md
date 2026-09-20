@@ -102,7 +102,7 @@ Each row is a rewrite of an open PR, not a new PR on top.
 | S1 | [#287](https://github.com/volga-project/volga/pull/287) write path | Add `attempt` to the clustering key of all four data tables, version clustering `DESC`. Per-group atomic `next_epoch` from 0. Acked-prefix low-water tracking. Per-key in-flight rule (no read or second commit for a key with a commit in flight). Drop `window_head` and any ingest LWT. |
 | S2 | [#288](https://github.com/volga-project/volga/pull/288) checkpoint/restore | `Versioned { attempt, cuts }` replaces `Versioned { version }`; delete `window_recovery_bases`. Restore takes the master attempt, asserts dominance, `next_epoch = 0`. **Delete** steal, promote, `serving_publish`, catch-up freeze. Add `window_kg_meta` with **two** statements: publish (`prev_cut = row.cut`, `prev_checkpoint_id = row.checkpoint_id`, `IF cur_attempt <= me AND checkpoint_id = observed`) and take-attempt (`SET cur_attempt = me IF cur_attempt <= me`). Triggers: checkpoint completion publishes; open publishes the restored cut if the row is behind it, else takes the attempt only, and must finish before ingest starts or `Fresh` keeps seeing the dead attempt. Do not publish with an unchanged cut — that sets `prev_cut = cut` and collapses the two GC retention slots. Open does not create the row on a fresh job. |
 | S3 | [#289](https://github.com/volga-project/volga/pull/289) maintain/GC | Per-cell version retention, three slots (`cur_attempt`, `cut`, `prev_cut`). Gate every delete on the committed floor, both modes. No wall-clock grace anywhere. |
-| S4 | [#290](https://github.com/volga-project/volga/pull/290) request store | Read `window_kg_meta` per request (not cached in v1) instead of a pin; `ReadOptions`; coverage guard; staleness re-read (C8); wire WRO to the worker `StateSessionHandle` instead of opening a second driver pool. The request store takes **no** key-group range and no lifecycle methods — its whole input is namespace, `max_parallelism`, session, read policy. |
+| S4 | [#290](https://github.com/volga-project/volga/pull/290) request store | Read `window_kg_meta` per request (not cached in v1) instead of a pin; `ReadOptions`; coverage guard; staleness re-read (C8); the store is **given** a session rather than calling `connect()` itself, so it fails at configure instead of on the first HTTP request. Collocated, that session is the worker's `StateSessionHandle`; standalone it is the request worker's own — the signature says "a session" and does not name either. The request store takes **no** key-group range and no lifecycle methods; its whole input is namespace, `max_parallelism`, session, read policy. |
 | S5 | [#292](https://github.com/volga-project/volga/pull/292) retry profile | Mostly stands. LWT now appears only on `window_kg_meta` writes. Keep: timeout fails the task, no epoch bump, no republish. |
 | S6 | [#293](https://github.com/volga-project/volga/pull/293) kube schema | Drop `serving_publish` from `ScyllaConfig` — there is no cadence. Rest stands. |
 | S7 | [#296](https://github.com/volga-project/volga/pull/296) due paging | Independent of the protocol change; `load_triggers` uses the same filter. Land it on its own schedule. |
@@ -161,7 +161,15 @@ Three jobs. Do not fold them into one suite.
 |---|---|---|---|
 | **A. Operator / store contract** | Window eval, tiles, watermarks, key-group isolation, the `Committed`/`Fresh`/coverage semantics above | `window/tests/*`, `test_utils/window/harness.rs` | Process-local `InMemWindowStore`; Scylla testcontainer for write-path store ops. **Window-specific — stays here.** |
 | **B. Request HTTP plumbing** | Request source ↔ sink, concurrency, echo | `tests/inprocess/request_source.rs` | No operator store. Keep as-is. |
-| **C. Request-mode correctness** | Write path, read path and storage on separate processes; exact oracle vs the published cut | One runner on `VolgaCluster` | Scylla (`InMemoryGrpc` was dropped from the stack; [#162](https://github.com/volga-project/volga/issues/162) is still the spec if it is revived) |
+| **C. Request-mode correctness** | Write path and read path against shared remote state; exact oracle vs the published cut | One runner on `VolgaCluster` | Scylla (`InMemoryGrpc` was dropped from the stack; [#162](https://github.com/volga-project/volga/issues/162) is still the spec if it is revived) |
+
+**Layer C v1 is collocated WO and WRO with remote Scylla**, because
+request-mode placement is pinned to `Pipelined` so the HTTP source and sink
+can share a process. The storage boundary is real and that is what the layer
+exists to exercise; the process boundary between write and read paths is not
+yet, and waits on [#247](https://github.com/volga-project/volga/issues/247).
+Do not describe Layer C as proving independent serving until it does — the
+protocol permits it, the deployment does not yet.
 
 - **Keep** Layer A. `WoWroHarness` is operator semantics and tiling; do not
   re-run the matrix on the cluster.

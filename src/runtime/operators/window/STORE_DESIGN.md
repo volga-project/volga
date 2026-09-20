@@ -171,11 +171,17 @@ redeployed without touching the streaming topology.
 That list is the contract that makes
 [#247](https://github.com/volga-project/volga/issues/247) (splitting
 streaming and request workers) a deployment change rather than a protocol
-change. Two things in the current code still violate it and are part of that
-work, not this one: request-mode placement is forced to `Pipelined` so the
-HTTP source and sink share a process, and `open_window_request_store` opens
-its own driver pool instead of using the worker session. Neither is visible
-in the protocol.
+change. What still blocks the split is placement, not the store:
+request-mode placement is forced to `Pipelined` so the HTTP source and sink
+can share a process, which is invisible to this protocol.
+
+Note that "session" in that list is deliberately unqualified. Today
+`open_window_request_store` calls `connect()` and opens a second driver pool
+in a process that already has one; the fix is to **hand** the store a
+session so it fails at configure rather than on the first request. Which
+session that is remains a deployment question — the worker's when
+collocated, the request worker's own when standalone — and the store must
+not name either.
 
 **Do not reintroduce a read-side range bound as an optimization.** Binding
 WRO to a slice would make the serving tier's parallelism a function of the
