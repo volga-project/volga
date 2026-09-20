@@ -115,10 +115,10 @@ Each row is a rewrite of an open PR, not a new PR on top.
   fails loudly.
 - `RestorePlanner` range intersection for rescale ([#121](https://github.com/volga-project/volga/issues/121)); v1 is same assignment.
 - Foyer WO cache, namespaced quota, `StateResourceTracker` backpressure.
-- WRO-side caching of the `window_kg_meta` row. One slot of GC grace covers
-  readers one generation stale, so caching needs an explicit
-  `TTL + max request duration < checkpoint interval` bound or a second
-  retention slot. Measure the hop before adding the knob.
+- WRO-side caching of the `window_kg_meta` row. The pin-generation re-read
+  (C8) already makes a cache safe rather than unsound, so this is a cost
+  question: a cache trades the extra hop for a visible failure rate unless
+  retention widens beyond one previous cut. Measure the hop first.
 - Request workers ([#247](https://github.com/volga-project/volga/issues/247)). The protocol is already compatible — rule 4 is exactly the interface that split needs — so what remains is deployment, not design: request-mode placement is pinned to `Pipelined` so the HTTP source and sink share a process, and Layer C therefore cannot yet put write and read paths on separate workers. Neither shows up in the store contract.
 - Keyspace DDL is hardcoded `SimpleStrategy` RF=1 in `StateSessionHandle::connect`; production needs `NetworkTopologyStrategy`, or assume the keyspace exists.
 - No auth/TLS on `ScyllaConfig`.

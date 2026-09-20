@@ -1312,11 +1312,12 @@ Storage per cell after GC: at most three versions. Control-plane blob:
 `RestorePlanner` identity mapping on master must grow the range intersection
 described above; Scylla's `maintain` implementation remains TODO.
 
-**WRO metadata cache.** Removes one hop from every request. Needs either an
-explicit `TTL + max request duration < checkpoint interval` bound or a second
-retention slot; see *Metadata read*. Measure the hop first — it is a
-single-row read from a `max_parallelism`-row table, so it may not be worth a
-tuning knob.
+**WRO metadata cache.** Removes one hop from every request. The
+pin-generation re-read already makes it safe rather than unsound — a stale
+pin is detected, not silently undercounted — so this is a cost question, and
+what it buys is paid for in a visible failure rate unless retention widens
+beyond one previous cut. See *Metadata read*. Measure the hop first: it is a
+single-row read from a `max_parallelism`-row table.
 
 **Namespaced cache quota.** Give each state consumer its own memory and
 local-disk quota; `StateResourceTracker` is the scaffold.
