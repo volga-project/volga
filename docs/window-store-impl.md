@@ -196,17 +196,28 @@ a `FaultAction` already on `VolgaCluster`).
 |---|---|
 | Happy path, `Committed` | Exactly the last completed checkpoint's cut. Never a partial commit, never two payloads for one cell. |
 | Happy path, `Fresh` | A superset of `Committed` restricted to `(committed_wm, hi]`; converges to `Committed` after the next completed checkpoint. |
-| Write-worker kill | `Committed` keeps answering from the last completed checkpoint throughout recovery, then advances when the new attempt's first checkpoint completes. It must never regress and never mix attempts. `Fresh` may undercount during replay. |
-| Read-worker kill | Requests fail until the replacement attaches; answers unchanged. |
+| Worker kill | Requests fail while the attempt is down. On resume, `Committed` returns the last completed checkpoint's cut — never empty, never regressed, never mixing attempts — and advances when the new attempt's first checkpoint completes. `Fresh` may undercount during replay. |
 | Uncovered range | Refused, not silently undercounted. |
 | Storage kill | Out of v1 unless we add a dedicated Scylla HA case. |
 
-The write-worker-kill case is the one that distinguishes this protocol from
-the previous one: there is no grey window, no serving regression and no
-attempt mixing to assert around, because the published cut only grows.
+There is **one** kill case in v1, not a write-side and a read-side one.
+`PipelinedStrategy` places every vertex by `task_index / slots_per_node`, so
+WO and WRO of a slice share a worker, and recovery replaces the whole
+execution attempt anyway.
+
+That also bounds what the kill case can prove. The protocol's real claim is
+that a reader keeps serving the last completed cut *while* the writer
+recovers — no grey window, no serving regression, no attempt mixing, because
+the published cut only grows. Observing the *continuity* needs a reader that
+outlives the writer's failure, which is
+[#247](https://github.com/volga-project/volga/issues/247). What v1 can
+assert is the state on either side of the gap, which still catches a
+regression, a clamp or a lost cut; it just cannot catch a transient one.
+Extend this case when request workers land.
 
 ### What not to duplicate
 
 - Tile / coverage geometry → Layer A only.
 - HTTP echo / pending-request limits → Layer B only.
-- Cross-key leak, write≠read workers, published-cut visibility → Layer C only.
+- Cross-key leak, published-cut visibility across a restart, remote-state
+  round trip → Layer C only.
