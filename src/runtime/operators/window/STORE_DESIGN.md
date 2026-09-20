@@ -1,27 +1,58 @@
 # Window store with Scylla design
 
-`WindowOperatorStore` serves the sole WO owner of a key.
-`WindowRequestStore` serves coherent WRO point lookups. Physical layout, MVCC,
-serialization, and caching stay inside the backend.
+`WindowOperatorStore` serves the single WO owner of a key group.
+`WindowRequestStore` serves WRO point lookups. Physical layout, MVCC,
+serialization and caching stay inside the backend. For operator semantics,
+evaluation flow and module structure see the
+[window operator README](README.md).
 
-Versioned data tables are shared. Streaming WO uses overlay + checkpoint
-only. Request mode adds a per-`key_group` lease (`serving_*` / `prev_E`).
-There is no per-key `window_head` and no `window_recovery_bases` table.
-See **Protocol (normative)** under Scylla backend.
+Two ideas carry the whole protocol:
 
-For detailed window-operator semantics, evaluation flow, and module structure,
-see the [window operator README](README.md). This document focuses on store
-contracts and the proposed Scylla backend.
+1. **Every row carries a totally ordered `Version = (attempt, epoch)`**, and
+   visibility is a **per-key-group cut history** — a short sorted list of at
+   most one `(attempt, epoch)` prefix per attempt. Older attempts keep their
+   prefix forever, so pre-crash history never disappears, and post-checkpoint
+   zombie writes stay above their attempt's prefix and are excluded
+   permanently.
+2. **Publication is the checkpoint.** The cut a reader sees is the cut of the
+   last *completed* checkpoint. There is no separate publish path, no
+   ownership lease, no per-key pin, and no clamp: the published cut is exactly
+   the cut a successor restores from, so it only ever grows.
 
-The current data contract is append-only. CDC and late-event correction will
-require explicit mutation semantics rather than implicit delete markers — this
-is future work.
+Everything else follows. This document is the normative protocol; it
+supersedes the earlier drafts in
+[#298](https://github.com/volga-project/volga/pull/298) and
+[#299](https://github.com/volga-project/volga/pull/299).
+
+The data contract is append-only. CDC and late-event correction need explicit
+mutation semantics — future work.
+
+---
+
+## Modes
+
+| | Streaming (WO only) | Request (WO + WRO) |
+|---|---|---|
+| Data tables, due index, `window_kg_buckets` | yes | yes |
+| Versions, cut history, checkpoint cuts | yes | yes |
+| `window_kg_meta` (published cut, floor, `cur_attempt`) | no | yes |
+| WRO reads, `ReadOptions` | no | yes |
+| Triggers and downstream emit | yes | per-operator `WindowOutputMode` |
+
+Ingest is always **UNLOGGED** and identical in both modes. No ingest LWT, no
+per-business-key worker maps.
+
+`WindowOutputMode` is per operator, not per mode: a multi-operator graph may
+run interior operators as `Emit` and only the tail operator at the read cut as
+`StateOnly`. Request mode does not globally disable triggers.
+
+---
 
 ## Contract types
 
-These are the logical models; backend serialization may differ. They are an
-**engine contract** (WO, WRO, InMem, Scylla). Physical layout may add columns
-such as `key_group`; it must not change what `StateNamespace` means.
+Logical models; backend serialization may differ. This is an engine contract
+(WO, WRO, InMem, Scylla). Physical layout may add columns such as `key_group`;
+it must not change what `StateNamespace` means.
 
 ```rust
 /// Operator state space. Shared by every WO task and by WRO.
@@ -37,14 +68,6 @@ pub struct PartitionKey {
     pub business_key: Vec<u8>,
 }
 
-/// Contiguous Flink-style assignment: `subtask = key_group * p / max_p`.
-/// `start` inclusive, `end` exclusive. `max_parallelism` is immutable for a
-/// pipeline incarnation.
-pub struct KeyGroupRange {
-    pub start: usize,
-    pub end: usize,
-}
-
 pub struct Cursor {
     pub ts: i64,
     pub seq_no: u64,
@@ -58,53 +81,12 @@ pub struct TileRun {
     pub start_ts: i64,
     pub end_ts_exclusive: i64,
 }
-pub enum TimeGranularity {
-    Milliseconds(u32),
-    Seconds(u32),
-    Minutes(u32),
-    Hours(u32),
-    Days(u32),
-    Months(u32),
-}
-pub type WindowId = usize;
-pub type AccumulatorState = Vec<ScalarValue>;
-pub struct KeyEvaluationState {
-    pub through: Cursor,
-    pub accumulators: BTreeMap<WindowId, AccumulatorState>,
-}
+
 pub struct KeyState {
     pub next_seq: u64,
     pub evaluation: Option<KeyEvaluationState>,
 }
-pub enum WindowTriggerKind {
-    RowEmit,
-    WindowEnd { window_id: WindowId },
-}
-pub struct WindowTrigger {
-    pub fire_at: Cursor,
-    pub partition: PartitionKey,
-    pub kind: WindowTriggerKind,
-}
-pub struct DueWindowWork {
-    pub partition: PartitionKey,
-    pub key_state: KeyState,
-    pub triggers: Vec<WindowTrigger>,
-}
-/// Opaque pager token. Only the backend that produced it should pass it back.
-/// The helper must not read its fields.
-pub struct TriggerResume { /* private */ }
-pub struct TileState {
-    pub accumulator_state: Option<AccumulatorState>,
-}
-pub struct WindowTiles {
-    pub windows: BTreeMap<WindowId, TileState>,
-}
-pub type TileMap =
-    BTreeMap<(TimeGranularity, i64 /* tile_start */), WindowTiles>;
-pub struct WindowData {
-    raw_batches: Vec<RecordBatch>,
-    tile_map: TileMap,
-}
+
 pub struct WindowStateSnapshot {
     pub namespace: Vec<u8>,
     pub watermark_frontier: Option<i64>,
@@ -112,7 +94,8 @@ pub struct WindowStateSnapshot {
 }
 ```
 
-Routing (already landed):
+`KeyGroupRange`, `key_group_of` and `subtask_of` are landed in
+`src/common/key_group.rs`:
 
 ```text
 key_group = hash % max_parallelism
@@ -122,726 +105,746 @@ subtask   = key_group * p / max_parallelism
 Each WO/WRO task owns a contiguous `KeyGroupRange`. `max_parallelism` is
 job-wide and must not change for a pipeline incarnation.
 
-- `StateNamespace` is the operator state space, not a task. Task isolation is
-  the owned key-group range, bound on the per-task store client at open (see
-  below). Changing only Scylla to strip `task_index` while InMem still keys on
-  `for_operator_task(..., task_index)` would give the same type two meanings;
-  both backends follow this contract.
-- `PartitionKey` must remain collision-safe; hashes alone are insufficient.
-  Persist the serialized business-key bytes. Derive `key_group` from `Key.hash`
-  (first 8 bytes of `Key::to_bytes`) and `max_parallelism`. Scylla hashes the
-  complete partition key for distribution.
-- `Cursor` is raw event identity and total order within a partition.
-- `RawRun` and `TileRun` are half-open. Calls contain merged logical runs, and
-  backends must return exactly their union.
-- `next_seq` allocates per-key sequence IDs. Optional `evaluation` keeps the
-  last fired trigger together with retractable accumulator state. State-only WO
-  does not keep evaluation state.
-- `watermark_frontier` is the **task-level** late-data boundary (each task
-  advances its own watermark over the keys it owns). Logical retention is
-  derived from it, the largest window, and configured lateness.
-- `WindowTrigger` is durable event-time work. Current RANGE windows create one
-  `RowEmit` trigger per accepted row; `WindowEnd` is reserved for scheduled
-  windows.
-- `TriggerResume` is an opaque `load_triggers` cursor. The operator helper
-  must not read it. InMem stores the last visible `WindowTrigger`. Scylla
-  stores a private seek (last **raw** clustering + `(bucket, shard)`), not
-  a packed `WindowTrigger`.
-- Tiles for all windows share `(granularity, tile_start)`, so persisted tile and
-  accumulator state retain `WindowId`.
-- `WindowData` is one materialized WRO snapshot. Evaluation filters its rows by
-  cursor; batches need not be mapped back to individual runs.
+- `StateNamespace` is the operator state space, not a task. It is fixed at
+  compile time and shared by the WO and WRO sides of one operator, which is
+  what lets request serving be deployed independently of the streaming
+  topology. Task isolation is the owned key-group range, bound on the
+  per-task store client at open.
+- `PartitionKey` must stay collision-safe. Persist the serialized
+  business-key bytes; derive `key_group` from `Key.hash` and
+  `max_parallelism`.
+- `Cursor` is raw event identity and total order within a partition. `seq_no`
+  is allocated from `KeyState.next_seq` at ingest, so it is **not** stable
+  across replays that reorder arrivals — see *Accepted divergences*.
+- `RawRun` and `TileRun` are half-open.
+- `watermark_frontier` is the task-level late-data boundary, stored in and
+  restored from the operator checkpoint.
 
 ## Worker state topology
-
-Two layers:
 
 ```text
 physical backend     worker + OperatorKind (one InMem map / Scylla session)
 WindowOperatorStore  per-task client wrapping that backend
 ```
 
-The client is created at WO `open` from the task's assignment and is stable
-for the attempt:
+The client is created at WO `open` from the task's assignment
+(`WindowStoreTaskScope`) and is stable for the attempt:
 
 ```text
 StateNamespace  = (pipeline, owner operator)
 max_parallelism = job-wide, bound on the client
 KeyGroupRange   = groups for this task_index at (p, max_p)
-WriterId        = this task execution
-AttemptToken    = job-level execution attempt
+Attempt         = durably monotonic execution attempt (see below)
 ```
 
-The client derives `key_group` from `Key.hash` and bound `max_p`. It never
-trusts a caller-supplied group. `load_triggers` / `checkpoint` / `restore` use
-the bound range and do not take `owned` or `namespace`. Per-key calls must
-land in the bound range (routing bug otherwise). The operator loops `load_triggers` in `emit_due_pages`. Tests drain with
-`collect_due`. Neither lives on the store trait.
+The client derives `key_group` from `Key.hash` and the bound `max_p`. Per-key
+calls must land in the bound range.
 
-WRO reuses the WO owner namespace. It addresses rows by `PartitionKey`
-(namespace + business key). Request routing still sends a lookup to the WRO
-task that owns that key (locality); the namespace no longer encodes
-`task_index`.
+WRO reuses the same namespace and addresses rows by `PartitionKey`. It shares
+no runtime context with WO: it reads `window_kg_meta` for everything it needs
+about the live execution. Request routing still sends a lookup to the WRO task
+that owns the key, but that is locality only — any WRO task can answer any key
+in the namespace.
 
-`OperatorStore` is the generic maintenance port on the **shared** physical
-backend (registry: one store per kind). The worker cleaner runs one tick:
-
-1. for each registered kind in parallel,
-2. `try_join_all` over that kind's task states,
-3. `store.maintain(ns, task_state)`.
-
-Window eligibility is read from `OperatorTaskState` (watermark →
-`retention_cutoff`, plus the same key-group range the WO client was bound to).
-There is no separate cut/meta publish on the data-plane trait. Pipeline
-`StateSpec.maintenance_*` (default on) enables the cleaner.
-
-See the [window operator README](README.md) for the runtime retention contract
-and how InMem implements `maintain` today. Scylla's `maintain` body is still
-proposed below.
+`OperatorStore` is the generic maintenance port on the shared physical
+backend.
 
 ## Store traits
 
-```rust
-#[async_trait]
-pub trait WindowOperatorStore: Send + Sync + Debug {
-    async fn load_key_state(&self, partition: &PartitionKey) -> Result<KeyState>;
-    async fn load_raw(
-        &self,
-        partition: &PartitionKey,
-        runs: &[RawRun],
-    ) -> Result<Vec<RecordBatch>>;
-    async fn load_tiles(
-        &self,
-        partition: &PartitionKey,
-        runs: &[TileRun],
-    ) -> Result<TileMap>;
-    async fn commit_events(
-        &self,
-        partition: &PartitionKey,
-        ts_column_index: usize,
-        events: &RecordBatch,
-        tiles: &TileMap,
-        state: &KeyState,
-        triggers: &[WindowTrigger],
-    ) -> Result<()>;
-    async fn load_triggers(
-        &self,
-        after: Option<Cursor>,
-        through: Cursor,
-        resume: Option<&TriggerResume>,
-        limit: usize,
-    ) -> Result<(Vec<WindowTrigger>, Option<TriggerResume>)>;
-    async fn store_key_state(
-        &self,
-        partition: &PartitionKey,
-        state: &KeyState,
-    ) -> Result<()>;
-    /// Complete pending writes before capturing the returned snapshot.
-    async fn checkpoint(&self) -> Result<WindowBackendSnapshot>;
-    async fn restore(&self, snapshot: &WindowBackendSnapshot) -> Result<()>;
-}
-#[async_trait]
-pub trait WindowRequestStore: Send + Sync + Debug {
-    async fn load_window_data(
-        &self,
-        partition: &PartitionKey,
-        raw_runs: &[RawRun],
-        tile_runs: &[TileRun],
-    ) -> Result<WindowData>;
-}
-```
-
-### Required behavior
+Landed on master (`WindowOperatorStore` / `WindowRequestStore`). Required
+behavior this protocol relies on:
 
 - Missing partitions and empty runs return empty/default results.
-- Raw rows are restricted to the requested runs, deduplicated, and globally
-  ordered by `Cursor`. Their Arrow schema includes `__seq_no: UInt64`. The
-  Scylla backend stores **one CQL row per event**, clustered by time; it does
-  not pack events into a serialized batch blob.
-- Tiles are unique by `(granularity, tile_start)` and restricted to requested
-  runs. Missing tiles mean empty intervals.
-- `commit_events` atomically publishes raw rows, replacement tiles, key state,
-  and triggers. `ts_column_index` plus `__seq_no` identifies each raw cursor.
-  Retries are idempotent. The backend derives `key_group` from the partition's
-  business key; it does not trust a caller-supplied group.
-- `load_triggers` is **one hop**. It returns the visible triggers from that
-  hop plus an opaque resume. Short pages and empty `triggers` with
-  `Some(resume)` are legal (hidden-only hop). End of range is `next is None`
-  — do not treat an empty page as EOF, and do not fill `limit` visible
-  rows inside the store. It only returns work for the client's bound
-  key-group range. The store does not group by key or load `key_state`.
-  The operator loops this call in `emit_due_pages`, groups by key, and
-  load+evals on the same `process_key_concurrency` pool (16). Fetch size
-  is `window.process_page_size` (256) until Scylla is measured. Do not
-  floor at key concurrency. Prefetch is later
-  ([#297](https://github.com/volga-project/volga/issues/297)).
-- `store_key_state` publishes only sequence/evaluation state.
-- `checkpoint` completes pending writes and returns a backend-specific
-  snapshot of the client's bound range only. Scylla returns this writer's
-  `StateVersion` (after restore, writer `E = max(cp_E, serving_E, prev_E)`;
-  never restart at 0); InMem serializes partitions in that range.
-- `restore` starts store access from the supplied checkpoint base (in-memory
-  overlay slices, no bases table) and must not clobber keys outside the bound
-  range (the physical InMem/Scylla backend is shared by all tasks of the kind).
-- WO reads observe their latest publication. One fenced WO owns a partition, so
-  its historical raw and tile reads need not share a snapshot and can run
-  concurrently.
-- WRO: Each `load_window_data` is one coherent published snapshot across all
-  physical buckets and pages.
-- Methods must not broaden ranges or return partial results.
+- `commit_events` publishes raw rows, replacement tiles, key state and due
+  work **for one key** at a single `Version`. It is atomic **at the version
+  level, not the CQL level** — see *Commit atomicity*. Retries at the same
+  version are idempotent.
+- The due-work read is one hop and uses the same filter as WO data reads. WRO
+  does not read due work.
+- `checkpoint` completes pending writes and returns a backend snapshot of the
+  client's bound range only. No Scylla round trips beyond draining in-flight
+  writes.
+- `restore` starts the cut history from the supplied checkpoint / planner
+  slices and must not clobber keys outside the bound range.
+- `load_window_data` takes `ReadOptions` and returns one coherent snapshot
+  plus the metadata needed to judge it (see *Read contract*).
 
-`InMemWindowStore` is the reference physical backend. One lock provides the
-WRO snapshot boundary. Each WO task holds a client over that shared map,
-bound to namespace + key-group range; checkpoint embeds serialized partition
-state and triggers for that range. The shared backend implements
-`OperatorStore::maintain` and prunes eagerly under the same retention contract
-as Scylla (control flow identical; lag ~0), reading the range from
-`OperatorTaskState` rather than a task-suffixed namespace blob.
+`InMemWindowStore` is the reference physical backend; one lock provides the
+snapshot boundary. Scylla implements the same client contract with MVCC.
 
-**Land the engine contract and InMem before any Scylla backend.** Today
-`StateNamespace` still includes `task_index`, and restore/maintain key on that
-blob. Operator-scoped namespace plus range isolation must ship on the traits
-and InMem first (two tasks, one worker: restore/maintain of task 0 must not
-clobber task 1). Otherwise the same type has two meanings and shared-worker
-restore wipes sibling keys. Scylla implements that already-landed contract.
+---
 
-## Runtime flows
-
-WO ingest:
-
-1. Load key state, drop rows at or behind the task watermark, and assign
-   sequence IDs.
-2. Load and update affected tiles.
-3. For emitting WO, create one `RowEmit` trigger per accepted row.
-4. Atomically `commit_events(..., events, tiles, state, triggers)`. State-only
-   WO publishes raw rows and tiles without row triggers.
-
-WO advance:
-
-1. Stream backend-sized trigger pages for
-   `(watermark_frontier, incoming_watermark]` (client already scoped to this
-   task's key groups).
-2. Group each page by key and use every trigger cursor as an exact emit point.
-3. Build per-cursor plans. Sliding aggregates plan leave bands; rebuild
-   aggregates plan raw edges plus interior tiles.
-4. Merge emit-row and historical coverage, then load raw rows and tiles
-   concurrently.
-   Small ranges remain all-raw. Large slide leave bands may also use tiles.
-5. Evaluate using those same plans. New rows are always raw; rebuild interiors
-   do not overfetch raw rows.
-6. Publish updated `KeyEvaluationState` with `store_key_state`.
-7. Advance and forward the task watermark only after all due work succeeds.
-   Physical prune is not awaited here; the worker cleaner applies it via
-   `maintain`.
-
-Tile-based slide retraction is limited to aggregates whose states can be
-subtracted safely (`SUM`, `COUNT`, and `AVG`). Other sliding aggregates retract
-raw leave-band rows. Rebuilds may use mergeable tile states for any aggregate.
-
-WRO lookup:
-
-1. Both plain and retractable aggregates use rebuild plans, since WRO has no
-   prior accumulator.
-2. Build and merge exact raw-edge and tile plans for all points and windows.
-3. Call `load_window_data` once for one coherent snapshot.
-4. Evaluate per-window request arguments and rebuild every answer.
-
-WRO is read-only.
-
-## Scylla backend
-
-Scylla does not provide one snapshot spanning multiple partitions, CQL queries,
-or result pages. A logical window read may cross several physical ranges, so
-concurrent writes could otherwise make those pieces represent different
-moments. We use application-level MVCC (`attempt`, `epoch`) so each **reader**
-can pin a cut: WO overlays checkpoint + this writer; WRO pins a request-mode
-lease. We also use time buckets so physical partitions and range reads stay
-bounded.
-
-v1 restore still assumes **same task assignment** (`RestorePlanner` identity
-map). The physical model is key-group-native from the start so later rescaling
-is a remap of ranges between checkpoints, not a data rewrite. `task_index`
-does not appear in PRIMARY KEYs.
-
-**Streaming and request share the versioned data tables.** Lease, steal, and
-publish exist **only** when WRO / request-mode is on. Streaming WO never
-touches a lease.
-
-### Protocol (normative)
-
-Data (always):
-
-- raw / tiles / `key_state` / **triggers** cluster `(attempt, E)`.
-- `E` is monotonic per `key_group` (the owning WO allocates it locally).
-  **Never reset** on failover. Not per business key. Not minted by LWT.
-  A writer may use one shared counter for all owned groups so the checkpoint
-  blob stays a single `StateVersion`.
-- Ingest: same-partition **UNLOGGED BATCH** only. **No LWT.**
-
-Streaming WO overlay (no lease):
+## Identity and clocks
 
 ```text
-attempt == me
-OR (attempt == cp.attempt AND E <= cp_E)
+business_key   window key
+key_group      hash % max_parallelism          // stable under rescale
+subtask        key_group * p / max_parallelism
+attempt        durably monotonic, never reused, job-wide
+epoch          per key_group write-batch counter, local, starts at 0
+Version        (attempt, epoch), lexicographic total order
+watermark      task-global, non-decreasing
 ```
 
-Restore the **writer from checkpoint** (and source offsets), not from a serve
-pin. `load_triggers` uses the same overlay. Until restore, overlay is `me`
-only.
+`epoch` is a **write-batch counter**, not event time, and not the per-row
+`seq_no` in `Cursor`. It only has to increase within one `(attempt,
+key_group)`, so a plain local counter from zero satisfies it. It does **not**
+need seeding from a checkpoint cut, because `attempt` is the high-order
+component of the order.
 
-Attempts do **not** share a counter until restore. Uncheckpointed rows from
-a dead attempt are not committed just because a later writer reused those
-`E` values. Do **not** overlay `me | E <= cp_E` (any attempt): after B
-checkpoints, C would `max(E)`-prefer A's leftover `E=50` over B's replay at
-`E=12`. Streaming durability is the last checkpoint plus source replay, not
-a WRO serving line.
+`attempt` is job-wide: every WO task of one execution shares it.
 
-Idle keys last written on an attempt older than `cp.attempt` disappear from
-WO after a second failover. That is the documented cost of one
-`StateVersion`. WRO still sees them on the epoch line. If idle keys on WO
-matter later, add a real cut (per-group committed `E`, or a chain) — do not
-widen overlay.
+### Attempt allocation (master prerequisite)
 
-Request serving (only if WRO is on) — one lease per `key_group`:
+`attempt` must be monotonic and never reused **across master restarts**,
+because Scylla data outlives the master process. Neither obvious source works
+alone:
+
+- `MasterLifecycle::attempt_id` increments per recovery but resets to `0` on
+  pipeline start (`src/runtime/master/lifecycle.rs`). A new incarnation at
+  attempt `0` sits below every existing cut, so its writes are filtered out
+  and its cells lost to LWW.
+- `max(restored cut attempts) + 1` repeats: attempts 2 and 3 commonly restore
+  from the **same** checkpoint, so both compute the same value and share a
+  version space with each other's zombie.
+
+Required: the master allocates the attempt from **durable** state
+(`max(observed) + 1`), persists it **before** configuring workers, and passes
+it to tasks with restore data. Assertions: the new attempt exceeds every
+attempt in any restored cut history, and no attempt is handed to two
+executions. Tracked by
+[#156](https://github.com/volga-project/volga/issues/156). Until it lands the
+Scylla backend must refuse to open.
+
+### Checkpoint-completion notification (master prerequisite)
+
+Tasks today see only the barrier. The master knows
+`latest_complete_checkpoint` and records `LifecycleEvent::CheckpointCompleted`
+(`src/runtime/master/state.rs`), but never tells the tasks.
+
+The protocol needs it: the cut may only be published once its checkpoint has
+**completed** globally. Publishing at the barrier would let the published cut
+name writes of a checkpoint that later aborts; a successor then restores from
+an earlier checkpoint and replays that input, and the reader would see both
+the old rows and the replayed rows. Repairing that requires clamping another
+attempt's entry down — the single largest source of complexity in the earlier
+drafts, and it disappears entirely if publication waits for completion.
+
+Two ways to get it, in preference order:
+
+1. A `notify_checkpoint_complete(checkpoint_id)` hook delivered to tasks. This
+   is the standard engine capability and is independently useful (source
+   offset commit).
+2. Piggyback `last_completed_checkpoint_id` on the next barrier message. No
+   new RPC, but publication lags by one checkpoint interval on top of
+   completion.
+
+Option 1 is the plan of record. Until either exists, request mode must refuse
+to open.
+
+---
+
+## Protocol (normative)
+
+### Version stamping
+
+- raw / tiles / `key_state` / due work cluster `(attempt, epoch)`.
+- `epoch` is allocated locally per `key_group`. **No LWT** to mint it.
+- Ingest: same-partition **UNLOGGED BATCH** only.
 
 ```text
-owner
-serving_E, serving_attempt, serving_wm
-prev_E    -- serving_E at last steal; 0 in CQL if serving was empty. Publish does not touch it.
+epoch = next_epoch[g]++      // starts at 0 on first touch in this attempt
+stamp (my_attempt, epoch)
 ```
 
-`prev_E` is the last **published** cut at steal, not “the previous owner.”
-Above that cut, only `serving.attempt` may appear. CQL stores `prev_E = 0`
-(no unset). One filter when a serving pin exists:
+Increment during catch-up. Do not gate on anything.
 
-```text
-E <= serving_E
-AND (E <= prev_E OR attempt == serving.attempt)
-```
-
-Empty serving (nobody has published) ⇒ WRO returns **no pin**, no data
-reads. `prev_E = 0` is not a pin.
-
-- **Steal** (lazy, first write to that group): `prev_E ← serving_E` (or `0`
-  if serving is empty), then `SET owner IF owner = previous`. Do not move
-  `serving_*`. Then set writer `E = max(cp_E, serving_E, prev_E)` (missing
-  terms are 0).
-- **Publish** (timer / OnCommit / checkpoint — **one** function): if
-  `current_wm >= serving_wm`, `SET serving_* IF owner = me`. Do not write
-  `prev_E`.
-- **WRO:** pin the lease **once** (skip if serving empty), then every cell
-  uses the filter above, then **latest per cell**: same `Cursor` /
-  `(granularity, tile_start)` / `key_state` → `max(E)`, then `max(attempt)`.
-  Mixing **different** cells from `A@80` and `B@160` is expected. Two
-  payloads for the **same** cell is not.
-
-Outage: keep last `serving_E` (no dip to checkpoint). Grey window until steal:
-the old owner may still publish — accepted. Each steal **overwrites** `prev_E`
-with the then-current serving cut.
-
-`serving_wm` on the first write after restore is a **v1 limit**, not a hole:
-the gate is event-time only, not per-key catch-up. If `serving_wm` is already
-`<=` restored wm, `publish()` may run immediately. The snapshot is holes
-(`E <= prev_E`) plus whatever `serving.attempt` has written.
-
-Filter is **client-side** (clustering is time-first). CQL slices time;
-`attempt` / `E` is in-process.
-
-**Not doing:** per-key `window_head`, DashMaps / unbounded keyed claim maps,
-ingest CAS, `window_recovery_bases` chain, serve = checkpoint (unless later
-chosen), proving the old worker is dead, per-key catch-up freeze,
-any-attempt WO overlay.
-
-**v1 limits:** idle keys on WO after a second failover (one `StateVersion`).
-Event-time GC vs a long WRO whose window is below `data_floor` (request-budget
-grace, not a pin table). `serving_wm` not delaying first publish when it is
-already caught.
-
-### Versions and checkpoints
+### Cut history
 
 ```rust
-/// Job-level recovery branch. Not a task id.
-/// Example: pipeline incarnation + execution_attempt_id.
-pub struct AttemptToken(Vec<u8>);
+pub type Attempt = u64;
 
-/// Unique WO task execution. Request-lease `owner` only, not part of data PKs.
-/// Example: AttemptToken + vertex/task identity.
-pub struct WriterId(Vec<u8>);
-
-pub struct StateVersion {
-    pub attempt: AttemptToken,
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Version {
+    pub attempt: Attempt,
     pub epoch: u64,
 }
 
-/// Restore/remap only. Not stored in the checkpoint blob.
-/// Planner output; the Scylla client keeps slices in memory for WO overlay.
-/// Not a table.
-pub struct VersionedRange {
-    pub range: KeyGroupRange,
-    pub version: StateVersion,
+/// One per key group. Sorted ascending by attempt, attempts unique.
+#[derive(Clone)]
+pub struct CutHistory {
+    entries: Vec<Version>,
 }
 
-pub enum WindowBackendSnapshot {
-    InMemory { snapshot: Vec<u8> },
-    /// This writer's cutoff. Range is not stored: it is the client's bound
-    /// assignment, and on the master the payload is already keyed by task.
-    Versioned { version: StateVersion },
+impl CutHistory {
+    pub fn allows(&self, v: Version) -> bool {
+        match self.entries.binary_search_by_key(&v.attempt, |e| e.attempt) {
+            Ok(i) => v.epoch <= self.entries[i].epoch,
+            Err(_) => false,
+        }
+    }
+
+    /// Add or raise **only the caller's own** entry. Never touches another
+    /// attempt's entry.
+    pub fn advance(&self, me: Attempt, acked_prefix: Option<u64>) -> CutHistory {
+        let mut next = self.clone();
+        // No acked write for this group in this attempt: contribute nothing.
+        // Never insert `(me, 0)` — `epoch` is 0-based, so a zero entry is
+        // indistinguishable from "epoch 0 is committed".
+        let Some(epoch) = acked_prefix else { return next };
+        match next.entries.binary_search_by_key(&me, |e| e.attempt) {
+            Ok(i) => {
+                assert!(next.entries[i].epoch <= epoch, "own prefix must not go backwards");
+                next.entries[i].epoch = epoch;
+            }
+            Err(i) => {
+                assert!(
+                    next.entries.get(i).map_or(true, |e| e.attempt > me),
+                    "attempt must dominate every inherited entry",
+                );
+                next.entries.insert(i, Version { attempt: me, epoch });
+            }
+        }
+        next
+    }
 }
 ```
 
-`E` is a per-`key_group` (or shared-across-owned-groups) monotonic id. Each
-successful `commit_events` / `store_key_state` does `E += 1` for that group
-and stamps that `E` on the write. **Do not restart at zero** on a new
-attempt: `(attempt, E)` is unique anyway, but WRO and overlay need a single
-never-reset number line so holes are just smaller `E`.
+A row whose attempt has **no** entry is outside the cut. That is the right
+answer for an attempt that wrote but never checkpointed: all of its writes are
+post-checkpoint and will be replayed.
 
-| Place | Role |
-| --- | --- |
-| Writer allocator (local) | produces `E` for the group; no LWT |
-| Data rows | MVCC: this cell belongs to publish `E` |
-| Checkpoint cutoff | WO overlay: `cp.attempt` with `E <= cp_E`, plus `attempt == me` |
-| Lease `serving_*` | WRO/GC pin — request reads only. Not updated on ingest |
-| Lease `prev_E` | steal cut: above it, only `serving.attempt` is visible |
+Because a cut is only ever published after its checkpoint completes, and a
+successor inherits exactly that checkpoint's history, `advance` is the only
+mutation the history ever needs. The published cut is monotonic in both
+coverage and row membership.
 
-Checkpoint `E=7` means “for this writer's owned groups, newest row with
-`epoch <= 7` on **`cp.attempt`**, plus this attempt's own rows.” Numeric epochs
-may match across tasks; they write different key groups. Equal `E` on two
-attempts is **not** the same commit until restore continues the counter.
+Size is `O(attempts)` per group at 16 bytes per entry. v1 does not retire
+entries — see *Accepted divergences*.
 
-`AttemptToken` in table keys and in `StateVersion` is job-level. All WO tasks
-of one execution share it.
+### Acked prefix
 
-`WriterId` is stored only on the request lease (`owner`). Streaming does not
-use it.
+A cut may only name an `epoch` whose writes are all durable:
 
-`VersionedRange` is not a checkpoint record and is **not** written to Scylla.
-Checkpoint persists one `StateVersion` for this writer. After a future
-rescale, `RestorePlanner` intersects old task ranges with the new assignment
-and produces a `Vec<VersionedRange>` as the **in-memory restore instruction**.
-v1 same-assignment is the trivial case: one slice = bound range + the
-checkpoint's `StateVersion`. WO overlay uses those slices; there is no
-`window_recovery_bases` table.
+```text
+cut_top[g] : Option<u64>
+           = max epoch such that EVERY write at (my_attempt, e <= epoch)
+             for group g has been ACKED
+           = None if no write in this attempt has acked yet
+```
 
-Scylla uses `WindowBackendSnapshot::Versioned`. InMem uses `InMemory` with a
-serialized snapshot of the owned range. Namespace and the last fully processed
-watermark remain in the operator's `WindowStateSnapshot` envelope.
+Track it as a **low-water mark** over in-flight epochs per group. This is what
+makes cross-partition commits safe and torn commits invisible.
 
-### Tables
+`epoch` is allocated by an **atomic** per-group counter, because ingest runs
+up to `ingest_key_concurrency` keys concurrently and they can share a group.
+Concurrent in-flight epochs in one group are fine; the prefix is what makes
+them safe.
 
-`attempt` is **not** in any data partition key. It is clustering (or a
-column) so overlay is a visibility filter on one `LOCAL_QUORUM` read, not a
-second partition hop. Restore does not copy rows.
+The prefix is a prefix, **never a skip**. If epoch 5 times out and 6 acks,
+`cut_top` is 4. Key Y's data at 6 is durable and visible to its writer, but no
+cut may name it until 5 resolves. Do not skip the hole; do not allocate around
+it. A write that times out has an unknown outcome, so retry it at the **same**
+`Version` until acked, or fail the task.
 
-**GC default: skinny index + per-key data PK. Do not cluster `business_key`
-under `(namespace, key_group, bucket)` on the data tables.** `load_raw` is
-per-key; a key group is unbounded, so that clustering would make one data
-partition (compaction, repair, hot token) hold every key in the group+bucket.
-Keep `business_key` in the **data** partition key so each key+bucket stays
-small.
+### WO visibility
 
-That data layout cannot list expired buckets, so `commit_events` also writes
-one payload-free index. **`bucket_start` is clustering on the index, not a
-partition-key component** — otherwise `maintain` cannot range-scan buckets
-and would have to probe historical bucket ids (unbounded). Do not add a
-second `live_buckets` table. Bind `floor_bucket` = first bucket that still
-overlaps `data_floor` (`align_down(data_floor, width)`). Only drop buckets
-whose entire range is below the floor: `bucket_start + width <= data_floor`,
-i.e. `bucket_start < floor_bucket`. Do not bind `data_floor` as if it were a
-`bucket_start`.
+```text
+visible(row) ⇔ row.attempt == my_attempt          -- read your own writes
+               OR cp_cut[g].allows(row.version)
+```
 
-After prune, each index partition is one key group and holds only live
-buckets: `keys_in_group × (retention / bucket_width)`, skinny cells. Shard
-with `index_shard` on the PK later if a hot group is too wide — not v1.
-TWCS/TTL on write-time cannot replace this: event-time buckets ≠ write time,
-and replay rewrites old buckets.
+`cp_cut[g]` is the cut history restored for group `g`. Before the first
+restore of a job it is empty, so visibility is `my_attempt` only. The due-work
+read uses the same filter.
+
+Zombie rows sit above their attempt's entry, so they are invisible
+permanently, to every later attempt. That is the v1 **read fence** for
+streaming. No keys and no cells disappear after failover: every attempt that
+ever checkpointed keeps its prefix.
+
+### Commit atomicity
+
+One logical `commit_events` touches several partitions — `window_raw` per
+bucket, `window_tiles` per granularity × bucket, `window_key_states`,
+`window_kg_buckets`, the due index. Cross-partition batches are forbidden, so
+there is no CQL-level atomicity and a crash can tear a commit.
+
+The version restores it:
+
+- All writes of one commit carry the **same** `Version`.
+- A torn commit leaves a partial set at `(attempt, epoch)`. Because the
+  acked-prefix rule never advances a cut past an unacked write, a torn commit
+  always sits **above** every cut, so no cut-filtered reader ever sees it.
+
+WO reads of its own attempt are **not** capped by the prefix, so the writer
+can see its own torn commit. The rule is **per key**:
+
+> While a commit for key `K` is in flight, the writer issues no read of `K`
+> and no second commit for `K`. `commit_events` either returns with every
+> write acked, or the task fails.
+
+Cross-key concurrency inside a group stays legal, which is the point. Do
+**not** instead cap the writer at `epoch <= cut_top[g]`: with key X's epoch 5
+unresolved and key Y's epoch 6 acked, the group prefix is 4, so Y's own
+committed state would become invisible to its writer, which would re-ingest
+and re-apply it. Read-your-writes for the current attempt is uncapped on
+purpose.
+
+Fresh reads (below) can observe a torn commit, and the bound on what that
+means is part of the Fresh contract.
+
+State all of this in the trait docs. "Atomic" without the version qualifier
+will be built on and is wrong.
+
+### Cell collision
+
+Among visible rows for the same cell — same `Cursor`, same
+`(granularity, tile_start)`, or `key_state` — keep the greatest `Version`,
+compared lexicographically: `attempt` first, then `epoch`. The filter is
+client-side for raw and tiles, since clustering is time-first: CQL slices
+time, version comparison happens in process. Deduplication by key must run
+**after** version filtering, or rows from a filtered-out attempt can win.
+
+### Local RAM (bounded)
+
+| State | Scope |
+|---|---|
+| `my_attempt` | task |
+| `cp_cut[g]`, `cp_wm` | restore, once; `O(groups x attempts)` |
+| `next_epoch[g]` (atomic), in-flight epochs, low-water mark | per owned group |
+| last published checkpoint id | task; scalar |
+
+No per-business-key epoch map, no dirty-key set, no claim/lease maps.
+
+---
+
+## Published metadata
+
+`window_kg_meta` is the entire interface between the streaming side and the
+serving side. One row per key group, `max_parallelism` rows in the table.
 
 ```sql
--- Request mode only. Streaming WO does not read or write this table.
-CREATE TABLE window_kg_lease (
-    namespace blob,
-    key_group int,
-    owner_writer blob,
-    serving_attempt blob,
-    serving_epoch bigint,
-    serving_wm bigint,
-    prev_epoch bigint,
+-- Request mode only. Streaming WO neither reads nor writes this table.
+CREATE TABLE window_kg_meta (
+    namespace       blob,
+    key_group       int,
+    cur_attempt     bigint,   -- live execution, for fresh reads
+    cut             blob,     -- encoded CutHistory of the last COMPLETED cp
+    prev_cut        blob,     -- the cut this one replaced; read-cache grace
+    committed_wm    bigint,   -- task watermark_frontier at that checkpoint
+    retention_floor bigint,   -- nothing below this is guaranteed to exist
+    checkpoint_id   bigint,
     PRIMARY KEY ((namespace, key_group))
 );
+```
 
--- Skinny GC index only: no payloads, no attempt/epoch.
--- bucket_start is clustering so maintain can range `< data_floor`.
--- Do not add a second live_buckets table. Shard with index_shard later
--- if a hot group is too wide — not v1.
+Two writers, both cheap:
+
+- **WO open, request mode, per owned group, in parallel.** Set `cur_attempt`
+  under `IF cur_attempt < ?` (or `IF NOT EXISTS`). One LWT per group at open,
+  `O(max_p / p)` total. This is what lets a fresh read fence zombies without
+  WRO knowing anything about the topology.
+- **On checkpoint completion, per owned group.** Write `cut`, `prev_cut`,
+  `committed_wm`, `retention_floor`, `checkpoint_id` under `IF cur_attempt =
+  ?`. One LWT per group per checkpoint — at `max_p = 128` and a 30s interval
+  that is a few per second.
+
+`retention_floor = committed_wm - max_window_length - lateness`, the same
+expression WO uses for retention eligibility, evaluated on the **committed**
+watermark rather than the live one. Publishing it is what turns retention into
+something a decoupled reader can reason about, and it is why **GC deletes only
+below the published floor** (see *Retention and GC*). Both properties come
+from one rule.
+
+Nothing here is on the ingest hot path.
+
+---
+
+## Read contract
+
+A read states what it wants to see. This is the only place freshness is
+configurable, and it is the seam that previously let WO and WRO disagree about
+the same query.
+
+```rust
+pub enum ReadOptions {
+    /// As of the last completed checkpoint. Deterministic, replayable,
+    /// identical to what the WO emit path produced for the same range.
+    Committed,
+    /// As of now, best effort. Head-scoped; see below.
+    Fresh,
+}
+```
+
+`load_window_data` returns the data plus `committed_wm` and the
+`checkpoint_id` it was answered at, so a caller can judge staleness without a
+second call.
+
+### Coverage guard
+
+WRO is not watermark-driven and must not pretend to be, but it does have to
+refuse queries it cannot answer. For a request over `[lo, hi]`:
+
+```text
+if lo < retention_floor: refuse (range no longer retained)
+```
+
+No upper guard: `hi` above the data is not an error, it just means the tail is
+empty. Note that a normal "as of now" query always passes, because
+`lo = hi - window_length` with `hi ≈ committed_wm` and `window_length ≤
+max_window_length`. Only genuinely historical queries are refused. This
+replaces the `// No lateness filter. Answer from whatever state the backend
+still retains.` comment in `request.rs`, and removes the `lateness: 300_000`
+workaround in `tests/matrix.rs`.
+
+### Committed
+
+```text
+visible(row) ⇔ cut.allows(row.version)
+```
+
+Read `window_kg_meta` once per request and use that cut for every page. Absent
+row or empty cut ⇒ empty result, no data reads. If WO is down, WRO keeps
+serving the last completed checkpoint.
+
+This is the mode that makes the split-path abstraction hold: a WO emitting a
+window over `[lo, hi]` and a WRO asked for `[lo, hi]` in `Committed` mode
+return the same rows, so the two surfaces cannot disagree by accident.
+
+### Fresh
+
+Fresh adds the current attempt's uncommitted tail, scoped to the head so it
+stays cheap:
+
+```text
+H = committed_wm
+
+[lo, H]   read Committed: tiles + raw at the cut
+(H, hi]   read raw only, visible ⇔ cut.allows(v) OR v.attempt == cur_attempt
+```
+
+Interior tiles are always read at the cut; only the head raw slice is read
+above it, and the existing incremental merge combines them. `(H, hi]` is
+roughly one checkpoint interval of raw data, so the extra cost is one bounded
+raw slice per request and no additional tile reads.
+
+Two bounded consequences, both stated to callers rather than engineered away:
+
+- **A torn commit can be partially visible.** Because Fresh only widens
+  *raw* above the cut — never tiles or key state — a torn commit appears as a
+  subset of one batch's events, which is indistinguishable from those events
+  not having arrived yet. It cannot produce a corrupt aggregate.
+- **Late arrivals below `H` are not visible until their checkpoint
+  completes.** A late event accepted after the last checkpoint lands below the
+  head scope, so Fresh misses it for at most one checkpoint interval, after
+  which the normal `Committed` path picks it up. Making that window zero
+  requires scanning for post-cut writes across the whole window on every
+  request, which is the cost this scoping exists to avoid.
+
+Zombie fencing on the read path is `v.attempt == cur_attempt`, read from
+`window_kg_meta`.
+
+### Metadata caching
+
+v1 may cache the `window_kg_meta` row per WRO task to keep the read at one hop
+instead of two. Bound: **TTL ≤ one checkpoint interval**, and GC retains the
+version named by `prev_cut` (see *Retention and GC*), so a reader on a
+one-generation-stale cut cannot point at collected rows. A stale `cur_attempt`
+only affects Fresh, which is best effort by definition.
+
+---
+
+## Request-mode ingest
+
+Ingest is the same write path in both modes. Two behaviors differ, and both
+follow from the floor rather than from a mode flag:
+
+- **Admission.** Streaming drops rows at or behind the task watermark, because
+  the emit path has already fired for that time. A `StateOnly` operator has no
+  emit path, so the only reason to drop a row is that its bucket may already
+  be gone. Admit on `ts > retention_floor` instead of `ts > watermark`. Late
+  events therefore update state and become visible at the next checkpoint.
+- **Retention.** Unchanged in shape, but derived from the committed watermark
+  (above). Watermarks are still required in request mode for exactly this
+  reason: without them the window never moves and nothing can be reclaimed.
+  They are no longer required to decide *answers*.
+
+---
+
+## Checkpoint
+
+At an aligned barrier:
+
+1. Complete pending writes; resolve or fail any timed-out write.
+2. Capture `attempt` plus `cuts[g].advance(attempt, cut_top[g])` for every
+   owned group. `cut_top[g] == None` leaves inherited entries untouched and
+   adds nothing.
+3. Return `WindowBackendSnapshot::Versioned`; the operator wraps it with
+   namespace and `watermark_frontier`.
+4. Continue processing at later epochs.
+
+On the **completion** notification for that checkpoint id, request mode writes
+the captured cut, `committed_wm` and `retention_floor` to `window_kg_meta`
+(see *Published metadata*). The barrier itself costs **zero** Scylla round
+trips beyond draining in-flight writes.
+
+```text
+WindowStateSnapshot
+  watermark_frontier     // cp_wm
+  backend:
+    attempt              // this writer
+    cuts[g] for g in the client's bound range
+```
+
+```rust
+pub enum WindowBackendSnapshot {
+    InMemory { snapshot: Vec<u8> },
+    Versioned {
+        attempt: Attempt,
+        /// Parallel to the client's bound `KeyGroupRange`.
+        cuts: Vec<CutHistory>,
+    },
+}
+
+/// Restore/remap instruction. Not a Scylla table.
+pub struct VersionedSlice {
+    pub range: KeyGroupRange,
+    pub attempt: Attempt,
+    pub cuts: Vec<CutHistory>,
+    pub cp_wm: i64,
+}
+```
+
+Because `epoch` is per group, the cut cannot be one task-wide value: a slow
+group's post-checkpoint writes would fall under a task-wide `epoch <= max`.
+
+Groups this writer never touched need no special case: the history simply has
+no entry for this attempt, and inherited entries are still there.
+
+---
+
+## Restore and rescale
+
+`key_group` does not move; parallelism only changes the owner.
+
+```text
+max_p = 8
+p=2:  task0 [0,4)   task1 [4,8)
+p=4:  task0 [0,2)   task1 [2,4)  task2 [4,6)  task3 [6,8)
+```
+
+**Do not recompute watermarks from data.** Three clocks, three sources:
+
+| Clock | Source |
+|---|---|
+| Slice `cp_wm` / `cuts[]` | Source task blob |
+| Task `watermark_frontier` | `min(slice cp_wm)` |
+| Published cut / floor | Unchanged on `window_kg_meta` until the next completion |
+
+**Why min:** advancing to `max` would skip fires for keys from a slower
+parent. Min can accept a little late data on keys from the faster parent;
+per-key last-fired in `KeyState` still blocks duplicate emits.
+
+**Planner:** decode each source blob, intersect ranges with each target task's
+owned groups → slices. Same assignment = one slice = the old blob.
+
+```text
+max_p = 128, rescale p=3 -> p=2:
+old:  task0 [0,43)   task1 [43,86)   task2 [86,128)
+new:  task0 [0,64) <- [0,43)@old0 + [43,64)@old1
+      task1 [64,128) <- [64,86)@old1 + [86,128)@old2
+```
+
+Histories are **per group**, so slices never need merging: a group appears in
+exactly one source blob. Because attempts are globally ordered, histories from
+different source tasks are directly comparable and one new attempt dominates
+all of them.
+
+**Target `restore`:**
+
+1. Take the master-allocated `attempt`; assert it exceeds every inherited
+   attempt.
+2. `cp_cut[g]` and slice `cp_wm` from the slice containing `g`.
+3. Task frontier = `min(slice cp_wm)`.
+4. `next_epoch[g] = 0`.
+5. Request: set `cur_attempt` per owned group, in parallel. Leave the
+   published cut and floor alone.
+6. Replay sources from this barrier. **Do not copy** cells.
+
+**Bootstrap (first start):** `cp_cut[g]` empty so WO visibility is
+`my_attempt` only; `cp_wm` unset; `next_epoch[g] = 0`; `window_kg_meta` row
+absent, so WRO returns empty until the first checkpoint completes.
+
+**What WRO sees across a failover.** It serves the last completed checkpoint's
+cut throughout — the same state the new attempt restored from — and switches
+to the new attempt's cut when that attempt's first checkpoint completes. There
+is no window in which the published cut names rows that get replayed, so no
+clamp. Freshness cost of a failover is recovery time plus one checkpoint
+interval, or, in Fresh mode, recovery time (with replay possibly partially
+applied — accepted).
+
+---
+
+## Tables
+
+`attempt` is **not** in any data partition key. It is clustering, so the
+filter is a visibility test on one `LOCAL_QUORUM` read, and restore copies
+nothing. Version clustering is **descending** (`attempt DESC, epoch DESC`) so
+the newest version of a cell sorts first and readers stop early.
+
+**GC default: skinny index plus per-key data PK. Do not cluster
+`business_key` under `(namespace, key_group, bucket)` on the data tables** —
+`load_raw` is per key and a key group is unbounded, so that clustering would
+put every key in the group+bucket into one partition. That layout cannot list
+expired buckets, so `commit_events` also writes one payload-free index.
+
+```sql
+-- Skinny GC index: no payloads, no versions.
 CREATE TABLE window_kg_buckets (
-    namespace blob,
-    key_group int,
+    namespace    blob,
+    key_group    int,
     bucket_start bigint,
     business_key blob,
     PRIMARY KEY ((namespace, key_group), bucket_start, business_key)
 ) WITH CLUSTERING ORDER BY (bucket_start ASC, business_key ASC);
 
 CREATE TABLE window_raw (
-    namespace blob,
-    key_group int,
+    namespace    blob,
+    key_group    int,
     business_key blob,
     bucket_start bigint,
-    event_ts bigint,
-    seq_no bigint,
-    attempt blob,
-    epoch bigint,
-    payload blob,
+    event_ts     bigint,
+    seq_no       bigint,
+    attempt      bigint,
+    epoch        bigint,
+    payload      blob,
     PRIMARY KEY (
         (namespace, key_group, business_key, bucket_start),
         event_ts, seq_no, attempt, epoch
     )
 ) WITH CLUSTERING ORDER BY (
-    event_ts ASC, seq_no ASC, attempt ASC, epoch DESC
+    event_ts ASC, seq_no ASC, attempt DESC, epoch DESC
 );
 
 CREATE TABLE window_tiles (
-    namespace blob,
-    key_group int,
-    business_key blob,
+    namespace      blob,
+    key_group      int,
+    business_key   blob,
     granularity_ms bigint,
-    bucket_start bigint,
-    tile_start bigint,
-    attempt blob,
-    epoch bigint,
-    payload blob,
+    bucket_start   bigint,
+    tile_start     bigint,
+    attempt        bigint,
+    epoch          bigint,
+    payload        blob,
     PRIMARY KEY (
-        (
-            namespace,
-            key_group,
-            business_key,
-            granularity_ms,
-            bucket_start
-        ),
+        (namespace, key_group, business_key, granularity_ms, bucket_start),
         tile_start, attempt, epoch
     )
-) WITH CLUSTERING ORDER BY (tile_start ASC, attempt ASC, epoch DESC);
+) WITH CLUSTERING ORDER BY (tile_start ASC, attempt DESC, epoch DESC);
 
 CREATE TABLE window_key_states (
-    namespace blob,
-    key_group int,
+    namespace    blob,
+    key_group    int,
     business_key blob,
-    attempt blob,
-    epoch bigint,
-    key_state blob,
-    PRIMARY KEY (
-        (namespace, key_group, business_key),
-        attempt, epoch
-    )
-) WITH CLUSTERING ORDER BY (attempt ASC, epoch DESC);
+    attempt      bigint,
+    epoch        bigint,
+    key_state    blob,
+    PRIMARY KEY ((namespace, key_group, business_key), attempt, epoch)
+) WITH CLUSTERING ORDER BY (attempt DESC, epoch DESC);
 
-CREATE TABLE window_triggers (
-    namespace blob,
+CREATE TABLE window_due (
+    namespace    blob,
     bucket_start bigint,
-    kg_shard int,
-    fire_ts bigint,
-    fire_seq bigint,
+    kg_shard     int,
+    fire_ts      bigint,
+    fire_seq     bigint,
     business_key blob,
     trigger_kind tinyint,
-    window_id bigint,
-    key_group int,
-    attempt blob,
-    epoch bigint,
+    window_id    bigint,
+    key_group    int,
+    attempt      bigint,
+    epoch        bigint,
     PRIMARY KEY (
         (namespace, bucket_start, kg_shard),
-        fire_ts,
-        fire_seq,
-        business_key,
-        trigger_kind,
-        window_id,
-        attempt,
-        epoch
+        fire_ts, fire_seq, business_key, trigger_kind, window_id,
+        attempt, epoch
     )
 ) WITH CLUSTERING ORDER BY (
-    fire_ts ASC,
-    fire_seq ASC,
-    business_key ASC,
-    trigger_kind ASC,
-    window_id ASC,
-    attempt ASC,
-    epoch DESC
+    fire_ts ASC, fire_seq ASC, business_key ASC, trigger_kind ASC,
+    window_id ASC, attempt DESC, epoch DESC
 );
 ```
 
-- `window_kg_lease`: one row per **key_group**, not per business key, not
-  versioned. Request-mode only. `owner_writer` is the publish fence.
-  `serving_*` is the published snapshot WRO always pins. `prev_E` is the
-  serving cut at last steal (`0` if serving was empty). Point get by
-  `(namespace, key_group)`. Do not put `attempt` in this PK. Do **not**
-  restore a per-key `window_head`.
-- **There is no `window_recovery_bases` table.** WO overlay uses the
-  in-memory checkpoint / `VersionedRange` slices. WRO does not read
-  checkpoints.
-- `window_kg_buckets`: skinny GC index, not a source of truth for reads.
-  One table. `commit_events` does an unversioned upsert of `business_key`
-  (no `attempt`/`epoch`, no payload). `maintain` per owned `key_group`:
+- There is no `window_recovery_bases`, no `window_kg_lease`, and no per-key
+  pin table. The WO cut lives in memory, restored from the blob; the reader's
+  cut lives in `window_kg_meta`.
+- `window_kg_buckets`: `commit_events` upserts `business_key` unversioned.
+  `maintain` scans `bucket_start < floor_bucket` per owned group, then deletes
+  that key's raw partition for the bucket, every tile partition for the same
+  key+bucket, and the index row. `floor_bucket` is the first bucket still
+  overlapping the floor; only whole buckets below it are dropped.
+- `window_raw`: **one CQL row per event**, clustered by event time. Do not
+  pack a batch into one blob.
+- `window_tiles` / `window_key_states`: versioned, and they accumulate one row
+  per write until GC collapses them — see *Per-cell version retention*, which
+  is not optional.
+- `window_due`: immutable due work, versioned like raw, locality
+  `(namespace, bucket_start, kg_shard)` where
+  `kg_shard = key_group * SHARD_COUNT / max_parallelism` and `SHARD_COUNT` is
+  a store constant (e.g. 32 or 64), not `p`. WRO does not read it.
 
-  ```cql
-  SELECT * FROM window_kg_buckets
-   WHERE namespace = ? AND key_group = ?
-     AND bucket_start < ?   -- floor_bucket, not data_floor
-  ```
+---
 
-  For each hit, delete that key's `window_raw` partition for the bucket
-  **and** every `window_tiles` partition for the same key+bucket (all
-  `granularity_ms` from task state). Then delete the index row. After prune,
-  the partition holds only live buckets. `index_shard` on the PK is later,
-  not v1.
-- `window_raw`: **one CQL row per event**, clustered by event time. `payload`
-  is that event only (Arrow-IPC including `__seq_no`). Do not pack a batch
-  into one blob — that breaks time clustering, overlay, and per-event GC.
-- `window_tiles`: versioned aggregate tiles, partitioned by key, granularity,
-  and time bucket. Overlay / WRO filters `attempt` / `epoch` **in the client**.
-- `window_key_states`: versioned `KeyState` in one partition per key.
-- `window_triggers`: immutable due work, **versioned like raw**. Locality is
-  `(namespace, bucket_start, kg_shard)`. Cluster by `fire_ts` first so
-  `load_triggers` can slice `(after, through]` without `ALLOW FILTERING`.
-  `key_group` is a regular column; the client drops rows outside the bound
-  range (`kg_shard` already limits how many groups share a partition).
-  Shard with the **same range formula as routing**, not
-  `hash(business_key) % N`:
+## WO write
 
-  ```text
-  kg_shard = key_group * SHARD_COUNT / max_parallelism
-  ```
-
-  `SHARD_COUNT` is a store constant (e.g. 32 or 64), not `p` (changes on
-  rescale) and not `max_parallelism` (too fine: `p=4`, `max_p=32768` would
-  otherwise mean 8192 queries per time bucket). `SHARD_COUNT` and
-  `max_parallelism` are immutable for the namespace. Row triggers use a
-  sentinel `window_id`; scheduled windows retain their actual `WindowId`.
-  WRO does not read triggers.
-
-### Lease semantics (request only)
-
-`window_kg_lease` is a singleton per `key_group`, not an MVCC table. Data rows
-are versioned by `(attempt, epoch)` in their primary keys. Overlay fences
-zombie **data** for WO. The lease is the **serving name** for WRO.
-
-A last-write-wins upsert of `serving_*` would let dying attempt N overwrite
-the pin after N+1 is live. Owner LWT is the fence for **publish**, not for
-ingest.
-
-| Column | Role |
-| --- | --- |
-| `owner_writer` | Who may change serving. Fence. |
-| `serving_(attempt, epoch, wm)` | Snapshot WRO always pins. |
-| `prev_E` | Serving `E` at last steal (`0` if serving empty). Publish does not touch it. |
-
-`owner_writer` is length-prefixed `attempt || vertex` (`WriterId`). Claiming
-is **only** `SET owner` plus `prev_E ← serving_E` (or `0`):
-
-- empty group / never published: `INSERT … IF NOT EXISTS`; steal sets
-  `prev_E = 0` so a predecessor's unpublished rows are not treated as holes.
-- restore / failover: `UPDATE … SET owner = me, prev_E = serving_E IF owner =
-  previous` (`prev_E = 0` if serving is unset). **Do not** change `serving_*`.
-  **Do not** copy `serving.attempt` into a “previous owner” slot — `prev_E`
-  is the published cut, not the displaced writer.
-
-CAS not applied fences; do not fall through to a second LWT. Restore is a
-key-group range and the lease is already per group, so steal is **lazy on
-first write to that group**, not a scan of all owned groups at restore.
-WRO does not need steal: it pins current `serving_*` even while `owner` is
-still the previous writer (grey window).
-
-WRO always pins the lease (one hop + payload). It does not discover epoch
-from `key_state` and does not read writer overlay or checkpoint metadata.
-
-**Publish** is one function (`promote_serving` LWT: `SET serving_* IF owner =
-me`). Cadence is who **calls** it (`on_commit` / `interval` / `checkpoint`)
-— freshness vs ingest-p99 — not a second protocol. Gate:
-
-```text
-if current_wm < serving_wm: return
-SET serving_attempt, serving_epoch, serving_wm IF owner = me
-```
-
-`serving_wm` is the task `watermark_frontier` at that promote. The gate
-delays publish only when serving is **ahead of** the restored watermark
-(last publish after the last checkpoint). If `serving_wm <= restored wm`,
-it can open on the first write — that is not a bug. `serving_E` prevents
-an epoch dip; it does **not** wait for the new writer to finish replay.
-v1 then serves holes (`E <= prev_E`) plus whatever `serving.attempt` has
-written. Do **not** compare per-key `next_seq` / `evaluation.through` on
-the ingest path. Do **not** freeze ingest.
-
-A background timer is not required: interval can be checked on the next
-ingest of that group, and checkpoint can flush owned groups.
-
-Grey window until steal is **accepted** (CAP): the previous owner may still
-publish. After steal, CAS blocks publish. Rows with `E > prev_E` are visible
-only for `serving.attempt`, so a displaced writer's unpublished rows do not
-leak when a later owner publishes — even if that displaced writer never
-became `serving.attempt`. Do not try to prove the old process is dead.
-
-### WO write
-
-For one key (streaming and request ingest are the same data path):
+For one key (streaming and request ingest are the same path):
 
 1. Derive `key_group` from the key hash and the client's `max_p`.
-2. Request-mode only, if this is the first write to the group after restore:
-   steal owner (`prev_E ← serving_E`, or `0`). Set writer
-   `E = max(E, cp_E, serving_E, prev_E)`. Do not move serving. Do not LWT
-   ingest.
-3. Load writer `KeyState` (WO overlay). No lease read on streaming.
-4. Allocate group epoch `E` locally (`E += 1`, never reset).
-5. Write changed raw rows, tiles, `KeyState`, and triggers under
-   `(job attempt, E)`. Upsert `window_kg_buckets` unversioned (not under
-   `E`).
-6. Request-mode only: maybe `publish()` according to cadence and the
-   `serving_wm` gate. Not on the data batch. Not during watermark catch-up.
+2. Load writer `KeyState` (WO filter).
+3. Allocate `epoch = next_epoch[g]++`.
+4. UNLOGGED BATCH per touched partition — changed raw, tiles, `KeyState`, due
+   rows, all at `(my_attempt, epoch)`; upsert `window_kg_buckets`
+   unversioned. Issue the per-partition batches concurrently. Never a logged
+   batch, never across partitions.
+5. Register `epoch` as in flight; retire on ack. A timeout keeps it in flight
+   and blocks the cut.
 
-Each `(key, bucket)` (and each tile partition) is one Scylla partition.
-`commit_events` issues one **UNLOGGED BATCH** per such partition — one
-mutation per event/tile row, one RTT per partition, not one RTT per event.
-Do not use logged BATCH. Do not batch across partitions (no cross-partition
-atomicity, coordinator penalty). Tiles, triggers, and other buckets are
-separate requests.
+`store_key_state` follows the same protocol but writes no raw, tile, due or
+index rows.
 
-A new epoch starts only after the previous write outcome is known. Request
-ownership CAS failure (steal or publish) stops the WO as fenced. Trigger
-rows from an unpublished overlay-hidden attempt/epoch are not returned by
-`load_triggers`.
+---
 
-`store_key_state` follows the same protocol but writes no raw, tile, trigger,
-or bucket-index rows.
-
-### WO reads
-
-WO reads the writer snapshot, not the lease.
+## WO reads
 
 ```text
-visible if
-  attempt == me
-  OR (attempt == cp.attempt AND E <= cp_E)
+visible(row) ⇔ row.attempt == my_attempt OR cp_cut[g].allows(row.version)
 ```
 
-Until restore there is no `cp` — overlay is `me` only. After rescale, `cp`
-is the `VersionedRange` slice that covers this `key_group` (in memory).
+**`key_state`** is the hot path, once per key per batch. Clustering is
+`(attempt DESC, epoch DESC)` and per-cell retention bounds the partition, so
+**one** bounded read resolves it:
 
-A single `StateVersion` is one generation, not a chain. Idle keys last
-written on an attempt older than `cp.attempt` are **not** visible to WO.
-That is v1. Do not widen to `E <= cp_E` for any attempt: uncheckpointed
-rows from a dead attempt can share `E` values with the successor's replay,
-and `max(E)` then prefers the dead tail.
+```cql
+SELECT attempt, epoch, key_state FROM window_key_states
+ WHERE namespace = ? AND key_group = ? AND business_key = ?
+ LIMIT 8
+```
 
-Because `attempt` is clustering, overlay is one `LOCAL_QUORUM` read per data
-partition: keep the newest row that matches, client-side. Restore does not
-copy rows.
+Keep the first row that passes the filter. Do **not** walk one query per
+candidate attempt: that is `1 + |history|` round trips on an idle key whose
+last writer sits at the bottom of a long history. Only if every returned row
+is filtered out (a zombie rewrote the key many times and GC has not swept yet)
+double the `LIMIT` to a cap, then fall back to one restricted query per
+history entry, newest attempt first. Never `SELECT *` unbounded.
 
-Logical runs are mapped to time buckets, loaded, merged, and filtered back to
-the exact requested ranges. Raw rows are deduplicated by `Cursor`; current
-tiles replace matching base tiles. Same-cell collisions among visible rows:
-`max(E)`, then `max(attempt)`.
+**Raw and tiles.** Slice time in CQL, filter versions client-side, keep the
+first (newest) visible row per cell, then deduplicate raw by `Cursor`. Read
+amplification is proportional to retained versions per cell, which is why
+per-cell retention is correctness-adjacent rather than a background nicety.
 
-`load_triggers` is one CQL hop and the **same overlay**. Mid-shard seek is
-the last **raw** clustering row (full tuple, not `fire_at` alone), even if
-overlay-hidden. First hop and a new `(bucket, shard)` seek from `after`
-(watermark cursor). `next_partition` walks shards then time buckets; do not
-rebuild a `(after, through]` grid or store `part_idx`.
+**Due work** is one CQL hop with the same filter. Mid-shard seek uses the last
+**raw** clustering tuple, even if filtered out:
 
 ```text
 WHERE namespace = ? AND bucket_start = ? AND kg_shard = ?
@@ -851,273 +854,221 @@ WHERE namespace = ? AND bucket_start = ? AND kg_shard = ?
 LIMIT ?
 ```
 
-The client drops `key_group` outside the bound range and applies the WO
-overlay. Resume is a private `Seek`; the helper does not read it.
+The client drops key groups outside the bound range. Do not use `OFFSET`,
+native paging state, a second `fire_ts >=` query, a seek on `fire_ts` alone,
+or an unpaged read of the whole range.
 
-Do not use `OFFSET`, native `PagingState`, a second `fire_ts >=` query,
-seek on `fire_ts` alone, or `execute_unpaged` of the whole range.
+---
 
-`emit_due_pages` loops `load_triggers` until `next is None`. Watermark
-still advances only after the full `(after, through]`. Prefetch is later
-([#297](https://github.com/volga-project/volga/issues/297)).
+## WRO reads
 
-### WRO reads
+1. Hash the key → `key_group`. Read (or use the cached) `window_kg_meta` row.
+   Absent or empty cut ⇒ empty.
+2. Apply the coverage guard against `retention_floor`; refuse if uncovered.
+3. Build exact raw/tile plans, load from the same data partitions (time slice
+   in CQL), filter client-side per `ReadOptions`.
+4. Collapse per cell by greatest `Version`; merge, order, deduplicate,
+   rebuild.
+5. Return the data with `committed_wm` and `checkpoint_id`.
 
-WRO (request store only):
+Two hops uncached, one when the metadata row is cached. WRO reads no due work,
+no WO cache, no master, no checkpoint metadata.
 
-1. Point-get `window_kg_lease` for the key's `key_group`. If serving is
-   empty, return empty (**no pin**). Otherwise **pin once**:
-   `(serving_*, prev_E)`. Do not reread mid-request.
-2. Build exact raw/tile plans.
-3. Load from the same data partitions (time slice in CQL). Filter
-   **client-side**:
+---
 
-   ```text
-   E <= serving_E
-   AND (E <= prev_E OR attempt == serving.attempt)
-   ```
+## Due-work index (decision)
 
-   `prev_E` is 0 in CQL when never stolen or when serving was empty at steal
-   (the empty-serving case never reaches this step).
-4. Collapse **per cell**, not per business key: same `Cursor` /
-   `(granularity, tile_start)` / `key_state` → `max(E)`, then `max(attempt)`.
-   Different cells may come from different `(attempt, E)` under the same pin.
-5. Merge, order, deduplicate, rebuild.
+Today only `WindowTriggerKind::RowEmit` exists (`WindowEnd` bails in
+`eval/advance.rs`) and WO records one due row per accepted raw row, so
+`window_due` is a versioned 1:1 shadow of `window_raw`. The costs are real:
+double write volume, an extra round trip per key per batch, a write hotspot on
+a few dozen partitions per bucket, tombstone-heavy paging scans.
 
-WRO does not read writer overlay, triggers, Foyer, the master, or checkpoint
-metadata. If WO is unavailable, WRO continues serving the unchanged pin.
-Any WRO task can read any key in the operator namespace; keyed routing is
-locality, not identity.
+**v1 keeps it as specified.** It is correct under the version filter, has no
+superseded versions to collapse, and is the contract
+[#296](https://github.com/volga-project/volga/pull/296) already builds on.
 
-Do not implement WRO as `attempt == serving.attempt && E <= serving_E` only
-(holes on older attempts disappear). Do not implement epoch-only
-`E <= serving_E` (unpublished rows from a writer who stole but never
-published leak once a later owner publishes). Do not implement
-`NOT (attempt == prev.attempt AND E > prev.E)` — `prev_E` is the last
-**published** cut, not the last writer; a B-then-C steal before B
-publishes would leave `prev` as A and leak B.
+**Follow-up, tracked separately:** replace it with a skinny unversioned "this
+key has due work in this bucket" index — the same shape as
+`window_kg_buckets`, `O(keys x buckets)` instead of `O(events)`. Due cursors
+are recoverable from the key's raw rows and `evaluation.through`, which
+advance already loads. This changes the `load_triggers` contract and the
+operator's paging, so it is not folded into the protocol change.
 
-### Checkpoint
+---
 
-At an aligned barrier:
+## WO cache
 
-1. Complete pending writes. Request-mode may also `publish()` owned groups
-   (cadence `checkpoint`, and to make a barrier WRO-visible under `interval`).
-2. Capture `(current job attempt, current writer epoch)`.
-3. Return `WindowBackendSnapshot::Versioned { version }`. The operator
-   persists it in its checkpoint envelope. The range is the client's bound
-   assignment and is not copied into the blob.
-4. Continue processing at later epochs.
-
-The checkpoint contains no keys, no key-group list, no lease rows, and no
-state payloads. Creating a checkpoint does not insert recovery-base rows.
-For unchanged task assignment, restore passes the same `StateVersion` back
-into the client. `RestorePlanner` remapping (producing `Vec<VersionedRange>`
-in memory) is future work.
-
-The operator stores namespace, its last fully processed watermark, and
-`WindowBackendSnapshot` in `WindowStateSnapshot`. Durable triggers already
-represent work above that watermark, so checkpointing neither drains nor
-serializes an operator-local pending-key set.
-
-### Recovery
-
-1. v1: the replacement worker has `WindowBackendSnapshot::Versioned { version }`
-   and the same assignment, so one in-memory `VersionedRange` = bound range +
-   that version. After rescale: `RestorePlanner` sends the intersected
-   `Vec<VersionedRange>` (still not a checkpoint format; it is restore input).
-2. During operator restore, the Scylla client uses the new **job** attempt.
-   Overlay uses the restore slices (`me | cp.attempt`). Do not write a bases
-   table. The master only plans and sends the restore payload. Writer
-   `E = max(cp_E, serving_E, prev_E)` (request-mode reads the lease; missing
-   terms are 0). Never restart at 0 from the checkpoint cutoff alone — that
-   can dip below `serving_E`.
-3. Source restores its checkpoint offset and replays post-checkpoint input.
-4. Resume watermark work by streaming checkpoint-visible triggers above the
-   restored watermark. Replay advances only writer state.
-5. Request-mode: on first write to a group, steal owner (`prev_E ← serving_E`,
-   or `0` if serving empty). Leave `serving_*` at the previous cut.
-   Recompute writer `E = max(current E, serving_E, prev_E)`.
-   `publish()` stays gated on `serving_wm` (event-time only; v1 may publish
-   on the first write if the gate is already open).
-6. Streaming: no steal, no publish. Writer `E` continues from `cp_E`.
-
-During recovery, writer data and (if request) serving pins differ. Replay
-advances MVCC rows; WRO keeps using `serving_*` (epoch line, including idle
-keys on older attempts). WO does **not** see those idle keys unless they are
-`cp.attempt`. A zombie publish after steal does not apply. Unpublished rows
-from a displaced owner (`E > prev_E` and not `serving.attempt`) stay hidden
-after a later publish. Until steal, grey window may include a last old-owner
-publish.
-
-### WO cache
-
-Foyer is optional and WO-only. It is **not** a HeadClaim / per-key lease
-cache. Do not keep unbounded DashMaps of claim state.
+Foyer is optional and WO-only, keyed:
 
 ```text
-meta:
-    PartitionKey -> KeyState
-data:
-    (PartitionKey, family, bucket) -> materialized writer-view data
-triggers:
-    (namespace, bucket, kg_shard) -> immutable due entries
+meta: PartitionKey -> KeyState
+data: (PartitionKey, family, bucket) -> materialized writer-view data
+due:  (namespace, bucket, kg_shard) -> immutable due entries
 ```
 
-`family` is raw data or tiles at a specific granularity.
+Cleared before each execution attempt. WRO bypasses it and uses the metadata
+cache described above instead.
 
-The cache is cleared before each execution attempt. On a miss, run the normal
-WO bucket read and cache its materialized result. Successful writes replace or
-invalidate affected data buckets. Immutable trigger buckets may be cached and
-paged without becoming a separate source of truth.
+---
 
-Logical scans are assembled from bucket point reads. WRO bypasses cache.
+## Scylla consistency
 
-### Scylla consistency
+Single DC, RF=3 minimum. `LOCAL_QUORUM` for data reads and writes
+(`W+R > RF`). `window_kg_meta` writes are LWT with `LOCAL_SERIAL` + learn
+`LOCAL_QUORUM`; its reads are `LOCAL_QUORUM`.
 
-Minimal setup is single DC, RF=3. Because we need read-your-write after
-publish, use `LOCAL_QUORUM` for both data reads and writes (`W+R > RF`).
-Request lease steal/publish is LWT with `LOCAL_SERIAL` + learn `LOCAL_QUORUM`:
+- **WO write:** non-LWT data at `LOCAL_QUORUM`. Streaming never uses LWT.
+  Request uses one LWT per group at open and one per group per completed
+  checkpoint.
+- **WO read (cache miss):** version filter on versioned tables at
+  `LOCAL_QUORUM`.
+- **WRO read:** metadata + data at `LOCAL_QUORUM`.
 
-- **WO write:** non-LWT data @ `LOCAL_QUORUM`. Streaming: never LWT.
-  Request: steal is one LWT on first write to the group (fence, no serving
-  change). Publish is a separate LWT on the configured cadence, gated by
-  `serving_wm`.
-- **WO read (cache miss):** overlay on versioned tables @ `LOCAL_QUORUM`
-  (not the serving pin).
-- **WRO read:** lease pin + data @ `LOCAL_QUORUM` for one coherent snapshot.
-  Always this path; do not derive the pin from `max(epoch)`.
+Not v1: `USING TIMESTAMP` instead of the metadata CAS; ingest CAS
+(SlateDB-style write fence).
 
-**Not v1:** `USING TIMESTAMP` instead of owner CAS; ingest CAS (SlateDB-style
-write fence); derived-from-`key_state` WRO pins.
+---
 
-### State prune / cleanup
+## Retention and GC
 
-**Eligibility (per task):** after watermark advance to `W`,
-`data_floor = W − max_window_length − lateness` (lateness default `0`).
-`max_window_length` is required because raw/tiles are shared across all window
-expressions on the op — shorter windows over-retain; longer ones must not
-under-retain. Prune is limited to the task's owned key-group range.
+**Eligibility.** `retention_floor = committed_wm - max_window_length -
+lateness`, computed at checkpoint completion and published. **Physical
+deletion is gated on the published floor, never on the live watermark.** That
+single rule gives both the reader's coverage guarantee (anything above the
+published floor is present) and restart safety (the floor is derived from
+durable state, so it never moves backwards across a failover).
 
-**Executor (per worker):** `StateRegistry::run_maintenance_once` — parallel
-loop per `OperatorKind`, then per-task `OperatorStore::maintain(ns, state)`.
-Not on the master; not inside WO `poll_next`. The window impl reads cutoff and
-owned range from `OperatorTaskState`.
+Retention is asynchronous and lags the floor; that is fine in both directions
+— the floor is what readers are promised, and GC only ever has less deleted
+than the floor allows.
 
-**Window `maintain` body:**
-- drop consumed triggers (`fire_at.ts ≤ W`) with a `fire_ts` clustering
-  range delete on shards overlapping the task's key-group range;
-- from `window_kg_buckets`, per owned `key_group`,
-  `SELECT … AND bucket_start < floor_bucket` (`floor_bucket =
-  align_down(data_floor, width)`; do not bind `data_floor` — a bucket with
-  `bucket_start < data_floor` can still cover `[data_floor, data_floor +
-  width)`). Page the result. For each `(business_key, bucket_start)`, delete
-  the per-key `window_raw` partition and every `window_tiles` partition for
-  that key+bucket (each `granularity_ms` from task state), then the index
-  row. Do not probe historical bucket ids. Do not rely on TWCS/TTL
-  (write-time ≠ event-time; replay rewrites old buckets);
-- drop extras above the steal cut that are not the current owner:
-  `E > prev_E AND attempt != owner` (request lease; `prev_E = 0` if never
-  published). In-flight WRO already filters those rows, so this is not a
-  pin-refcount. Do **not** drop unpublished current-writer rows
-  (`attempt == owner`, including `E > serving_E`) or `E <= prev_E` holes
-  until event-time GC / compact;
-- no `window_recovery_bases` walk.
+**Executor:** `StateRegistry::run_maintenance_once` — parallel loop per
+`OperatorKind`, then per-task `OperatorStore::maintain(ns, state)`, limited to
+the task's owned key-group range.
 
-**In-flight WRO:** `load_window_data` pins the lease at start. Dropping
-`E > prev_E` extras is safe for that pin (the filter excludes them). The
-remaining race is **event-time** GC vs a request whose window still sits
-below `data_floor`. v1: never delete the current serving pointer; delay
-dropping buckets below `floor_bucket` by at least the maximum WRO request
-budget (grace). No pin table.
+### Per-cell version retention (required)
 
-TTL/TWCS may expire physical SSTables only when consistent with logical
-`data_floor` **and** the serving-pin grace. InMem applies the same logical
-rules immediately inside `maintain`, iterating in-memory partitions whose
-namespace matches and whose `key_group` is in the task state's range.
+Tiles are rewritten on every ingest batch that touches them and `key_state` on
+every batch and every advance, so without this rule `window_tiles` and
+`window_key_states` partitions grow with write count — on the ingest hot read
+path. For each cell keep exactly:
+
+1. the newest version with `attempt == cur_attempt` (possibly uncommitted);
+2. the newest version allowed by the published `cut`;
+3. the newest version allowed by `prev_cut` (covers in-flight requests and the
+   metadata read cache).
+
+Drop everything else, including rows of older attempts **above** their cut
+entry, which is how zombie writes are collected. Bound: three versions per
+cell.
+
+`prev_cut` is a published column rather than owner RAM so that a successor's
+GC honours grace opened by its predecessor, and because the cut is now
+monotonic, `prev_cut ⊆ cut` always — one slot is enough, with no wall-clock
+comparison anywhere.
+
+### Rest of `maintain`
+
+- drop consumed due rows (`fire_at.ts <= published floor`) with a `fire_ts`
+  clustering-range delete on shards overlapping the owned range;
+- scan `window_kg_buckets` for `bucket_start < floor_bucket` per owned group
+  and delete the matching raw/tile partitions and index row;
+- drop a `window_kg_meta` row only when the whole group is gone;
+- do **not** GC with a group-wide version high-water mark.
+
+**In-flight requests.** A request pins its cut at start. Deleting a version
+named by a live or previous cut is forbidden by the rule above, and whole
+buckets only go below `floor_bucket`, which a covered request never reads.
+No pin refcount table.
+
+TTL/TWCS may expire physical SSTables only when consistent with the published
+floor. InMem applies the same logical rules immediately inside `maintain`.
+
+---
+
+## Cost summary
+
+| Operation | Scylla round trips | LWT |
+|---|---|---|
+| Ingest, one key-batch | 1 bounded `key_state` read + 1 read per (granularity, bucket) tile set; writes 1 per touched partition, concurrent | none |
+| WO advance page | 1 due-work read + the per-key reads it already needed | none |
+| WRO lookup, `Committed` | 1 metadata read (cacheable) + planned raw/tile reads | none |
+| WRO lookup, `Fresh` | same + 1 bounded raw slice over the head | none |
+| Checkpoint barrier | 0 | none |
+| Checkpoint completion | 1 per owned group | 1 per owned group |
+| Restore, streaming | 0 | none |
+| Restore, request | `O(max_p / p)` parallel `cur_attempt` writes | 1 per owned group |
+
+Storage per cell after GC: at most three versions. Control-plane blob:
+`O(groups x attempts)` × 16 bytes.
+
+---
+
+## Accepted divergences and known limits
+
+1. **Read-your-writes across the WO/WRO split is checkpoint-granular in
+   `Committed` mode**, and head-scoped in `Fresh`. For event-time correctness
+   this is rarely the binding constraint — watermark lag usually dominates
+   publication lag — but it is a real difference from a single-process store
+   and should be stated in user-facing docs.
+2. **Late arrivals are invisible to `Fresh` until the next completed
+   checkpoint.** See *Fresh*.
+3. **Late-drop race during replay.** A successor restores its frontier from
+   the checkpoint, so it accepts everything its predecessor accepted, unless
+   replay reordering advances the frontier past an event the predecessor had
+   taken. Pre-existing engine nondeterminism, bounded by lateness; not
+   introduced here.
+4. **Non-deterministic raw cursors.** `seq_no` comes from `KeyState.next_seq`
+   at ingest, so a replay with different arrival order gives the same logical
+   event a different `Cursor`. This is why zombie rows must be excluded by the
+   cut rather than merely overwritten — LWW alone would leave duplicate raw
+   rows. A stable source-assigned event identity would remove the need and is
+   worth having for other reasons; future work.
+5. **Cut history is not retired in v1.** An entry can only be dropped when no
+   row of that attempt remains, and a zombie row with a far-future `event_ts`
+   is retained by design. Entries are 16 bytes; 1000 attempts across 128
+   groups is ~2 MB of control plane plus a binary search per row. Cap the list
+   and fail loudly if the cap is hit; forced version compaction is future
+   work. The cap bounds the checkpoint blob, the published cut payload, the
+   per-row filter cost and the pathological `key_state` fallback. It does not
+   bound steady-state query counts — the bounded `LIMIT` read does that.
+6. **Head-of-line blocking on the published cut.** Cuts are per group and the
+   prefix is a low-water mark, so one slow or timed-out write holds back that
+   group's whole cut, including acked writes to other keys at a higher epoch.
+   Bounded by write timeout; an unresolvable write fails the task. Skipping
+   the hole is not an option — see *Acked prefix*.
+7. **Streaming write zombies are unfenced.** No ownership row, no ingest LWT.
+   The cut fences every **reader** permanently, but a dead worker can still
+   write unlogged rows (collected by per-cell retention) and still emit
+   downstream until master kill. Output fencing is the job attempt on the data
+   plane.
+8. **Two master prerequisites.** Durable attempt allocation and a
+   checkpoint-completion notification. The backend refuses to open without
+   them.
+
+---
+
+## Explicitly not v1
+
+- A separate publish path, ownership lease, per-key pins, per-key epoch maps,
+  copy-on-restore, or any cut clamp.
+- Ingest LWT, periodic owner suicide, `USING TIMESTAMP` LWW.
+- Cut history retirement, skinny due index, stable source event identity.
+- Zero-lag visibility for late events in `Fresh`.
 
 ## Future next steps
 
-**Prerequisite:** operator-scoped `StateNamespace`, per-task store client
-(`max_p`, key-group range), and InMem restore/maintain isolation (two tasks
-on one worker, no clobber). Then Scylla.
+`RestorePlanner` identity mapping on master must grow the range intersection
+described above; Scylla's `maintain` implementation remains TODO.
 
-Worker maintenance **orchestration** (`OperatorStore::maintain`, cleaner loop,
-`StateSpec.maintenance_*`) is decided in the runtime; Scylla's `maintain`
-implementation remains TODO. v1 `RestorePlanner` may keep identity mapping.
+**Namespaced cache quota.** Give each state consumer its own memory and
+local-disk quota; `StateResourceTracker` is the scaffold.
 
-### Namespaced cache quota
+**Mem pressure / backpressure.** If eviction cannot keep a consumer within
+quota, backpressure upstream. Remote state must not be a bottomless overflow
+sink.
 
-Assign each state consumer its own memory and local-disk quota. This prevents
-one operator or namespace from consuming the shared cache and gives concurrent
-consumers a predictable fair share of local resources. The worker
-`StateResourceTracker` is the scaffold for charging/releasing those quotas.
-
-### Mem pressure / backpressure
-
-Track both local cache pressure (mem+disk) and logical remote-state usage. If eviction or
-spill cannot keep a consumer within its cache quota, or its retained remote
-state reaches a configured logical limit, backpressure its upstream tasks.
-Remote state must not act as a bottomless overflow sink; these limits make
-state growth visible to normal flow control. `StateResourceTracker` will surface
-pressure signals; maintenance paths must not block on admission.
-
-### CDC and late events
-
-The current flow is append-only. An event is accepted while its timestamp is
-ahead of the task watermark; an event at or behind that frontier is dropped.
-`lateness` only extends retention and does not provide a late-update grace
-period or revise already emitted results.
-
-Future late-event and CDC support must identify logical rows independently of
-their arrival cursor and represent inserts, updates, and deletes explicitly.
-WO would retain enough raw history, invalidate or rebuild affected tiles and
-windows, and publish corrections through the same atomic version boundary.
-The backend would add row identity, revision/operation metadata, and
-versioned tombstones while cleanup would preserve data needed by the allowed
-lateness interval. WRO would continue reading one coherent serving version;
-only the materialization and merge rules would change.
-
-### Rescaling
-
-Rescaling remaps `key_group ↔ task` between checkpoints. Data rows stay put:
-PKs are task-agnostic. `max_parallelism` is fixed for the pipeline incarnation;
-only `p` changes. At any one `p`, `subtask = key_group * p / max_p` **partitions**
-`[0, max_p)` into disjoint contiguous ranges — two live tasks never own the
-same key group, so they never “own an intersection” of each other.
-
-What *does* intersect is **new range ∩ old range** in the planner, when `p`
-changes. Each old task’s checkpoint blob is only a `StateVersion`. The old
-range is recomputed from that task’s index and the checkpoint graph’s
-`(p, max_p)`. `RestorePlanner` intersects the new assignment with every old
-task range and emits a `Vec<VersionedRange>` restore instruction — disjoint
-slices that cover exactly the new task’s groups, each with its source cutoff.
-`restore()` keeps those slices in the client for WO overlay. There is no
-`window_recovery_bases` table. The checkpoint blob never stores a range.
-
-Example, `max_p = 128`, rescale `p=3 → p=2`:
-
-```text
-old p=3:  task 0 [0, 43)   task 1 [43, 86)   task 2 [86, 128)
-new p=2:  task 0 [0, 64)   task 1 [64, 128)
-```
-
-```text
-new task 0 ← [0, 43) @ old0 version  +  [43, 64) @ old1 version
-new task 1 ← [64, 86) @ old1 version  +  [86, 128) @ old2 version
-```
-
-Old task 1 is **split** across both new tasks; new task 0 **merges** a suffix
-of old 0 with a prefix of old 1. Each inherited slice keeps its source
-`(attempt, epoch)` because the two old writers had independent epoch clocks.
-The restore instruction is that list of slices — not overlapping ranges for
-the same groups, and not something that was persisted at checkpoint time.
-
-Power-of-two rescale (`2 → 4`, `4 → 2`) is the aligned special case: a new
-range is exactly one old range or a concatenation of whole old ranges, never a
-partial split of an old range.
-
-`RestorePlanner` still needs this intersection; that planner change is separate
-from this store contract. Request-mode leases are re-stolen by the new
-`WriterId` on first write to each `key_group` (`prev_E ← serving_E`). Streaming
-does not touch the lease.
+**CDC and late events.** Append-only today. Future CDC must identify logical
+rows independently of arrival cursor and represent inserts/updates/deletes
+explicitly; readers would continue to see one coherent version.
