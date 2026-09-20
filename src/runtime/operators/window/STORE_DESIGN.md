@@ -230,17 +230,15 @@ the old rows and the replayed rows. Repairing that requires clamping another
 attempt's entry down — the single largest source of complexity in the earlier
 drafts, and it disappears entirely if publication waits for completion.
 
-Two ways to get it, in preference order:
+Required: `notify_checkpoint_complete(checkpoint_id)` delivered to tasks and
+dispatched on the operator next to barrier handling, default no-op. This is
+the standard engine capability and is independently useful (source offset
+commit). Tracked by
+[#300](https://github.com/volga-project/volga/issues/300).
 
-1. A `notify_checkpoint_complete(checkpoint_id)` hook delivered to tasks. This
-   is the standard engine capability and is independently useful (source
-   offset commit).
-2. Piggyback `last_completed_checkpoint_id` on the next barrier message. No
-   new RPC, but publication lags by one checkpoint interval on top of
-   completion.
-
-Option 1 is the plan of record. Until either exists, request mode must refuse
-to open.
+Delivery may be at-most-once — a missed notification is repaired by the heal
+at open (*Writing it*, trigger 2), not by waiting for the next checkpoint.
+Until this lands, request mode must refuse to open.
 
 ---
 
@@ -441,18 +439,19 @@ CREATE TABLE window_kg_meta (
 
 ### Writing it
 
-One routine, two triggers. Both are read-then-CAS on a single row, per owned
-key group, issued in parallel across groups.
+**Two** statements, per owned key group, issued in parallel across groups.
+Do not merge them.
 
 `prev_cut` must come from the **row being replaced**, never from the writer's
 memory of what it last published. After a failover the successor has
 published nothing, so a RAM-derived `prev_cut` would be empty exactly when
 readers are most likely to be holding an older cut — see *Per-cell version
-retention*. That is why this is a read-then-CAS and not a blind write.
+retention*. That is why publication is a read-then-CAS and not a blind write.
 
 ```text
 row = SELECT * FROM window_kg_meta WHERE namespace = ? AND key_group = ?
 
+-- (A) publish: the cut moves forward
 publish(payload):                       -- payload = cut, wm, floor, cp_id
     UPDATE window_kg_meta
        SET cur_attempt   = me,
@@ -463,37 +462,60 @@ publish(payload):                       -- payload = cut, wm, floor, cp_id
            checkpoint_id = payload.cp_id
      WHERE namespace = ? AND key_group = ?
        IF cur_attempt <= me AND checkpoint_id = row.checkpoint_id
+
+-- (B) take the attempt: the cut does not move
+take_attempt():
+    UPDATE window_kg_meta
+       SET cur_attempt = me
+     WHERE namespace = ? AND key_group = ?
+       IF cur_attempt <= me
 ```
 
-Absent row ⇒ `INSERT ... IF NOT EXISTS`. Not applied ⇒ re-read and retry, or
-skip if the row already carries a `checkpoint_id >= payload.cp_id`. This runs
-once per group per checkpoint, so a retry costs nothing.
+**(B) is not (A) with an unchanged cut.** Running (A) with
+`payload.cut = row.cut` would also set `prev_cut = row.cut`, collapsing the
+two retention slots into one. GC would then drop the superseded tile and
+`key_state` versions that a WRO request on the previous generation is still
+filtering against, and that request undercounts silently. The grace slot
+exists precisely to survive a restart, so destroying it at open would defeat
+the mechanism at the one moment it is needed.
 
-The `checkpoint_id` condition is doing the real work. `IF cur_attempt = me`
-alone is not a fence: `attempt` is job-wide, so it cannot order two writes
-from the **same** attempt, and completion notifications are not ordered
-against each other — a delayed publish for checkpoint `N` can land after
-`N+1` and walk the published cut backwards. Making the condition a
-compare-and-swap on `checkpoint_id` makes publication monotonic regardless of
-delivery order, and incidentally makes it irrelevant whether two writers of
-one attempt can ever own the same group.
+Not applied ⇒ re-read and retry, or skip if the row already carries
+`checkpoint_id >= payload.cp_id`. Each of these runs once per group per
+checkpoint or per open, so a retry costs nothing.
 
-**Trigger 1 — checkpoint completion.** Publish the cut captured at that
+The `checkpoint_id` condition on (A) is doing the real work. `IF cur_attempt
+= me` alone is not a fence: `attempt` is job-wide, so it cannot order two
+writes from the **same** attempt, and completion notifications are not
+ordered against each other — a delayed publish for checkpoint `N` can land
+after `N+1` and walk the published cut backwards. A compare-and-swap on
+`checkpoint_id` makes publication monotonic regardless of delivery order, and
+incidentally makes it irrelevant whether two writers of one attempt can ever
+own the same group.
+
+**Trigger 1 — checkpoint completion.** (A) with the cut captured at that
 barrier. One LWT per group per checkpoint; at `max_p = 128` and a 30s
 interval that is a few per second.
 
-**Trigger 2 — WO open, request mode.** Publish the **restored** cut if
-`row.checkpoint_id < restored_checkpoint_id`, otherwise just take
-`cur_attempt`. Same statement, same condition.
+**Trigger 2 — WO open, request mode.** (A) with the **restored** cut if
+`row.checkpoint_id < restored_checkpoint_id`, else (B).
 
 Trigger 2 is what makes at-most-once completion delivery safe. A missed
 notification or a failed CAS otherwise leaves the published row at `N-1`
 while the durable blob is at `N`, and nothing repairs it until the next
-checkpoint completes — which, for a job that is crash-looping before it can
+checkpoint completes — which, for a job crash-looping before it can
 checkpoint, is never. Healing at open bounds published staleness to the
 checkpoint the attempt actually restored from. The restored cut is by
 definition a completed checkpoint's cut, so publishing it is safe for the
 same reason trigger 1 is.
+
+**Absent row.** `INSERT ... IF NOT EXISTS`, and only from a publish: the
+first completed checkpoint creates the row, or a heal does when the row is
+missing but a restored checkpoint exists. **Open does not create the row on a
+fresh job.** There is nothing to put in it — no cut, and no
+`retention_floor`, so the coverage guard would have nothing to check and
+`Fresh` would serve rows with no coverage guarantee. Leaving it absent keeps
+one rule for both modes: WRO returns empty until the first checkpoint
+completes.
 
 `retention_floor = committed_wm - max_window_length - lateness`, the same
 expression WO uses for retention eligibility, evaluated on the **committed**

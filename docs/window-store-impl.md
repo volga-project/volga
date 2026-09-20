@@ -49,14 +49,13 @@ Both block the Scylla backend from opening. Neither is window work.
 | | What | Why | Tracking |
 |---|---|---|---|
 | P1 | Durable, never-reused `attempt` allocated by the master before workers are configured | `attempt_id` resets to `0` on pipeline start, and `max(restored) + 1` collides when two attempts restore from the same checkpoint | [#156](https://github.com/volga-project/volga/issues/156) |
-| P2 | `notify_checkpoint_complete(checkpoint_id)` delivered to tasks | The cut may only be published after its checkpoint completes globally; publishing at the barrier reintroduces the clamp | new issue |
+| P2 | `notify_checkpoint_complete(checkpoint_id)` delivered to tasks | The cut may only be published after its checkpoint completes globally; publishing at the barrier reintroduces the clamp | [#300](https://github.com/volga-project/volga/issues/300) |
 
-P2's fallback, if the notification is too invasive: piggyback
-`last_completed_checkpoint_id` on the next barrier message and publish one
-checkpoint behind. Costs one extra interval of serving lag. The master
-already tracks `latest_complete_checkpoint` and emits
+The master already tracks `latest_complete_checkpoint` and emits
 `LifecycleEvent::CheckpointCompleted` (`src/runtime/master/state.rs`); what is
-missing is only the path back to the tasks.
+missing is only the path back to the tasks. Delivery may be at-most-once — a
+missed notification is repaired by the heal at open, not by waiting for the
+next checkpoint.
 
 ---
 
@@ -100,7 +99,7 @@ Each row is a rewrite of an open PR, not a new PR on top.
 | | PR | What changes |
 |---|---|---|
 | S1 | [#287](https://github.com/volga-project/volga/pull/287) write path | Add `attempt` to the clustering key of all four data tables, version clustering `DESC`. Per-group atomic `next_epoch` from 0. Acked-prefix low-water tracking. Per-key in-flight rule (no read or second commit for a key with a commit in flight). Drop `window_head` and any ingest LWT. |
-| S2 | [#288](https://github.com/volga-project/volga/pull/288) checkpoint/restore | `Versioned { attempt, cuts }` replaces `Versioned { version }`; delete `window_recovery_bases`. Restore takes the master attempt, asserts dominance, `next_epoch = 0`. **Delete** steal, promote, `serving_publish`, catch-up freeze. Add `window_kg_meta` with one read-then-CAS routine on two triggers: checkpoint completion, and open (heal if the row is behind the restored checkpoint). `prev_cut` comes from the replaced row; the condition is `cur_attempt <= me AND checkpoint_id = observed`, since `cur_attempt` alone cannot order two writes and completions are not ordered against each other. |
+| S2 | [#288](https://github.com/volga-project/volga/pull/288) checkpoint/restore | `Versioned { attempt, cuts }` replaces `Versioned { version }`; delete `window_recovery_bases`. Restore takes the master attempt, asserts dominance, `next_epoch = 0`. **Delete** steal, promote, `serving_publish`, catch-up freeze. Add `window_kg_meta` with **two** statements: publish (`prev_cut = row.cut`, `IF cur_attempt <= me AND checkpoint_id = observed`) and take-attempt (`SET cur_attempt = me IF cur_attempt <= me`). Triggers: checkpoint completion publishes; open publishes the restored cut if the row is behind it, else takes the attempt only. Do not publish with an unchanged cut — that sets `prev_cut = cut` and collapses the two GC retention slots. Open does not create the row on a fresh job. |
 | S3 | [#289](https://github.com/volga-project/volga/pull/289) maintain/GC | Per-cell version retention, three slots (`cur_attempt`, `cut`, `prev_cut`). Gate every delete on the published floor. No wall-clock grace anywhere. |
 | S4 | [#290](https://github.com/volga-project/volga/pull/290) request store | Read `window_kg_meta` per request (not cached in v1) instead of a pin; `ReadOptions`; coverage guard; enforced `wro_request_timeout < checkpoint_interval` with a configure-time assert; wire WRO to the worker `StateSessionHandle` instead of opening a second driver pool. |
 | S5 | [#292](https://github.com/volga-project/volga/pull/292) retry profile | Mostly stands. LWT now appears only on `window_kg_meta` writes. Keep: timeout fails the task, no epoch bump, no republish. |
