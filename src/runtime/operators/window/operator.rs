@@ -167,15 +167,18 @@ impl WindowOperator {
         namespace: StateNamespace,
     ) {
         assert!(self.state.is_none(), "window state is already configured");
-        self.state = Some(Arc::new(WindowOperatorState::for_test(
-            store,
-            namespace,
-            Arc::from("test-task"),
-            self.ts_column_index,
-            self.window_configs.clone(),
-            self.lateness_ms,
-            self.max_window_length_ms,
-        )));
+        self.state = Some(Arc::new(
+            WindowOperatorState::for_test(
+                store,
+                namespace,
+                Arc::from("test-task"),
+                self.ts_column_index,
+                self.window_configs.clone(),
+                self.lateness_ms,
+                self.max_window_length_ms,
+            )
+            .with_state_only(self.output_mode == WindowOutputMode::StateOnly),
+        ));
     }
 
     #[cfg(test)]
@@ -382,15 +385,18 @@ impl OperatorTrait for WindowOperator {
             };
             let store = open_window_operator_store(registry, backend, &scope)?;
             let task_id = context.vertex_id_arc();
-            let state = Arc::new(WindowOperatorState::new(
-                store,
-                task_id.clone(),
-                self.ts_column_index,
-                self.window_configs.clone(),
-                self.lateness_ms,
-                self.max_window_length_ms,
-                scope,
-            ));
+            let state = Arc::new(
+                WindowOperatorState::new(
+                    store,
+                    task_id.clone(),
+                    self.ts_column_index,
+                    self.window_configs.clone(),
+                    self.lateness_ms,
+                    self.max_window_length_ms,
+                    scope,
+                )
+                .with_state_only(self.output_mode == WindowOutputMode::StateOnly),
+            );
             registry
                 .insert_task_state(task_id.clone(), state.clone() as Arc<dyn OperatorTaskState>);
             self.state_registry = Some(registry.clone());

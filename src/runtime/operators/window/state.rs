@@ -41,6 +41,8 @@ pub struct WindowOperatorState {
     pub watermark_frontier: AtomicI64,
     /// Watermark of the last **completed** checkpoint. GC reads this, never the live frontier.
     committed_wm: AtomicI64,
+    /// `StateOnly` admits on the committed retention floor, not the live watermark.
+    state_only: bool,
     /// Cuts captured at each barrier, published on completion (#300).
     pending_checkpoints: Mutex<HashMap<u64, WindowStateSnapshot>>,
 }
@@ -74,8 +76,14 @@ impl WindowOperatorState {
             max_window_length_ms,
             watermark_frontier: AtomicI64::new(WATERMARK_UNSET),
             committed_wm: AtomicI64::new(WATERMARK_UNSET),
+            state_only: false,
             pending_checkpoints: Mutex::new(HashMap::new()),
         }
+    }
+
+    pub fn with_state_only(mut self, state_only: bool) -> Self {
+        self.state_only = state_only;
+        self
     }
 
     #[cfg(test)]
@@ -236,15 +244,18 @@ impl WindowOperatorState {
             return 0;
         }
         let partition = self.partition(key);
-        let watermark_frontier = self.watermark_frontier();
+        let cutoff = if self.state_only {
+            self.retention_floor_at(self.committed_watermark())
+        } else {
+            self.watermark_frontier()
+        };
 
         let mut key_state = self
             .store
             .load_key_state(&partition)
             .await
             .expect("key state");
-        let (accepted, dropped) =
-            drop_late_entries(&batch, self.ts_column_index, watermark_frontier);
+        let (accepted, dropped) = drop_late_entries(&batch, self.ts_column_index, cutoff);
         if accepted.num_rows() == 0 {
             return dropped;
         }
@@ -368,11 +379,12 @@ fn append_seq_no_column(batch: &RecordBatch, start_seq: u64) -> RecordBatch {
     RecordBatch::try_new(schema, columns).expect("append seq")
 }
 
-/// Drop rows at or behind the task watermark.
+/// Drop rows at or behind the admission cutoff.
+/// Emit: live watermark. StateOnly: committed retention floor (`None` admits all).
 fn drop_late_entries(
     batch: &RecordBatch,
     ts_column_index: usize,
-    watermark_frontier: Option<i64>,
+    cutoff: Option<i64>,
 ) -> (RecordBatch, usize) {
     let ts = batch
         .column(ts_column_index)
@@ -381,7 +393,7 @@ fn drop_late_entries(
         .expect("ts");
     let mut keep = Vec::new();
     for i in 0..batch.num_rows() {
-        if watermark_frontier.map_or(true, |watermark| ts.value(i) > watermark) {
+        if cutoff.map_or(true, |floor| ts.value(i) > floor) {
             keep.push(i as u32);
         }
     }

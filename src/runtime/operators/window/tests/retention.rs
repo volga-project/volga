@@ -260,3 +260,38 @@ async fn state_only_prunes_without_triggers_or_evaluation_state() {
     assert_eq!(meta.next_seq, 3);
     assert!(meta.evaluation.is_none());
 }
+
+#[tokio::test]
+async fn state_only_admits_late_rows_above_retention_floor() {
+    let exec = window_exec_from_sql(SQL).await;
+    let mut cfg = WindowOperatorConfig::new(exec);
+    cfg.output_mode = WindowOutputMode::StateOnly;
+    cfg.spec = WindowSpec {
+        lateness: 0,
+        tiling: Some(TileConfig::new(vec![TimeGranularity::Seconds(1)]).unwrap()),
+    };
+    let mut h = Harness::new(cfg).await;
+    h.ingest(
+        batch(vec![1_000, 5_000, 10_000], vec![1.0, 2.0, 3.0], vec!["A", "A", "A"]),
+        "A",
+    )
+    .await;
+    let mut out = VecOutput::default();
+    h.op.handle_watermark(
+        match watermark_message(10_000) {
+            crate::common::message::Message::Watermark(w) => w,
+            other => panic!("expected watermark, got {other:?}"),
+        },
+        &mut out,
+    )
+    .await
+    .expect("watermark");
+    h.complete_checkpoint(1).await;
+    // floor = 10000 - 5000 = 5000. Live watermark is 10000.
+    h.ingest(batch(vec![6_000, 4_000], vec![4.0, 5.0], vec!["A", "A"]), "A")
+        .await;
+    let ts = raw_timestamps(&h, "A").await;
+    assert!(ts.contains(&6_000), "late row above floor must be stored, got {ts:?}");
+    assert!(!ts.contains(&4_000), "row at or behind floor must be dropped, got {ts:?}");
+}
+
