@@ -23,7 +23,7 @@ pub(super) async fn insert_key_state(
     ns: Vec<u8>,
     kg: i32,
     key: Vec<u8>,
-    attempt: Vec<u8>,
+    attempt: i64,
     epoch: i64,
     state: &KeyState,
 ) -> Result<()> {
@@ -34,10 +34,9 @@ pub(super) async fn insert_key_state(
 }
 
 /// Write versioned raw / tiles / key_state / triggers. One UNLOGGED BATCH
-/// per Scylla partition (prepared statements — unprepared values in a batch
-/// would prepare sequentially). Independent partitions are joined.
+/// per Scylla partition. No ingest LWT.
 ///
-/// No lease, no LWT. Overlay is this attempt until checkpoint restore (#288).
+/// Retries a timed-out write at the same Version inside this call.
 pub(super) async fn commit_events(
     client: &ScyllaWindowStoreClient,
     partition: &PartitionKey,
@@ -52,12 +51,60 @@ pub(super) async fn commit_events(
         "window trigger partition does not match committed partition"
     );
     let kg = client.key_group(partition)?;
+    client.begin_key(&partition.business_key)?;
+    let epoch = client.alloc_epoch(kg);
+    let result =
+        commit_events_at(client, partition, kg, epoch, ts_column_index, events, tiles, meta, triggers)
+            .await;
+    match result {
+        Ok(()) => {
+            client.ack_epoch(kg, epoch);
+            client.end_key(&partition.business_key);
+            Ok(())
+        }
+        Err(first) => {
+            // Same Version until acked, then fail the task.
+            let retry = commit_events_at(
+                client,
+                partition,
+                kg,
+                epoch,
+                ts_column_index,
+                events,
+                tiles,
+                meta,
+                triggers,
+            )
+            .await;
+            client.end_key(&partition.business_key);
+            match retry {
+                Ok(()) => {
+                    client.ack_epoch(kg, epoch);
+                    Ok(())
+                }
+                Err(_) => Err(first),
+            }
+        }
+    }
+}
+
+async fn commit_events_at(
+    client: &ScyllaWindowStoreClient,
+    partition: &PartitionKey,
+    kg: i32,
+    epoch: u64,
+    ts_column_index: usize,
+    events: &RecordBatch,
+    tiles: &TileMap,
+    meta: &KeyState,
+    triggers: &[WindowTrigger],
+) -> Result<()> {
     let session = client.inner.session();
     let prepared = client.inner.prepared().await?;
-    let epoch = client.inc_epoch();
     let ns = client.scope.namespace.bytes.clone();
     let key = partition.business_key.clone();
-    let attempt = client.scope.attempt.clone();
+    let attempt = client.my_attempt() as i64;
+    let epoch = epoch as i64;
 
     let cursors = if events.num_rows() > 0 {
         cursors_from_batch(events, ts_column_index)?
@@ -82,7 +129,7 @@ pub(super) async fn commit_events(
                 *bucket,
                 cursor.ts,
                 cursor.seq_no as i64,
-                attempt.clone(),
+                attempt,
                 epoch,
                 encode_batch(&events.slice(*idx, 1))?,
             ));
@@ -125,7 +172,7 @@ pub(super) async fn commit_events(
                 gran,
                 bucket,
                 tile_start,
-                attempt.clone(),
+                attempt,
                 epoch,
                 payload,
             ));
@@ -141,7 +188,7 @@ pub(super) async fn commit_events(
         ns.clone(),
         kg,
         key.clone(),
-        attempt.clone(),
+        attempt,
         epoch,
         meta,
     );
@@ -175,7 +222,7 @@ pub(super) async fn commit_events(
                 kind,
                 window_id,
                 kg,
-                attempt.clone(),
+                attempt,
                 epoch,
             ));
         }
@@ -199,18 +246,27 @@ pub(super) async fn store_key_state(
     state: &KeyState,
 ) -> Result<()> {
     let kg = client.key_group(partition)?;
+    client.begin_key(&partition.business_key)?;
+    let epoch = client.alloc_epoch(kg);
     let session = client.inner.session();
     let prepared = client.inner.prepared().await?;
-    let epoch = client.inc_epoch();
-    insert_key_state(
+    let result = insert_key_state(
         &session,
         &prepared.insert_key_states,
         client.scope.namespace.bytes.clone(),
         kg,
         partition.business_key.clone(),
-        client.scope.attempt.clone(),
-        epoch,
+        client.my_attempt() as i64,
+        epoch as i64,
         state,
     )
-    .await
+    .await;
+    client.end_key(&partition.business_key);
+    match result {
+        Ok(()) => {
+            client.ack_epoch(kg, epoch);
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
 }

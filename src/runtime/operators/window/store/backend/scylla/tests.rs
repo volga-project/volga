@@ -65,9 +65,9 @@ fn tile_keys(tiles: &TileMap) -> Vec<(TimeGranularity, i64)> {
     tiles.keys().copied().collect()
 }
 
-fn scope(ns: &StateNamespace, attempt: &[u8]) -> WindowStoreTaskScope {
+fn scope(ns: &StateNamespace, attempt: u64) -> WindowStoreTaskScope {
     let mut scope = WindowStoreTaskScope::for_test(ns.clone());
-    scope.attempt = attempt.to_vec();
+    scope.attempt = attempt;
     scope
 }
 

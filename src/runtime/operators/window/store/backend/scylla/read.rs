@@ -10,8 +10,17 @@ use crate::runtime::operators::window::model::{
 };
 use crate::runtime::operators::window::store::backend::codec::{decode_batch, decode_val};
 
+use crate::runtime::operators::window::store::backend::{Attempt, Version};
+
 use super::schema::{align_down, RAW_BUCKET_MS};
 use super::store::ScyllaWindowStoreClient;
+
+fn row_version(attempt: i64, epoch: i64) -> Version {
+    Version {
+        attempt: attempt as Attempt,
+        epoch: epoch as u64,
+    }
+}
 
 pub(super) async fn load_key_state(
     client: &ScyllaWindowStoreClient,
@@ -20,28 +29,39 @@ pub(super) async fn load_key_state(
     let kg = client.key_group(partition)?;
     let session = client.inner.session();
     let prepared = client.inner.prepared().await?;
+    let ns = client.scope.namespace.bytes.clone();
+    let key = partition.business_key.clone();
+    let result = session
+        .execute_unpaged(&prepared.select_key_state, (ns.clone(), kg, key.clone()))
+        .await?;
+    let rows = result.into_rows_result()?;
+    let mut n = 0usize;
+    let mut visible: Option<Vec<u8>> = None;
+    for row in rows.rows::<(i64, i64, Vec<u8>)>()? {
+        let (attempt, epoch, payload) = row?;
+        n += 1;
+        if visible.is_none() && client.overlay_visible(kg, attempt, epoch) {
+            visible = Some(payload);
+        }
+    }
+    if let Some(payload) = visible {
+        return decode_val(&payload);
+    }
+    if n == 0 {
+        return Ok(KeyState::default());
+    }
+    let me = client.my_attempt() as i64;
     let result = session
         .execute_unpaged(
-            &prepared.select_key_state,
-            (
-                client.scope.namespace.bytes.clone(),
-                kg,
-                partition.business_key.clone(),
-            ),
+            &prepared.select_key_state_at,
+            (ns, kg, key, me, i64::MAX),
         )
         .await?;
     let rows = result.into_rows_result()?;
-    let mut best: Option<(i64, KeyState)> = None;
-    for row in rows.rows::<(Vec<u8>, i64, Vec<u8>)>()? {
-        let (attempt, epoch, payload) = row?;
-        if !client.overlay_visible(&attempt, epoch) {
-            continue;
-        }
-        if best.as_ref().map_or(true, |(e, _)| epoch > *e) {
-            best = Some((epoch, decode_val(&payload)?));
-        }
+    if let Some(row) = rows.rows::<(Vec<u8>,)>()?.next() {
+        return decode_val(&row?.0);
     }
-    Ok(best.map(|(_, s)| s).unwrap_or_default())
+    Ok(KeyState::default())
 }
 
 pub(super) async fn load_raw(
@@ -72,22 +92,28 @@ pub(super) async fn load_raw(
             bucket += RAW_BUCKET_MS;
         }
     }
-    let mut by_cursor: BTreeMap<Cursor, RecordBatch> = BTreeMap::new();
+    let mut by_cursor: BTreeMap<Cursor, (Version, RecordBatch)> = BTreeMap::new();
     for (from, to, result) in try_join_all(pages).await? {
         let rows = result.into_rows_result()?;
-        for row in rows.rows::<(i64, i64, Vec<u8>, i64, Vec<u8>)>()? {
+        for row in rows.rows::<(i64, i64, i64, i64, Vec<u8>)>()? {
             let (ts, seq, attempt, epoch, payload) = row?;
             let cursor = Cursor::new(ts, seq as u64);
             if cursor < from || cursor >= to {
                 continue;
             }
-            if !client.overlay_visible(&attempt, epoch) {
+            if !client.overlay_visible(kg, attempt, epoch) {
                 continue;
             }
-            by_cursor.insert(cursor, decode_batch(&payload)?);
+            let v = row_version(attempt, epoch);
+            match by_cursor.get(&cursor) {
+                Some((best, _)) if *best >= v => {}
+                _ => {
+                    by_cursor.insert(cursor, (v, decode_batch(&payload)?));
+                }
+            }
         }
     }
-    Ok(by_cursor.into_values().collect())
+    Ok(by_cursor.into_values().map(|(_, b)| b).collect())
 }
 
 pub(super) async fn load_tiles(
@@ -121,14 +147,15 @@ pub(super) async fn load_tiles(
     let mut out = TileMap::new();
     for (granularity, result) in try_join_all(pages).await? {
         let rows = result.into_rows_result()?;
-        let mut best: BTreeMap<i64, (i64, Vec<u8>)> = BTreeMap::new();
-        for row in rows.rows::<(i64, Vec<u8>, i64, Vec<u8>)>()? {
+        let mut best: BTreeMap<i64, (Version, Vec<u8>)> = BTreeMap::new();
+        for row in rows.rows::<(i64, i64, i64, Vec<u8>)>()? {
             let (tile_start, attempt, epoch, payload) = row?;
-            if !client.overlay_visible(&attempt, epoch) {
+            if !client.overlay_visible(kg, attempt, epoch) {
                 continue;
             }
-            if best.get(&tile_start).map_or(true, |(e, _)| epoch >= *e) {
-                best.insert(tile_start, (epoch, payload));
+            let v = row_version(attempt, epoch);
+            if best.get(&tile_start).map_or(true, |(e, _)| v > *e) {
+                best.insert(tile_start, (v, payload));
             }
         }
         for (tile_start, (_, payload)) in best {

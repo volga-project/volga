@@ -17,11 +17,11 @@ pub const TABLES: &[&str] = &[
         bucket_start bigint,
         event_ts bigint,
         seq_no bigint,
-        attempt blob,
+        attempt bigint,
         epoch bigint,
         payload blob,
         PRIMARY KEY ((namespace, key_group, business_key, bucket_start), event_ts, seq_no, attempt, epoch)
-    ) WITH CLUSTERING ORDER BY (event_ts ASC, seq_no ASC, attempt ASC, epoch DESC)"#,
+    ) WITH CLUSTERING ORDER BY (event_ts ASC, seq_no ASC, attempt DESC, epoch DESC)"#,
     r#"CREATE TABLE IF NOT EXISTS window_tiles (
         namespace blob,
         key_group int,
@@ -29,20 +29,20 @@ pub const TABLES: &[&str] = &[
         granularity_ms bigint,
         bucket_start bigint,
         tile_start bigint,
-        attempt blob,
+        attempt bigint,
         epoch bigint,
         payload blob,
         PRIMARY KEY ((namespace, key_group, business_key, granularity_ms, bucket_start), tile_start, attempt, epoch)
-    ) WITH CLUSTERING ORDER BY (tile_start ASC, attempt ASC, epoch DESC)"#,
+    ) WITH CLUSTERING ORDER BY (tile_start ASC, attempt DESC, epoch DESC)"#,
     r#"CREATE TABLE IF NOT EXISTS window_key_states (
         namespace blob,
         key_group int,
         business_key blob,
-        attempt blob,
+        attempt bigint,
         epoch bigint,
         key_state blob,
         PRIMARY KEY ((namespace, key_group, business_key), attempt, epoch)
-    ) WITH CLUSTERING ORDER BY (attempt ASC, epoch DESC)"#,
+    ) WITH CLUSTERING ORDER BY (attempt DESC, epoch DESC)"#,
     r#"CREATE TABLE IF NOT EXISTS window_triggers (
         namespace blob,
         bucket_start bigint,
@@ -53,10 +53,10 @@ pub const TABLES: &[&str] = &[
         trigger_kind tinyint,
         window_id bigint,
         key_group int,
-        attempt blob,
+        attempt bigint,
         epoch bigint,
         PRIMARY KEY ((namespace, bucket_start, kg_shard), fire_ts, fire_seq, business_key, trigger_kind, window_id, attempt, epoch)
-    ) WITH CLUSTERING ORDER BY (fire_ts ASC, fire_seq ASC, business_key ASC, trigger_kind ASC, window_id ASC, attempt ASC, epoch DESC)"#,
+    ) WITH CLUSTERING ORDER BY (fire_ts ASC, fire_seq ASC, business_key ASC, trigger_kind ASC, window_id ASC, attempt DESC, epoch DESC)"#,
 ];
 
 pub fn align_down(ts: i64, width: i64) -> i64 {

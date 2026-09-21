@@ -20,15 +20,17 @@ mod codec;
 mod due;
 mod inmem;
 mod scylla;
+mod version;
 
 pub use due::{collect_due, trigger_page_size};
 pub use inmem::{InMemWindowStore, InMemWindowStoreClient};
 pub use scylla::{ScyllaWindowStore, ScyllaWindowStoreClient};
+pub use version::{Attempt, CutHistory, Version};
 
-/// Job-level execution attempt stamped on published versions.
-pub type AttemptToken = Vec<u8>;
+/// Job-level execution attempt. Durable, never reused (#156).
+pub type AttemptToken = Attempt;
 
-/// Task-execution identity. Request-lease `owner` only; not part of data PKs.
+/// Task-execution identity. Not part of data PKs.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct WriterId(pub Vec<u8>);
 
@@ -39,7 +41,7 @@ pub struct WindowStoreTaskScope {
     pub max_parallelism: usize,
     pub key_group_range: KeyGroupRange,
     pub writer_id: WriterId,
-    pub attempt: AttemptToken,
+    pub attempt: Attempt,
 }
 
 impl WindowStoreTaskScope {
@@ -49,7 +51,7 @@ impl WindowStoreTaskScope {
             max_parallelism: 1,
             key_group_range: KeyGroupRange::full(1),
             writer_id: WriterId(Vec::new()),
-            attempt: Vec::new(),
+            attempt: 1,
         }
     }
 }
@@ -76,8 +78,8 @@ pub fn open_window_operator_store(
         }
         OperatorStateBackendConfig::Scylla(cfg) => {
             anyhow::ensure!(
-                !scope.attempt.is_empty(),
-                "Scylla window store requires execution_attempt_id"
+                scope.attempt != 0,
+                "Scylla window store requires a durable execution_attempt_id (#156)"
             );
             let cfg = cfg.clone();
             let registered = registry.get_or_insert_store(OperatorKind::Window, move |session| {
@@ -103,11 +105,7 @@ pub async fn open_window_request_store(
     match *config {}
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StateVersion {
-    pub attempt: AttemptToken,
-    pub epoch: u64,
-}
+pub type StateVersion = Version;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WindowBackendSnapshot {

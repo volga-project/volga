@@ -1,6 +1,6 @@
 use std::any::Any;
-use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::Arc;
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Result};
 use arrow::array::RecordBatch;
@@ -12,17 +12,24 @@ use crate::api::spec::state::ScyllaConfig;
 use crate::runtime::operators::window::model::{
     Cursor, KeyState, PartitionKey, RawRun, TileMap, TileRun, WindowTrigger,
 };
+use crate::runtime::operators::window::store::backend::{
+    Attempt, CutHistory, Version, WindowBackendSnapshot, WindowOperatorStore, WindowStoreTaskScope,
+};
 use crate::runtime::state::{OperatorStore, OperatorTaskState, StateSessionHandle};
 
 use super::cql::{
     prepare_stmts, PreparedDml, INSERT_KEY_STATES, INSERT_KG_BUCKETS, INSERT_RAW, INSERT_TILES,
-    INSERT_TRIGGERS, SELECT_KEY_STATE, SELECT_RAW, SELECT_TILES, SELECT_TRIGGERS,
+    INSERT_TRIGGERS, SELECT_KEY_STATE, SELECT_KEY_STATE_AT, SELECT_RAW, SELECT_TILES,
+    SELECT_TRIGGERS,
 };
 use super::schema::TABLES;
 use super::{read, triggers, write};
-use crate::runtime::operators::window::store::backend::{
-    WindowBackendSnapshot, WindowOperatorStore, WindowStoreTaskScope,
-};
+
+#[derive(Default)]
+struct GroupClock {
+    next_epoch: u64,
+    in_flight: BTreeSet<u64>,
+}
 
 #[derive(Clone)]
 pub struct ScyllaWindowStore {
@@ -79,6 +86,7 @@ impl ScyllaWindowStore {
                     insert_key_states,
                     insert_triggers,
                     select_key_state,
+                    select_key_state_at,
                     select_raw,
                     select_tiles,
                     select_triggers,
@@ -91,6 +99,7 @@ impl ScyllaWindowStore {
                         INSERT_KEY_STATES,
                         INSERT_TRIGGERS,
                         SELECT_KEY_STATE,
+                        SELECT_KEY_STATE_AT,
                         SELECT_RAW,
                         SELECT_TILES,
                         SELECT_TRIGGERS,
@@ -104,6 +113,7 @@ impl ScyllaWindowStore {
                     insert_key_states,
                     insert_triggers,
                     select_key_state,
+                    select_key_state_at,
                     select_raw,
                     select_tiles,
                     select_triggers,
@@ -117,7 +127,9 @@ impl ScyllaWindowStore {
         ScyllaWindowStoreClient {
             inner: Arc::new(self.clone()),
             scope,
-            last_epoch: Arc::new(AtomicI64::new(0)),
+            groups: Arc::new(Mutex::new(HashMap::new())),
+            in_flight_keys: Arc::new(Mutex::new(HashSet::new())),
+            cp_cut: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -126,7 +138,10 @@ impl ScyllaWindowStore {
 pub struct ScyllaWindowStoreClient {
     pub(super) inner: Arc<ScyllaWindowStore>,
     pub(super) scope: WindowStoreTaskScope,
-    last_epoch: Arc<AtomicI64>,
+    groups: Arc<Mutex<HashMap<i32, GroupClock>>>,
+    in_flight_keys: Arc<Mutex<HashSet<Vec<u8>>>>,
+    /// Restored overlay; empty until #288 restore.
+    cp_cut: Arc<Mutex<HashMap<i32, CutHistory>>>,
 }
 
 impl std::fmt::Debug for ScyllaWindowStoreClient {
@@ -151,14 +166,71 @@ impl ScyllaWindowStoreClient {
         Ok(kg as i32)
     }
 
-    pub(super) fn inc_epoch(&self) -> i64 {
-        self.last_epoch.fetch_add(1, Ordering::AcqRel) + 1
+    pub(super) fn my_attempt(&self) -> Attempt {
+        self.scope.attempt
     }
 
-    /// Streaming overlay before restore: this attempt only. #288 adds
-    /// `cp.attempt ∧ E ≤ cp_E`.
-    pub(super) fn overlay_visible(&self, attempt: &[u8], _epoch: i64) -> bool {
-        attempt == self.scope.attempt.as_slice()
+    /// Allocate the next epoch for `kg` and mark it in-flight.
+    pub(super) fn alloc_epoch(&self, kg: i32) -> u64 {
+        let mut groups = self.groups.lock().expect("groups");
+        let clock = groups.entry(kg).or_default();
+        let epoch = clock.next_epoch;
+        clock.next_epoch += 1;
+        clock.in_flight.insert(epoch);
+        epoch
+    }
+
+    pub(super) fn ack_epoch(&self, kg: i32, epoch: u64) {
+        let mut groups = self.groups.lock().expect("groups");
+        if let Some(clock) = groups.get_mut(&kg) {
+            clock.in_flight.remove(&epoch);
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(super) fn cut_top(&self, kg: i32) -> Option<u64> {
+        let groups = self.groups.lock().expect("groups");
+        let clock = groups.get(&kg)?;
+        let first = clock.in_flight.iter().next().copied();
+        match first {
+            Some(0) => None,
+            Some(h) => Some(h - 1),
+            None if clock.next_epoch == 0 => None,
+            None => Some(clock.next_epoch - 1),
+        }
+    }
+
+    pub(super) fn begin_key(&self, key: &[u8]) -> Result<()> {
+        let mut keys = self.in_flight_keys.lock().expect("in_flight_keys");
+        anyhow::ensure!(
+            keys.insert(key.to_vec()),
+            "commit already in flight for this key"
+        );
+        Ok(())
+    }
+
+    pub(super) fn end_key(&self, key: &[u8]) {
+        self.in_flight_keys
+            .lock()
+            .expect("in_flight_keys")
+            .remove(key);
+    }
+
+    #[allow(dead_code)]
+    pub(super) fn set_cp_cut(&self, kg: i32, cut: CutHistory) {
+        self.cp_cut.lock().expect("cp_cut").insert(kg, cut);
+    }
+
+    pub(super) fn overlay_visible(&self, kg: i32, attempt: i64, epoch: i64) -> bool {
+        let v = Version {
+            attempt: attempt as Attempt,
+            epoch: epoch as u64,
+        };
+        if v.attempt == self.scope.attempt {
+            return true;
+        }
+        let cuts = self.cp_cut.lock().expect("cp_cut");
+        cuts.get(&kg).is_some_and(|cut| cut.allows(v))
     }
 }
 

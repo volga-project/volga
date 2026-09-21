@@ -21,7 +21,7 @@ struct Seek {
     business_key: Vec<u8>,
     kind: i8,
     window_id: i64,
-    attempt: Vec<u8>,
+    attempt: i64,
     epoch: i64,
 }
 
@@ -76,7 +76,7 @@ fn min_seek(bucket: i64, shard: i32, after: Option<Cursor>) -> Seek {
             business_key: Vec::new(),
             kind: i8::MIN,
             window_id: i64::MIN,
-            attempt: Vec::new(),
+            attempt: i64::MIN,
             epoch: i64::MIN,
         },
         Some(c) if c.seq_no == u64::MAX => Seek {
@@ -86,9 +86,7 @@ fn min_seek(bucket: i64, shard: i32, after: Option<Cursor>) -> Seek {
             fire_seq: i64::MAX,
             business_key: Vec::new(),
             kind: i8::MAX,
-            window_id: i64::MAX,
-            attempt: Vec::new(),
-            epoch: i64::MAX,
+            attempt: i64::MAX,
         },
         Some(c) => Seek {
             bucket,
@@ -98,7 +96,7 @@ fn min_seek(bucket: i64, shard: i32, after: Option<Cursor>) -> Seek {
             business_key: Vec::new(),
             kind: i8::MIN,
             window_id: i64::MIN,
-            attempt: Vec::new(),
+            attempt: i64::MIN,
             epoch: i64::MIN,
         },
     }
@@ -114,13 +112,13 @@ fn visible_trigger(
     kind: i8,
     window_id: i64,
     key_group: i32,
-    attempt: &[u8],
+    attempt: i64,
     epoch: i64,
 ) -> Option<WindowTrigger> {
     if !client.scope.key_group_range.contains(key_group as usize) {
         return None;
     }
-    if !client.overlay_visible(attempt, epoch) {
+    if !client.overlay_visible(key_group, attempt, epoch) {
         return None;
     }
     let fire_at = Cursor::new(ts, seq as u64);
@@ -180,7 +178,7 @@ pub(super) async fn load_triggers(
                 start.business_key.clone(),
                 start.kind,
                 start.window_id,
-                start.attempt.clone(),
+                start.attempt,
                 start.epoch,
                 through.ts,
                 limit as i32,
@@ -193,7 +191,7 @@ pub(super) async fn load_triggers(
     let mut last_raw = None;
     for row in result
         .into_rows_result()?
-        .rows::<(i64, i64, Vec<u8>, i8, i64, i32, Vec<u8>, i64)>()?
+        .rows::<(i64, i64, Vec<u8>, i8, i64, i32, i64, i64)>()?
     {
         let (ts, seq, business_key, kind, window_id, key_group, attempt, epoch) = row?;
         raw_len += 1;
@@ -205,7 +203,7 @@ pub(super) async fn load_triggers(
             business_key: business_key.clone(),
             kind,
             window_id,
-            attempt: attempt.clone(),
+            attempt,
             epoch,
         });
         if let Some(trigger) = visible_trigger(
@@ -218,7 +216,7 @@ pub(super) async fn load_triggers(
             kind,
             window_id,
             key_group,
-            &attempt,
+            attempt,
             epoch,
         ) {
             selected.push(trigger);

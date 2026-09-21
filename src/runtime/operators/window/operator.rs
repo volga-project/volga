@@ -34,7 +34,7 @@ use crate::runtime::operators::window::model::{Cursor, WindowId};
 use crate::runtime::operators::window::spec::WindowSpec;
 use crate::runtime::operators::window::state::{WindowOperatorState, WindowStateSnapshot};
 use crate::runtime::operators::window::store::{
-    open_window_operator_store, AttemptToken, StateNamespace, WindowStoreTaskScope, WriterId,
+    open_window_operator_store, StateNamespace, WindowStoreTaskScope, WriterId,
 };
 use crate::runtime::operators::window::TileConfig;
 use crate::runtime::runtime_context::RuntimeContext;
@@ -367,12 +367,11 @@ impl OperatorTrait for WindowOperator {
                 parallelism as usize,
                 max_parallelism,
             );
-            let attempt: AttemptToken = context
+            let attempt = context
                 .job_config()
                 .get("execution_attempt_id")
                 .and_then(|v| v.as_u64())
-                .map(|id| id.to_be_bytes().to_vec())
-                .unwrap_or_default();
+                .unwrap_or(0);
             let scope = WindowStoreTaskScope {
                 namespace: ns.clone(),
                 max_parallelism,
