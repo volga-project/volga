@@ -10,9 +10,9 @@ use datafusion::scalar::ScalarValue;
 use crate::runtime::operators::window::config::WindowConfig;
 use crate::runtime::operators::window::frame_utils::get_window_length_ms;
 use crate::runtime::operators::window::model::{
-    Cursor, KeyEvaluationState, RawRun, WindowId, WindowTriggerKind,
+    Cursor, KeyEvaluationState, PartitionKey, RawRun, WindowId, WindowTrigger, WindowTriggerKind,
 };
-use crate::runtime::operators::window::store::{DueWindowWork, WindowData, WindowOperatorStore};
+use crate::runtime::operators::window::store::{WindowData, WindowOperatorStore};
 use crate::runtime::operators::window::{window_supports_tile_slide, AccumulatorType};
 
 use super::coverage_plan::{merge_raw_runs, merge_tile_runs};
@@ -25,17 +25,14 @@ use super::slide::produce_slide;
 /// Evaluate one page of durable row triggers for a key.
 pub async fn advance_key(
     store: &dyn WindowOperatorStore,
-    work: DueWindowWork,
+    partition: PartitionKey,
+    triggers: Vec<WindowTrigger>,
     window_configs: &BTreeMap<WindowId, WindowConfig>,
     ts_column_index: usize,
     output_schema: &SchemaRef,
     input_schema: &SchemaRef,
 ) -> Result<RecordBatch> {
-    let DueWindowWork {
-        partition,
-        mut key_state,
-        triggers,
-    } = work;
+    let mut key_state = store.load_key_state(&partition).await?;
     let prev = key_state
         .evaluation
         .as_ref()

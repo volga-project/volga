@@ -6,8 +6,8 @@ pub use crate::runtime::operators::window::model::{
     WindowTriggerKind,
 };
 pub use backend::{
-    open_window_operator_store, open_window_request_store, AttemptToken, DueWindowWork,
-    DueWorkStream, InMemWindowStore, InMemWindowStoreClient, StateVersion, WindowBackendSnapshot,
+    open_window_operator_store, open_window_request_store, collect_triggers, AttemptToken,
+    InMemWindowStore, InMemWindowStoreClient, StateVersion, TriggerResume, WindowBackendSnapshot,
     WindowOperatorStore, WindowRequestStore, WindowStoreTaskScope, WriterId,
 };
 pub use data::{WindowData, WindowView};

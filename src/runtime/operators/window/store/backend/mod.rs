@@ -3,11 +3,11 @@ use std::sync::Arc;
 use anyhow::Result;
 use arrow::array::RecordBatch;
 use async_trait::async_trait;
-use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 
 use crate::api::spec::state::{OperatorStateBackendConfig, RequestStoreConfig};
 use crate::common::KeyGroupRange;
+use crate::runtime::consts::{runtime_consts, WINDOW_PROCESS_PAGE_SIZE};
 use crate::runtime::operators::window::model::{
     Cursor, KeyState, PartitionKey, RawRun, StateNamespace, TileMap, TileRun, WindowTrigger,
 };
@@ -91,14 +91,43 @@ pub enum WindowBackendSnapshot {
     Versioned { version: StateVersion },
 }
 
-#[derive(Debug, Clone)]
-pub struct DueWindowWork {
-    pub partition: PartitionKey,
-    pub key_state: KeyState,
-    pub triggers: Vec<WindowTrigger>,
+/// Drain `(after, through]` for tests. The operator loops `load_triggers` itself.
+pub async fn collect_triggers(
+    store: &dyn WindowOperatorStore,
+    after: Option<Cursor>,
+    through: Cursor,
+) -> Result<Vec<WindowTrigger>> {
+    let limit = runtime_consts().u64(WINDOW_PROCESS_PAGE_SIZE).max(1) as usize;
+    let mut resume = None;
+    let mut out = Vec::new();
+    loop {
+        let (triggers, next) = store
+            .load_triggers(after, through, resume.as_ref(), limit)
+            .await?;
+        out.extend(triggers);
+        match next {
+            Some(token) => resume = Some(token),
+            None => break,
+        }
+    }
+    Ok(out)
 }
 
-pub type DueWorkStream<'a> = BoxStream<'a, Result<Vec<DueWindowWork>>>;
+/// Opaque pager token. Only the backend that produced it should pass it back.
+#[derive(Debug, Clone)]
+pub struct TriggerResume {
+    last: WindowTrigger,
+}
+
+impl TriggerResume {
+    pub(crate) fn after_visible(last: WindowTrigger) -> Self {
+        Self { last }
+    }
+
+    pub(crate) fn last(&self) -> &WindowTrigger {
+        &self.last
+    }
+}
 
 /// Store operations used by the sole Window Operator for a partition.
 #[async_trait]
@@ -116,7 +145,17 @@ pub trait WindowOperatorStore: OperatorStore {
         meta: &KeyState,
         triggers: &[WindowTrigger],
     ) -> Result<()>;
-    fn stream_due<'a>(&'a self, after: Option<Cursor>, through: Cursor) -> DueWorkStream<'a>;
+    /// One hop of due triggers in `(after, through]`.
+    ///
+    /// Short pages and empty `triggers` with `Some(resume)` are legal. End of
+    /// range is `next is None` — do not treat an empty page as EOF.
+    async fn load_triggers(
+        &self,
+        after: Option<Cursor>,
+        through: Cursor,
+        resume: Option<&TriggerResume>,
+        limit: usize,
+    ) -> Result<(Vec<WindowTrigger>, Option<TriggerResume>)>;
     async fn store_key_state(&self, partition: &PartitionKey, state: &KeyState) -> Result<()>;
     /// Complete all pending writes before capturing the returned snapshot.
     async fn checkpoint(&self) -> Result<WindowBackendSnapshot>;
