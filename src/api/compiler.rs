@@ -82,7 +82,7 @@ fn compile_logical_graph_from_parts(
     operator_overrides: &OperatorOverrides,
     event_time: &EventTimeSpec,
     connector_configs: &ConnectorConfigs,
-) -> LogicalGraph {
+) -> CompiledPipeline {
     let df_ctx = datafusion::prelude::SessionContext::new();
     let mut planner = Planner::new(
         PlanningContext::new(df_ctx)
@@ -94,25 +94,22 @@ fn compile_logical_graph_from_parts(
         planner.register_source(table_name.clone(), source_config.clone(), schema.clone());
     }
 
-    if let Some(req_src) = &connector_configs.request_source {
-        planner.register_request_source_sink(req_src.clone(), connector_configs.request_sink.clone());
-    }
-
     if let Some(sink) = &connector_configs.sink {
         planner.register_sink(sink.clone());
     }
 
-    let mut graph = planner
+    let mut streaming = planner
         .sql_to_graph(sql)
         .expect("failed to create logical graph from PipelineSpec");
 
-    // Apply operator overrides after operator_ids are assigned.
-    let node_indices = graph.get_all_node_indices();
+    // Apply operator overrides after operator_ids are assigned, before the request split
+    // so WRO copies the tuned WindowConfig.
+    let node_indices = streaming.get_all_node_indices();
     for idx in node_indices {
-        let operator_id = graph.get_node_by_index(idx).operator_id.clone();
+        let operator_id = streaming.get_node_by_index(idx).operator_id.clone();
         let override_spec = operator_overrides.per_operator.get(&operator_id);
 
-        if let Some(node) = graph.get_node_by_index_mut(idx) {
+        if let Some(node) = streaming.get_node_by_index_mut(idx) {
             if let OperatorConfig::WindowConfig(ref mut cfg) = node.operator_config {
                 if let Some(OperatorTuningSpec::Window(win)) = &operator_overrides.defaults.tuning {
                     cfg.set_spec(win.clone());
@@ -129,11 +126,37 @@ fn compile_logical_graph_from_parts(
         }
     }
 
-    graph.set_event_time(event_time.clone());
-    graph
+    streaming.set_event_time(event_time.clone());
+
+    let request = if execution_mode == ExecutionMode::Request {
+        if let Some(req_src) = &connector_configs.request_source {
+            Some(
+                streaming
+                    .to_request_mode(req_src.clone(), connector_configs.request_sink.clone())
+                    .expect("failed to split request graph"),
+            )
+        } else {
+            println!("Warning: Request mode is without request source - most likely for window operator debug");
+            None
+        }
+    } else {
+        None
+    };
+
+    CompiledPipeline {
+        streaming,
+        request,
+    }
 }
 
-pub fn compile_logical_graph(spec: &PipelineSpec, connector_overrides: Option<&ConnectorConfigs>) -> LogicalGraph {
+/// Streaming write path plus optional request chain (HTTP → WRO → encode).
+#[derive(Debug, Clone)]
+pub struct CompiledPipeline {
+    pub streaming: LogicalGraph,
+    pub request: Option<LogicalGraph>,
+}
+
+pub fn compile_pipeline(spec: &PipelineSpec, connector_overrides: Option<&ConnectorConfigs>) -> CompiledPipeline {
     let sql = spec
         .sql
         .as_ref()
@@ -145,11 +168,11 @@ pub fn compile_logical_graph(spec: &PipelineSpec, connector_overrides: Option<&C
         assert!(
             !spec_connector_configs.sources.is_empty()
                 || spec_connector_configs.request_source.is_some(),
-            "PipelineSpec must contain source/request-source connectors when compile_logical_graph is called without overrides"
+            "PipelineSpec must contain source/request-source connectors when compile_pipeline is called without overrides"
         );
         spec_connector_configs
     };
-    let mut graph = compile_logical_graph_from_parts(
+    let mut compiled = compile_logical_graph_from_parts(
         sql,
         spec.parallelism,
         spec.execution_mode,
@@ -163,8 +186,15 @@ pub fn compile_logical_graph(spec: &PipelineSpec, connector_overrides: Option<&C
         "max_parallelism ({max_p}) must be >= parallelism ({})",
         spec.parallelism
     );
-    graph.set_max_parallelism(max_p);
-    graph
+    compiled.streaming.set_max_parallelism(max_p);
+    if let Some(request) = compiled.request.as_mut() {
+        request.set_max_parallelism(max_p);
+    }
+    compiled
+}
+
+pub fn compile_logical_graph(spec: &PipelineSpec, connector_overrides: Option<&ConnectorConfigs>) -> LogicalGraph {
+    compile_pipeline(spec, connector_overrides).streaming
 }
 
 #[cfg(test)]
@@ -176,8 +206,11 @@ mod tests {
 
     use crate::orchestrator::orchestrator::WorkerNode;
     use crate::orchestrator::task_assignment::TaskWorkerMapping;
-    use super::compile_logical_graph;
-    use crate::api::spec::pipeline::{ConnectorConfigs, PipelineSpecBuilder, ExecutionProfile};
+    use super::{compile_logical_graph, compile_pipeline};
+    use crate::api::spec::pipeline::{ConnectorConfigs, ExecutionMode, PipelineSpecBuilder, ExecutionProfile};
+    use crate::runtime::functions::source::{RequestSourceConfig, RequestSourceSinkSpec};
+    use crate::runtime::operators::operator::OperatorConfig;
+    use crate::runtime::operators::sink::sink_operator::SinkConfig;
     use crate::runtime::operators::source::source_operator::{SourceConfig, VectorSourceConfig};
     use crate::transport::channel::Channel;
 
@@ -270,6 +303,84 @@ mod tests {
             signature1, signature2,
             "execution graph signatures should match for the same PipelineSpec"
         );
+    }
+
+    #[test]
+    fn request_compile_emits_two_graphs() {
+        use arrow::datatypes::TimeUnit;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "event_time",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("key", DataType::Utf8, false),
+            Field::new("value", DataType::Float64, false),
+        ]));
+        let mut connectors = ConnectorConfigs::default();
+        connectors.sources.insert(
+            "events".to_string(),
+            (
+                SourceConfig::VectorSourceConfig(VectorSourceConfig::new(vec![])),
+                schema.clone(),
+            ),
+        );
+        connectors.request_source = Some(SourceConfig::HttpRequestSourceConfig(
+            RequestSourceConfig::new(RequestSourceSinkSpec {
+                bind_address: "127.0.0.1:0".to_string(),
+                max_pending_requests: 8,
+                request_timeout_ms: 1_000,
+                schema_json: None,
+                sink: None,
+            }),
+        ));
+        connectors.request_sink = Some(SinkConfig::RequestSinkConfig);
+
+        let mut spec = PipelineSpecBuilder::new()
+            .with_execution_profile(ExecutionProfile::SingleWorker {
+                num_threads_per_task: 2,
+            })
+            .with_parallelism(2)
+            .sql(
+                "SELECT event_time, key, value,
+                    SUM(value) OVER (
+                        PARTITION BY key
+                        ORDER BY event_time
+                        RANGE BETWEEN INTERVAL '1000' MILLISECOND PRECEDING AND CURRENT ROW
+                    ) as sum_value
+                 FROM events",
+            )
+            .build();
+        spec.execution_mode = ExecutionMode::Request;
+
+        let compiled = compile_pipeline(&spec, Some(&connectors));
+        let request = compiled.request.expect("request graph");
+
+        assert!(compiled
+            .streaming
+            .get_nodes()
+            .all(|n| n.parallelism == 2));
+        assert!(request.get_nodes().all(|n| n.parallelism == 1));
+        assert!(request.http_request_source_config().is_some());
+        assert!(compiled.streaming.get_nodes().all(|n| {
+            !matches!(
+                n.operator_config,
+                OperatorConfig::SourceConfig(SourceConfig::HttpRequestSourceConfig(_))
+                    | OperatorConfig::SinkConfig(SinkConfig::RequestSinkConfig)
+                    | OperatorConfig::WindowRequestConfig(_)
+            )
+        }));
+        let owner = request.get_nodes().find_map(|n| match &n.operator_config {
+            OperatorConfig::WindowRequestConfig(cfg) => cfg.state_owner_operator_id.clone(),
+            _ => None,
+        });
+        let window_id = compiled
+            .streaming
+            .get_nodes()
+            .find(|n| matches!(n.operator_config, OperatorConfig::WindowConfig(_)))
+            .map(|n| n.operator_id.clone());
+        assert_eq!(owner, window_id);
     }
 }
 

@@ -218,19 +218,7 @@ impl Planner {
         
         // println!("{}", logical_plan.display_indent());
 
-        let mut graph = self.logical_plan_to_graph(&logical_plan)?;
-        if self.context.execution_mode == ExecutionMode::Request {
-            // TODO is it an ok logic?
-            if self.context.request_source_config.is_some() {
-                graph.to_request_mode(
-                    self.context.request_source_config.clone().expect("Request source configuration not found"), 
-                    self.context.request_sink_config.clone()
-                ).map_err(|e| DataFusionError::Plan(e))?;
-            } else {
-                // warn that request mode is without request source - most likely for window operator debug
-                println!("Warning: Request mode is without request source - most likely for window operator debug");
-            }
-        }
+        let graph = self.logical_plan_to_graph(&logical_plan)?;
         Ok(graph)
     }
 
@@ -980,13 +968,10 @@ mod tests {
                 sink: None,
             }
         ));
-        // planner.register_source(
-        //     REQUEST_SOURCE_NAME.to_string(), 
-        //     request_source_config, 
-        //     schema.clone()
-        // );
-        // planner.register_sink(SinkConfig::RequestSinkConfig);
-        planner.register_request_source_sink(request_source_config, Some(SinkConfig::RequestSinkConfig));
+        planner.register_request_source_sink(
+            request_source_config.clone(),
+            Some(SinkConfig::RequestSinkConfig),
+        );
         
         // Window query with SUM over a time-based window partitioned by key
         let sql = "SELECT 
@@ -1000,32 +985,49 @@ mod tests {
                     ) as sum_value
                    FROM events";
         
-        let graph = planner.sql_to_graph(sql).unwrap();
-        
-        // Verify structure after conversion
-        let nodes_after: Vec<_> = graph.get_nodes().collect();
-        assert_eq!(nodes_after.len(), 8, "Should have 8 nodes after conversion (original 4 + request_source + keyby + window_request + request_sink)");
-        
-        // Verify edge connectivity using verify_edge_connectivity helper
-        // Expected structure after conversion:
-        //   - source -> keyby -> window (window has no outgoing edges)
-        //   - request_source -> keyby -> window_request -> projection (root)
-        //   - root -> request_sink
-        verify_edge_connectivity(&graph, &[
-            (OperatorKind::Source, OperatorKind::KeyBy, PartitionType::Forward, 2), // original source -> keyby + request_source -> keyby
-            (OperatorKind::KeyBy, OperatorKind::Window, PartitionType::Hash, 1), // original keyby -> window
-            (OperatorKind::KeyBy, OperatorKind::WindowRequest, PartitionType::Hash, 1), // new keyby -> window_request
-            (OperatorKind::WindowRequest, OperatorKind::Projection, PartitionType::Forward, 1), // window_request -> projection
-            (OperatorKind::Projection, OperatorKind::Sink, PartitionType::RequestRoute, 1), // root -> request_sink (uses RequestRoute partition type)
-        ]);
+        let mut streaming = planner.sql_to_graph(sql).unwrap();
+        let request = streaming
+            .to_request_mode(request_source_config, Some(SinkConfig::RequestSinkConfig))
+            .unwrap();
 
-        // Verify window node has no outgoing edges
-        let window_node = nodes_after.iter()
+        let streaming_nodes: Vec<_> = streaming.get_nodes().collect();
+        assert_eq!(
+            streaming_nodes.len(),
+            3,
+            "streaming: source, keyby, window"
+        );
+        verify_edge_connectivity(&streaming, &[
+            (OperatorKind::Source, OperatorKind::KeyBy, PartitionType::Forward, 1),
+            (OperatorKind::KeyBy, OperatorKind::Window, PartitionType::Hash, 1),
+        ]);
+        let window_node = streaming_nodes
+            .iter()
             .find(|n| matches!(n.operator_config, OperatorConfig::WindowConfig(_)))
             .expect("Should have window node");
-        let window_node_idx = graph.get_node_index(&window_node.operator_id)
+        let window_node_idx = streaming
+            .get_node_index(&window_node.operator_id)
             .expect("Should find window node index");
-        let outgoing_after = graph.get_neighbors(window_node_idx, Direction::Outgoing);
+        let outgoing_after = streaming.get_neighbors(window_node_idx, Direction::Outgoing);
         assert_eq!(outgoing_after.len(), 0, "Window should have no outgoing edges after conversion");
+        assert!(streaming_nodes.iter().all(|n| n.parallelism >= 1));
+
+        let request_nodes: Vec<_> = request.get_nodes().collect();
+        assert_eq!(
+            request_nodes.len(),
+            5,
+            "request: http source, keyby, window_request, projection, request sink"
+        );
+        assert!(request_nodes.iter().all(|n| n.parallelism == 1));
+        verify_edge_connectivity(&request, &[
+            (OperatorKind::Source, OperatorKind::KeyBy, PartitionType::Forward, 1),
+            (OperatorKind::KeyBy, OperatorKind::WindowRequest, PartitionType::Hash, 1),
+            (OperatorKind::WindowRequest, OperatorKind::Projection, PartitionType::Forward, 1),
+            (OperatorKind::Projection, OperatorKind::Sink, PartitionType::RequestRoute, 1),
+        ]);
+        let owner = request_nodes.iter().find_map(|n| match &n.operator_config {
+            OperatorConfig::WindowRequestConfig(cfg) => cfg.state_owner_operator_id.clone(),
+            _ => None,
+        });
+        assert_eq!(owner.as_deref(), Some(window_node.operator_id.as_str()));
     }
 } 

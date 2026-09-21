@@ -106,7 +106,6 @@ impl WindowRequestOperator {
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn set_state_with_store_and_ns(
         &mut self,
         store: Arc<dyn WindowRequestStore>,

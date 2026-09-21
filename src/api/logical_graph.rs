@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::fmt;
 use std::time::Duration;
@@ -200,6 +200,13 @@ impl LogicalGraph {
         self.graph.node_weights()
     }
 
+    pub fn http_request_source_config(&self) -> Option<&crate::runtime::functions::source::RequestSourceConfig> {
+        self.graph.node_weights().find_map(|node| match &node.operator_config {
+            OperatorConfig::SourceConfig(SourceConfig::HttpRequestSourceConfig(config)) => Some(config),
+            _ => None,
+        })
+    }
+
     pub fn get_edges(&self) -> impl Iterator<Item = (NodeIndex, NodeIndex, &LogicalEdge)> {
         self.graph.edge_references().map(|edge| (edge.source(), edge.target(), edge.weight()))
     }
@@ -358,13 +365,11 @@ impl LogicalGraph {
         logical_graph
     }
 
-    /// Convert logical graph to request mode by:
-    /// 1. Finding the top-level window operator (closest to root)
-    /// 2. Creating a window_request operator node
-    /// 3. Adding request_source -> keyby -> window_request chain before window_request
-    /// 4. Moving followers of window operator to window_request operator
-    /// 5. Adding request sink as the final node in the chain from window_request
-    pub fn to_request_mode(&mut self, mut source_config: SourceConfig, sink_config: Option<SinkConfig>) -> Result<(), String> {
+    /// Split the write path from the read path.
+    ///
+    /// `self` keeps the streaming component (WO `StateOnly`, no outgoing). Returns a
+    /// separate request chain (HTTP → … → WRO → followers) with operator parallelism 1.
+    pub fn to_request_mode(&mut self, mut source_config: SourceConfig, sink_config: Option<SinkConfig>) -> Result<LogicalGraph, String> {
         // Step 1: Find all window operators
         let mut window_nodes = Vec::new();
         
@@ -496,8 +501,102 @@ impl LogicalGraph {
             // Connect root to request sink
             self.add_edge(root_node, request_sink_idx);
         }
-        
-        Ok(())
+
+        Ok(self.split_off_request_component())
+    }
+
+    fn is_http_request_source(node: &LogicalNode) -> bool {
+        matches!(
+            node.operator_config,
+            OperatorConfig::SourceConfig(SourceConfig::HttpRequestSourceConfig(_))
+        )
+    }
+
+    /// Directed closure from the HTTP source, copied at parallelism 1, then removed from `self`.
+    fn split_off_request_component(&mut self) -> LogicalGraph {
+        let start = self
+            .graph
+            .node_indices()
+            .find(|&idx| Self::is_http_request_source(&self.graph[idx]))
+            .expect("to_request_mode must create an HTTP request source");
+
+        let mut request_idx = HashSet::new();
+        let mut stack = vec![start];
+        while let Some(idx) = stack.pop() {
+            if !request_idx.insert(idx) {
+                continue;
+            }
+            stack.extend(self.graph.neighbors_directed(idx, Direction::Outgoing));
+        }
+
+        let mixed = self.clone();
+
+        let mut request = LogicalGraph::new();
+        request.watermarks_enabled = mixed.watermarks_enabled;
+        request.event_time = mixed.event_time.clone();
+        request.emit_interval = mixed.emit_interval;
+        request.max_parallelism = mixed.max_parallelism;
+
+        let mut id_to_new = HashMap::new();
+        for idx in mixed.graph.node_indices() {
+            if !request_idx.contains(&idx) {
+                continue;
+            }
+            let mut node = mixed.graph[idx].clone();
+            node.parallelism = 1;
+            let new_idx = request.graph.add_node(node);
+            id_to_new.insert(request.graph[new_idx].operator_id.clone(), new_idx);
+        }
+        for edge in mixed.graph.edge_references() {
+            if !request_idx.contains(&edge.source()) || !request_idx.contains(&edge.target()) {
+                continue;
+            }
+            let src = mixed.graph[edge.source()].operator_id.clone();
+            let tgt = mixed.graph[edge.target()].operator_id.clone();
+            request.add_edge(id_to_new[&src], id_to_new[&tgt]);
+        }
+        if let Some(root) = mixed.root_node_index {
+            if request_idx.contains(&root) {
+                let id = mixed.graph[root].operator_id.clone();
+                request.root_node_index = Some(id_to_new[&id]);
+            }
+        }
+
+        let mut streaming = LogicalGraph::new();
+        streaming.watermarks_enabled = mixed.watermarks_enabled;
+        streaming.event_time = mixed.event_time.clone();
+        streaming.emit_interval = mixed.emit_interval;
+        streaming.max_parallelism = mixed.max_parallelism;
+        streaming.operator_type_counters = mixed.operator_type_counters.clone();
+
+        let mut streaming_ids = HashMap::new();
+        for idx in mixed.graph.node_indices() {
+            if request_idx.contains(&idx) {
+                continue;
+            }
+            let node = mixed.graph[idx].clone();
+            let new_idx = streaming.graph.add_node(node);
+            streaming_ids.insert(streaming.graph[new_idx].operator_id.clone(), new_idx);
+        }
+        for edge in mixed.graph.edge_references() {
+            if request_idx.contains(&edge.source()) || request_idx.contains(&edge.target()) {
+                continue;
+            }
+            let src = mixed.graph[edge.source()].operator_id.clone();
+            let tgt = mixed.graph[edge.target()].operator_id.clone();
+            streaming.add_edge(streaming_ids[&src], streaming_ids[&tgt]);
+        }
+        if let Some(window) = streaming.graph.node_indices().find(|&idx| {
+            matches!(
+                streaming.graph[idx].operator_config,
+                OperatorConfig::WindowConfig(_)
+            )
+        }) {
+            streaming.root_node_index = Some(window);
+        }
+
+        *self = streaming;
+        request
     }
     
     /// Generate DOT format string

@@ -12,7 +12,7 @@ pub use logical_graph::{
 
 pub use planner::{Planner, PlanningContext};
 // pub use pipeline_context::PipelineContext;
-pub use compiler::compile_logical_graph;
+pub use compiler::{compile_logical_graph, compile_pipeline, CompiledPipeline};
 pub use spec::kube::KubePipelineSpec;
 pub use spec::event_time::{EventTimeSpec, WatermarkSpec, WindowEventTimeSpec};
 pub use spec::pipeline::{ConnectorConfigs, ExecutionMode, ExecutionProfile, PipelineSpec, PipelineSpecBuilder};

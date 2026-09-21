@@ -1,11 +1,10 @@
 use crate::{
     api::{
-        logical_graph::LogicalGraph, spec::pipeline::ExecutionProfile, PipelineSpecBuilder,
-        Planner, PlanningContext,
+        logical_graph::LogicalGraph, Planner, PlanningContext,
     },
     common::ports::gen_unique_grpc_port,
+    common::types::PipelineId,
     test_utils::common::IdentityMapFunction,
-    test_utils::pipeline_exec,
     runtime::{
         functions::{
             key_by::{key_by_function::extract_datafusion_window_exec, KeyByFunction},
@@ -16,6 +15,7 @@ use crate::{
             operator::OperatorConfig, sink::sink_operator::SinkConfig,
             source::source_operator::SourceConfig,
         },
+        request::{RequestExecutor, RequestExecutorOptions},
     },
 };
 use arrow::datatypes::{DataType, Field, Schema};
@@ -348,7 +348,6 @@ async fn test_request_source_sink_e2e() {
     let window_exec = extract_datafusion_window_exec(sql, &mut planner).await;
 
     // Create pipeline operators
-    let parallelism = 4; // Test with parallelism > 1
     let operators = vec![
         OperatorConfig::SourceConfig(SourceConfig::HttpRequestSourceConfig(config)),
         OperatorConfig::KeyByConfig(KeyByFunction::new_window(window_exec)),
@@ -356,26 +355,17 @@ async fn test_request_source_sink_e2e() {
         OperatorConfig::SinkConfig(SinkConfig::RequestSinkConfig),
     ];
 
-    // Create logical graph (one vertex per operator; chaining is not wired).
-    let logical_graph = LogicalGraph::from_linear_operators(operators, parallelism);
+    let logical_graph = LogicalGraph::from_linear_operators(operators, 1);
+    let mut executor = RequestExecutor::start(
+        logical_graph,
+        RequestExecutorOptions {
+            pipeline_id: PipelineId("request-source-e2e".to_string()),
+            wro_store: None,
+        },
+    )
+    .await
+    .expect("start request executor");
 
-    // Build PipelineSpec with runtime knobs; logical graph is passed separately to executor.
-    let spec = PipelineSpecBuilder::new()
-        .with_parallelism(parallelism)
-        .with_execution_profile(ExecutionProfile::SingleWorker {
-            num_threads_per_task: 4,
-        })
-        .build();
-
-    // Start pipeline execution in background
-    // TODO implement stop
-    let _pipeline_handle = tokio::spawn(async move {
-        pipeline_exec::execute(spec, logical_graph)
-            .await
-            .unwrap();
-    });
-
-    // Wait for server to start
     sleep(Duration::from_millis(200)).await;
 
     // Create test client
@@ -529,5 +519,5 @@ async fn test_request_source_sink_e2e() {
         "Should have at least some successful requests"
     );
 
-    // TODO - implement stop and stop the pipeline
+    executor.stop().await;
 }
