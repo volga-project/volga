@@ -83,3 +83,36 @@ pub fn increment_pipeline_counter(name: &'static str, delta: u64, pipeline_id: &
     counter!(name, LABEL_PIPELINE_ID => pipeline_id.to_string()).increment(delta);
 }
 
+/// Increment a worker-scoped counter (request handler / process-level).
+pub fn increment_worker_counter(name: &'static str, delta: u64, labels: &MetricsLabels) {
+    if delta == 0 {
+        return;
+    }
+    counter!(
+        name,
+        LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
+        LABEL_WORKER_ID => labels.worker_id.clone(),
+    )
+    .increment(delta);
+}
+
+/// Set a worker-scoped gauge.
+pub fn set_worker_gauge(name: &'static str, value: f64, labels: &MetricsLabels) {
+    gauge!(
+        name,
+        LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
+        LABEL_WORKER_ID => labels.worker_id.clone(),
+    )
+    .set(value);
+}
+
+/// Record a worker-scoped histogram sample.
+pub fn record_worker_histogram(name: &'static str, value: f64, labels: &MetricsLabels) {
+    histogram!(
+        name,
+        LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
+        LABEL_WORKER_ID => labels.worker_id.clone(),
+    )
+    .record(value);
+}
+

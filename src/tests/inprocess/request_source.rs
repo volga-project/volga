@@ -335,6 +335,7 @@ async fn test_request_source_sink_e2e() {
         chain,
         RequestExecutorOptions {
             pipeline_id: PipelineId("request-source-e2e".to_string()),
+            worker_id: "request-executor".to_string(),
             wro_store: None,
             bind_address: Some(bind_address.clone()),
         },

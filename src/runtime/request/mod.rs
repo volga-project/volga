@@ -1,7 +1,8 @@
 //! In-process request graph: one HTTP request runs the whole operator graph in one task.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use arrow::compute::concat_batches;
@@ -16,6 +17,12 @@ use crate::api::{LogicalGraph, RequestGraph};
 use crate::common::message::Message;
 use crate::common::types::PipelineId;
 use crate::runtime::functions::source::json_utils::{json_to_record_batch, record_batch_to_json};
+use crate::runtime::metrics::{
+    increment_worker_counter, record_worker_histogram, set_worker_gauge, MetricsLabels,
+    METRIC_REQUEST_ACCEPTED, METRIC_REQUEST_COMPLETED, METRIC_REQUEST_FAILED,
+    METRIC_REQUEST_HANDLER_MS, METRIC_REQUEST_IN_FLIGHT, METRIC_REQUEST_REJECTED_429,
+    METRIC_REQUEST_SEMAPHORE_UTILIZATION, METRIC_REQUEST_TIMEOUT,
+};
 use crate::runtime::operators::operator::{
     create_operator, Operator, OperatorConfig, StreamOperator, VecOutput,
 };
@@ -55,8 +62,71 @@ pub struct RequestExecutor {
 
 pub struct RequestExecutorOptions {
     pub pipeline_id: PipelineId,
+    pub worker_id: String,
     pub wro_store: Option<(Arc<dyn WindowRequestStore>, StateNamespace)>,
     pub bind_address: Option<String>,
+}
+
+#[derive(Clone)]
+struct RequestMetrics {
+    labels: MetricsLabels,
+    max_pending: usize,
+    in_flight: Arc<AtomicUsize>,
+}
+
+impl RequestMetrics {
+    fn new(pipeline_id: &PipelineId, worker_id: String, max_pending: usize) -> Self {
+        Self {
+            labels: MetricsLabels {
+                pipeline_id: pipeline_id.0.clone(),
+                worker_id,
+            },
+            max_pending: max_pending.max(1),
+            in_flight: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn set_in_flight(&self, n: usize) {
+        set_worker_gauge(METRIC_REQUEST_IN_FLIGHT, n as f64, &self.labels);
+        set_worker_gauge(
+            METRIC_REQUEST_SEMAPHORE_UTILIZATION,
+            n as f64 / self.max_pending as f64,
+            &self.labels,
+        );
+    }
+
+    fn reject_429(&self) {
+        increment_worker_counter(METRIC_REQUEST_REJECTED_429, 1, &self.labels);
+    }
+
+    fn begin(&self) {
+        increment_worker_counter(METRIC_REQUEST_ACCEPTED, 1, &self.labels);
+        let n = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+        self.set_in_flight(n);
+    }
+
+    fn finish(&self, outcome: RequestOutcome, elapsed_ms: f64) {
+        let n = self.in_flight.fetch_sub(1, Ordering::SeqCst).saturating_sub(1);
+        self.set_in_flight(n);
+        record_worker_histogram(METRIC_REQUEST_HANDLER_MS, elapsed_ms, &self.labels);
+        match outcome {
+            RequestOutcome::Completed => {
+                increment_worker_counter(METRIC_REQUEST_COMPLETED, 1, &self.labels);
+            }
+            RequestOutcome::Timeout => {
+                increment_worker_counter(METRIC_REQUEST_TIMEOUT, 1, &self.labels);
+            }
+            RequestOutcome::Failed => {
+                increment_worker_counter(METRIC_REQUEST_FAILED, 1, &self.labels);
+            }
+        }
+    }
+}
+
+enum RequestOutcome {
+    Completed,
+    Timeout,
+    Failed,
 }
 
 impl RequestExecutor {
@@ -80,7 +150,12 @@ impl RequestExecutor {
             worker: Some(worker),
             server: None,
         };
-        exec.bind_http(schema, timeout_ms, max_pending).await?;
+        let metrics = RequestMetrics::new(
+            &options.pipeline_id,
+            options.worker_id.clone(),
+            max_pending,
+        );
+        exec.bind_http(schema, timeout_ms, max_pending, metrics).await?;
         Ok(exec)
     }
 
@@ -102,6 +177,7 @@ impl RequestExecutor {
         schema: SchemaRef,
         timeout_ms: u64,
         max_pending: usize,
+        metrics: RequestMetrics,
     ) -> Result<()> {
         let bind_address = self.bind_address.clone();
         let work_tx = self.work_tx.clone();
@@ -115,6 +191,7 @@ impl RequestExecutor {
                     schema.clone(),
                     semaphore.clone(),
                     timeout_ms,
+                    metrics.clone(),
                     payload,
                 )
             }),
@@ -146,9 +223,11 @@ async fn handle_request(
     schema: SchemaRef,
     semaphore: Arc<Semaphore>,
     timeout_ms: u64,
+    metrics: RequestMetrics,
     Json(payload): Json<RequestPayload>,
 ) -> Result<Json<ResponsePayload>, StatusCode> {
     let Ok(_permit) = semaphore.try_acquire() else {
+        metrics.reject_429();
         return Err(StatusCode::TOO_MANY_REQUESTS);
     };
 
@@ -161,8 +240,11 @@ async fn handle_request(
     };
     let batch = json_to_record_batch(&payload_array, schema).map_err(|_| StatusCode::BAD_REQUEST)?;
 
+    metrics.begin();
+    let started = Instant::now();
     let (reply, rx) = oneshot::channel();
     if work_tx.send(WorkItem { batch, reply }).await.is_err() {
+        metrics.finish(RequestOutcome::Failed, started.elapsed().as_secs_f64() * 1000.0);
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
     }
 
@@ -170,10 +252,17 @@ async fn handle_request(
         Ok(Ok(Ok(result))) => {
             let data =
                 record_batch_to_json(&result).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            metrics.finish(RequestOutcome::Completed, started.elapsed().as_secs_f64() * 1000.0);
             Ok(Json(ResponsePayload { data }))
         }
-        Ok(Ok(Err(_))) | Ok(Err(_)) => Err(StatusCode::INTERNAL_SERVER_ERROR),
-        Err(_) => Err(StatusCode::REQUEST_TIMEOUT),
+        Ok(Ok(Err(_))) | Ok(Err(_)) => {
+            metrics.finish(RequestOutcome::Failed, started.elapsed().as_secs_f64() * 1000.0);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+        Err(_) => {
+            metrics.finish(RequestOutcome::Timeout, started.elapsed().as_secs_f64() * 1000.0);
+            Err(StatusCode::REQUEST_TIMEOUT)
+        }
     }
 }
 
