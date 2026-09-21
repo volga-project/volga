@@ -66,6 +66,10 @@ impl Master {
         MasterState::checkpointable_tasks_for_graph(execution_graph)
     }
 
+    pub fn alignable_tasks_for_graph(execution_graph: &ExecutionGraph) -> Vec<TaskKey> {
+        MasterState::alignable_tasks_for_graph(execution_graph)
+    }
+
     pub async fn configure(&self, config: MasterConfig) {
         self.state.configure(config).await;
     }

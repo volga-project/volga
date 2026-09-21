@@ -55,7 +55,7 @@ pub enum CheckpointAckReject {
 pub(super) struct Checkpoints {
     /// Tasks that must report operator checkpoint data.
     expected_acks: HashSet<TaskKey>,
-    /// All tasks that must report barrier progress (Injected or Aligned).
+    /// Tasks a barrier can reach (downstream of checkpointable sources).
     expected_aligns: HashSet<TaskKey>,
     /// Max completed checkpoints to keep. Always ≥ 1.
     retention: usize,

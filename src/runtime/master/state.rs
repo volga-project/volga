@@ -20,7 +20,9 @@ use crate::runtime::metrics::{
     METRIC_CHECKPOINT_DURATION_MS, METRIC_CHECKPOINT_FAILED,
 };
 use crate::runtime::observability::snapshot_types::PipelineSnapshot;
-use crate::runtime::operators::operator::operator_config_requires_checkpoint;
+use crate::runtime::operators::operator::{
+    operator_config_requires_checkpoint, OperatorType,
+};
 
 use super::attempt::ExecutionAttempt;
 use super::checkpoint::{
@@ -241,17 +243,51 @@ impl MasterState {
             .collect()
     }
 
+    /// Tasks a barrier can reach: the downstream closure of checkpointable sources.
+    ///
+    /// Request-mode read-path vertices (HTTP source, WRO, request sink) sit in a
+    /// disjoint component and never see a barrier (#301).
+    pub(super) fn alignable_tasks_for_graph(execution_graph: &ExecutionGraph) -> Vec<TaskKey> {
+        let mut pending: Vec<crate::runtime::VertexId> = execution_graph
+            .get_vertices()
+            .values()
+            .filter(|vertex| {
+                operator_config_requires_checkpoint(&vertex.operator_config)
+                    && vertex.operator_config.role() == OperatorType::Source
+            })
+            .map(|vertex| vertex.vertex_id.clone())
+            .collect();
+
+        let mut reachable: HashSet<crate::runtime::VertexId> =
+            pending.iter().cloned().collect();
+        while let Some(vertex_id) = pending.pop() {
+            let Some((_, outputs)) = execution_graph.get_edges_for_vertex(vertex_id.as_ref()) else {
+                continue;
+            };
+            for edge in outputs {
+                if reachable.insert(edge.target_vertex_id.clone()) {
+                    pending.push(edge.target_vertex_id.clone());
+                }
+            }
+        }
+
+        execution_graph
+            .get_vertices()
+            .values()
+            .filter(|vertex| reachable.contains(&vertex.vertex_id))
+            .map(|vertex| TaskKey {
+                vertex_id: vertex.vertex_id.as_ref().to_string(),
+                task_index: vertex.task_index,
+            })
+            .collect()
+    }
+
     pub(super) async fn configure(&self, config: MasterConfig) {
         let pipeline_id = PipelineId(self.orchestrator.get_pipeline_id().await);
         let checkpoint_store = create_checkpoint_store(&config.spec.state.checkpoint_store);
         let expected_acks = Self::checkpointable_tasks_for_graph(&config.execution_graph);
-        let expected_aligns = config
-            .execution_graph
-            .all_tasks()
-            .map(|(vertex_id, task_index)| TaskKey {
-                vertex_id: vertex_id.as_ref().to_string(),
-                task_index,
-            })
+        let expected_aligns = Self::alignable_tasks_for_graph(&config.execution_graph)
+            .into_iter()
             .collect();
         let retention = config.spec.state.checkpoint.retention().max(1);
         self.checkpoints
@@ -561,5 +597,135 @@ impl MasterState {
         })
         .await;
         self.orchestrator.request_replacement(worker_ids).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+    use std::sync::Arc;
+
+    use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+    use datafusion::prelude::SessionContext;
+
+    use crate::api::planner::{Planner, PlanningContext};
+    use crate::api::ExecutionMode;
+    use crate::runtime::functions::source::datagen_source::{DatagenSourceConfig, DatagenSpec};
+    use crate::runtime::functions::source::RequestSourceSinkSpec;
+    use crate::runtime::operators::operator::OperatorConfig;
+    use crate::runtime::operators::sink::sink_operator::SinkConfig;
+    use crate::runtime::operators::source::source_operator::SourceConfig;
+
+    const WINDOW_SQL: &str = "SELECT
+            event_time,
+            key,
+            value,
+            SUM(value) OVER (
+                PARTITION BY key
+                ORDER BY event_time
+                RANGE BETWEEN INTERVAL '1000' MILLISECOND PRECEDING AND CURRENT ROW
+            ) as sum_value
+        FROM events";
+
+    fn window_graph(mode: ExecutionMode) -> ExecutionGraph {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "event_time",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("key", DataType::Utf8, false),
+            Field::new("value", DataType::Float64, false),
+        ]));
+        let datagen = DatagenSourceConfig::new(
+            schema.clone(),
+            DatagenSpec {
+                rate: Some(1.0),
+                limit: None,
+                run_for_s: Some(1.0),
+                batch_size: 1,
+                fields: HashMap::new(),
+                replayable: true,
+            },
+        );
+        let mut planner = Planner::new(
+            PlanningContext::new(SessionContext::new())
+                .with_parallelism(2)
+                .with_execution_mode(mode),
+        );
+        planner.register_source(
+            "events".to_string(),
+            SourceConfig::DatagenSourceConfig(datagen),
+            schema,
+        );
+        if mode == ExecutionMode::Request {
+            planner.register_request_source_sink(
+                SourceConfig::HttpRequestSourceConfig(
+                    crate::runtime::functions::source::RequestSourceConfig::new(
+                        RequestSourceSinkSpec {
+                            bind_address: "127.0.0.1:0".to_string(),
+                            max_pending_requests: 8,
+                            request_timeout_ms: 1_000,
+                            schema_json: None,
+                            sink: None,
+                        },
+                    ),
+                ),
+                Some(SinkConfig::RequestSinkConfig),
+            );
+        }
+        planner.sql_to_graph(WINDOW_SQL).unwrap().to_execution_graph()
+    }
+
+    fn task_keys(tasks: Vec<TaskKey>) -> HashSet<String> {
+        tasks.into_iter().map(|t| t.vertex_id).collect()
+    }
+
+    fn is_request_io(config: &OperatorConfig) -> bool {
+        matches!(
+            config,
+            OperatorConfig::SourceConfig(SourceConfig::HttpRequestSourceConfig(_))
+                | OperatorConfig::SinkConfig(SinkConfig::RequestSinkConfig)
+                | OperatorConfig::WindowRequestConfig(_)
+        )
+    }
+
+    #[test]
+    fn streaming_align_set_is_the_whole_graph() {
+        let graph = window_graph(ExecutionMode::Streaming);
+        let all: HashSet<_> = graph
+            .all_tasks()
+            .map(|(id, _)| id.as_ref().to_string())
+            .collect();
+        let aligns = task_keys(MasterState::alignable_tasks_for_graph(&graph));
+        let acks = task_keys(MasterState::checkpointable_tasks_for_graph(&graph));
+        assert_eq!(aligns, all);
+        assert!(acks.is_subset(&aligns));
+        assert!(!acks.is_empty());
+    }
+
+    #[test]
+    fn request_mode_align_set_excludes_read_path() {
+        let graph = window_graph(ExecutionMode::Request);
+        let all: HashSet<_> = graph
+            .all_tasks()
+            .map(|(id, _)| id.as_ref().to_string())
+            .collect();
+        let aligns = task_keys(MasterState::alignable_tasks_for_graph(&graph));
+        let acks = task_keys(MasterState::checkpointable_tasks_for_graph(&graph));
+
+        let request_vertices: HashSet<_> = graph
+            .get_vertices()
+            .values()
+            .filter(|v| is_request_io(&v.operator_config))
+            .map(|v| v.vertex_id.as_ref().to_string())
+            .collect();
+        assert!(!request_vertices.is_empty());
+        assert!(request_vertices.is_disjoint(&aligns));
+        assert!(aligns.is_subset(&all));
+        assert!(aligns.len() < all.len());
+        assert!(acks.is_subset(&aligns));
+        assert!(!acks.is_empty());
     }
 }
