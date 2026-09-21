@@ -15,11 +15,12 @@ use crate::common::grpc::spawn_with_shutdown;
 use crate::common::grpc::worker::worker_server;
 use crate::common::grpc::GrpcServeHandle;
 use crate::common::types::PipelineId;
-use crate::orchestrator::orchestrator::WorkerOrchestrator;
+use crate::orchestrator::orchestrator::{WorkerOrchestrator, WorkerRole};
 use crate::runtime::checkpoint::{SerializedRestore, TaskKey};
 use crate::runtime::consts::{
     runtime_consts, WORKER_HEARTBEAT_MASTER_SILENCE_TIMEOUT, WORKER_HEARTBEAT_SEND_INTERVAL,
 };
+use crate::runtime::execution_graph::ExecutionGraph;
 use crate::runtime::health::WorkerFatalReason;
 use crate::runtime::operators::operator::operator_config_requires_checkpoint;
 use crate::runtime::worker::{
@@ -29,6 +30,7 @@ use crate::runtime::worker::{
 use crate::runtime::worker_config_utils::{
     build_execution_graph, resolve_num_threads_per_task, WorkerInitPayload,
 };
+use crate::api::compile_pipeline;
 
 /// Re-export generated stubs (single include lives in `common::grpc::stubs`).
 pub use crate::common::grpc::stubs::worker_service;
@@ -93,6 +95,45 @@ impl WorkerService for WorkerServiceImpl {
             })?;
         let spec = payload.pipeline_spec.clone();
         spec.validate().map_err(Status::invalid_argument)?;
+        let num_threads_per_task = resolve_num_threads_per_task(&spec).max(1);
+        let master_addr = self.orchestrator.get_master_service_addr().await;
+
+        if payload.role == WorkerRole::Request {
+            let bind_address = payload.request_bind_address.clone().or_else(|| {
+                std::env::var("VOLGA_REQUEST_BIND_ADDR").ok()
+            });
+            let request_graph = compile_pipeline(&spec, None).request.ok_or_else(|| {
+                Status::invalid_argument("request worker configure: spec has no request graph")
+            })?;
+            let mut worker_config = WorkerConfig::new(
+                payload.worker_id,
+                PipelineId(payload.pipeline_id),
+                ExecutionGraph::new(),
+                Vec::new(),
+                1,
+            );
+            worker_config.role = WorkerRole::Request;
+            worker_config.request_graph = Some(request_graph);
+            worker_config.request_bind_address = bind_address;
+            worker_config.execution_attempt_id = 0;
+            if !master_addr.is_empty() {
+                worker_config.master_addr = Some(master_addr);
+            }
+            worker_config = worker_config.with_state_spec(&spec.state);
+            self.worker
+                .ask(Configure(worker_config))
+                .await
+                .map_err(|e| match e {
+                    kameo::error::SendError::HandlerError(msg) => Status::failed_precondition(msg),
+                    other => Status::internal(format!("configure ask failed: {other:?}")),
+                })?;
+            return Ok(Response::new(ConfigureWorkerResponse {
+                success: true,
+                error_message: String::new(),
+                execution_graph_signature: "request".to_string(),
+            }));
+        }
+
         let execution_graph = build_execution_graph(&spec, &payload.task_worker_mapping);
         let execution_graph_signature = execution_graph.signature();
 
@@ -139,18 +180,15 @@ impl WorkerService for WorkerServiceImpl {
             )));
         }
 
-        let num_threads_per_task = resolve_num_threads_per_task(&spec);
-
         let mut worker_config = WorkerConfig::new(
             payload.worker_id,
             PipelineId(payload.pipeline_id),
             execution_graph,
             vertex_ids,
-            num_threads_per_task.max(1),
+            num_threads_per_task,
         );
         worker_config.execution_attempt_id = execution_attempt_id;
         worker_config.task_restore_data = task_restore_data;
-        let master_addr = self.orchestrator.get_master_service_addr().await;
         if !master_addr.is_empty() {
             worker_config.master_addr = Some(master_addr);
         }

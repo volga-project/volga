@@ -88,6 +88,8 @@ pub enum FaultAction {
 pub struct PipelineLaunchSpec {
     pub pipeline: PipelineSpec,
     pub worker_count: usize,
+    /// Request-worker replica count. Default 0 (streaming-only jobs).
+    pub request_worker_count: usize,
     /// `None` when the run does not wait on sink row count (`wait_for_completion`).
     pub expected_output_rows: Option<usize>,
     /// Kube only: sets `volga.io/kube-worker-health-poll` on the pipeline CR.
@@ -106,6 +108,7 @@ impl PipelineLaunchSpec {
         Self {
             pipeline,
             worker_count,
+            request_worker_count: 0,
             expected_output_rows,
             kube_worker_health_poll: true,
             runtime_consts_profile: RuntimeConstsProfile::KubeTest,
@@ -119,6 +122,11 @@ impl PipelineLaunchSpec {
 
     pub fn with_runtime_consts_profile(mut self, profile: RuntimeConstsProfile) -> Self {
         self.runtime_consts_profile = profile;
+        self
+    }
+
+    pub fn with_request_worker_count(mut self, request_worker_count: usize) -> Self {
+        self.request_worker_count = request_worker_count;
         self
     }
 

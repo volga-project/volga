@@ -16,6 +16,7 @@ use super::attempt::{
     ScheduleError,
 };
 use super::events::LifecycleEvent;
+use super::request_pool::{self, RequestPool};
 use super::state::{MasterState, PipelineContext};
 use crate::runtime::consts::{runtime_consts, MASTER_RECOVERY_BUDGET};
 
@@ -34,6 +35,7 @@ pub(super) struct MasterLifecycle {
     attempt_id: u64,
     restore_checkpoint_id: Option<u64>,
     current: Option<ActorRef<ExecutionAttempt>>,
+    request_pool: Option<ActorRef<RequestPool>>,
 }
 
 pub(super) struct Start(pub PipelineContext);
@@ -56,16 +58,40 @@ impl MasterLifecycle {
             attempt_id: 0,
             restore_checkpoint_id: None,
             current: None,
+            request_pool: None,
         })
     }
 
-    fn complete_execute(&mut self, result: Result<(), String>) {
+    async fn complete_execute(&mut self, result: Result<(), String>) {
+        if let Some(pool) = self.request_pool.take() {
+            let _ = pool.ask(request_pool::Shutdown).await;
+            let _ = pool.stop_gracefully().await;
+        }
         if let Some(reply) = self.execute_reply.take() {
             reply.send(result);
         }
         self.pipeline = None;
         self.current = None;
         self.intent = PipelineIntent::Run;
+    }
+
+    async fn start_request_pool(&mut self) -> Result<(), String> {
+        let pipeline = self
+            .pipeline
+            .clone()
+            .ok_or_else(|| "lifecycle has no pipeline".to_string())?;
+        if pipeline.expected_request_workers == 0 {
+            return Ok(());
+        }
+        let pool = RequestPool::spawn(self.state.clone(), pipeline);
+        pool.ask(request_pool::Start)
+            .await
+            .map_err(|error| match error {
+                kameo::error::SendError::HandlerError(msg) => msg,
+                other => other.to_string(),
+            })?;
+        self.request_pool = Some(pool);
+        Ok(())
     }
 
     async fn try_drain(&self) {
@@ -251,10 +277,15 @@ impl Message<Start> for MasterLifecycle {
         self.attempt_id = 0;
         self.restore_checkpoint_id = None;
         self.current = None;
+        self.request_pool = None;
 
+        if let Err(error) = self.start_request_pool().await {
+            self.complete_execute(Err(error)).await;
+            return delegated;
+        }
         match self.start_attempt(ctx.actor_ref()).await {
             Ok(()) => {}
-            Err(error) => self.complete_execute(Err(error)),
+            Err(error) => self.complete_execute(Err(error)).await,
         }
         delegated
     }
@@ -292,10 +323,10 @@ impl Message<RunComplete> for MasterLifecycle {
             Ok(()) => {
                 // Recover path may have started another attempt (execute_reply still set).
                 if self.current.is_none() {
-                    self.complete_execute(Ok(()));
+                    self.complete_execute(Ok(())).await;
                 }
             }
-            Err(error) => self.complete_execute(Err(error)),
+            Err(error) => self.complete_execute(Err(error)).await,
         }
     }
 }

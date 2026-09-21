@@ -16,7 +16,7 @@ use super::state::{MasterState, PipelineContext};
 
 mod execute;
 mod schedule;
-mod session;
+pub(super) mod session;
 mod teardown;
 
 use session::WorkerSession;

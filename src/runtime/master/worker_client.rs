@@ -7,6 +7,7 @@ use tonic::Code;
 use crate::api::PipelineSpec;
 use crate::common::failure::FailureEvent;
 use crate::common::grpc::worker::{master_to_worker, worker_client};
+use crate::orchestrator::orchestrator::WorkerRole;
 use crate::orchestrator::task_assignment::TaskWorkerMapping;
 use crate::runtime::checkpoint::{SerializedRestore, TaskKey};
 use crate::runtime::observability::snapshot_types::WorkerSnapshot;
@@ -163,6 +164,8 @@ impl WorkerClient {
         task_worker_mapping: TaskWorkerMapping,
         task_restore_data: Vec<(TaskKey, SerializedRestore)>,
         restoring: bool,
+        role: WorkerRole,
+        request_bind_address: Option<String>,
     ) -> Result<String, WorkerCallError> {
         let payload = WorkerInitPayload {
             worker_id: worker_id.clone(),
@@ -170,6 +173,8 @@ impl WorkerClient {
             pipeline_spec: spec,
             vertex_ids,
             task_worker_mapping,
+            role,
+            request_bind_address,
         };
         let init_payload_bytes =
             serde_json::to_vec(&payload).map_err(|e| WorkerCallError::Rejected(e.to_string()))?;

@@ -101,6 +101,9 @@ impl Worker {
     }
 
     pub(crate) fn require_attempt(&self, execution_attempt_id: u64) -> Result<(), String> {
+        if self.inner.as_ref().is_some_and(|inner| inner.config.is_request()) {
+            return Ok(());
+        }
         if execution_attempt_id != self.execution_attempt_id() {
             return Err(format!(
                 "stale worker command execution attempt: got {}, current {}",

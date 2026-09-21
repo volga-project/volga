@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 
 use crate::api::spec::state::{OperatorStateBackendConfig, RequestStoreConfig, StateSpec};
+use crate::api::RequestGraph;
 use crate::common::types::PipelineId;
+use crate::orchestrator::orchestrator::WorkerRole;
 use crate::runtime::checkpoint::{SerializedRestore, TaskKey};
 use crate::runtime::execution_graph::ExecutionGraph;
 use crate::runtime::VertexId;
@@ -22,6 +24,9 @@ pub struct WorkerConfig {
     pub state_maintenance_enabled: bool,
     /// Cleaner tick interval when maintenance is enabled.
     pub state_maintenance_interval_ms: u64,
+    pub role: WorkerRole,
+    pub request_graph: Option<RequestGraph>,
+    pub request_bind_address: Option<String>,
 }
 
 impl WorkerConfig {
@@ -45,6 +50,9 @@ impl WorkerConfig {
             request_store: None,
             state_maintenance_enabled: true,
             state_maintenance_interval_ms: 1_000,
+            role: WorkerRole::Streaming,
+            request_graph: None,
+            request_bind_address: None,
         }
     }
 
@@ -60,6 +68,10 @@ impl WorkerConfig {
         self.state_maintenance_enabled = state.maintenance_enabled;
         self.state_maintenance_interval_ms = state.maintenance_interval_ms.max(1);
         self
+    }
+
+    pub fn is_request(&self) -> bool {
+        self.role == WorkerRole::Request
     }
 }
 

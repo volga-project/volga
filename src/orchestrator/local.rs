@@ -6,7 +6,9 @@ use anyhow::Result;
 
 use crate::api::PipelineSpec;
 
-use super::orchestrator::{MasterOrchestrator, WorkerNode, WorkerOrchestrator, mock_worker_nodes};
+use super::orchestrator::{
+    mock_request_worker_nodes, mock_worker_nodes, MasterOrchestrator, WorkerNode, WorkerOrchestrator,
+};
 
 #[async_trait]
 pub trait LocalWorkerReplacement: Send + Sync {
@@ -19,6 +21,7 @@ pub struct LocalTestOrchestrator {
     pipeline_id: String,
     spec: Option<PipelineSpec>,
     num_expected_workers: usize,
+    num_expected_request_workers: usize,
     replacement: Option<Arc<dyn LocalWorkerReplacement>>,
     replacement_calls: Arc<Mutex<Vec<Vec<String>>>>,
 }
@@ -30,17 +33,23 @@ pub struct LocalWorkerOrchestrator {
 
 impl LocalTestOrchestrator {
     pub fn new(num_workers: usize, pipeline_id: String) -> Self {
-        let worker_nodes = mock_worker_nodes(num_workers.max(1));
-        let worker_nodes = worker_nodes
+        Self::with_counts(num_workers, 0, pipeline_id)
+    }
+
+    pub fn with_counts(num_workers: usize, num_request_workers: usize, pipeline_id: String) -> Self {
+        let mut worker_nodes = mock_worker_nodes(num_workers.max(1))
             .into_iter()
             .map(|n| (n.worker_id.clone(), n))
             .collect::<HashMap<_, _>>();
-        let expected_workers = worker_nodes.len();
+        for node in mock_request_worker_nodes(num_request_workers) {
+            worker_nodes.insert(node.worker_id.clone(), node);
+        }
         Self {
             worker_nodes: Arc::new(Mutex::new(worker_nodes)),
             pipeline_id,
             spec: None,
-            num_expected_workers: expected_workers,
+            num_expected_workers: num_workers.max(1),
+            num_expected_request_workers: num_request_workers,
             replacement: None,
             replacement_calls: Arc::new(Mutex::new(Vec::new())),
         }
@@ -86,6 +95,10 @@ impl MasterOrchestrator for LocalTestOrchestrator {
 
     async fn get_num_expected_workers(&self) -> usize {
         self.num_expected_workers
+    }
+
+    async fn get_num_expected_request_workers(&self) -> usize {
+        self.num_expected_request_workers
     }
 
     async fn request_replacement(&self, worker_ids: &[String]) -> Result<()> {

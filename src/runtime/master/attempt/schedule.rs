@@ -22,7 +22,11 @@ impl ExecutionAttempt {
         };
         let nodes = match self
             .state
-            .wait_for_ready_workers(self.pipeline.expected_workers, readiness_timeout)
+            .wait_for_ready_workers(
+                self.pipeline.expected_workers,
+                readiness_timeout,
+                crate::orchestrator::orchestrator::WorkerRole::Streaming,
+            )
             .await
         {
             Ok(nodes) => nodes,
@@ -116,6 +120,8 @@ impl ExecutionAttempt {
                         mapping,
                         task_restore_data,
                         restoring,
+                        role: crate::orchestrator::orchestrator::WorkerRole::Streaming,
+                        request_bind_address: None,
                     })
                     .await
                     .map_err(map_session_error);

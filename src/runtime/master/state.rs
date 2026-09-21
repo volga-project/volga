@@ -9,9 +9,9 @@ use tokio::sync::Mutex;
 use tokio::sync::broadcast;
 use tokio::time::{sleep, Duration, Instant};
 
-use crate::api::PipelineSpec;
+use crate::api::{PipelineSpec, RequestGraph};
 use crate::common::types::PipelineId;
-use crate::orchestrator::orchestrator::{MasterOrchestrator, WorkerNode};
+use crate::orchestrator::orchestrator::{MasterOrchestrator, WorkerNode, WorkerRole};
 use crate::runtime::checkpoint::{RestorePlan, SerializedCheckpoint};
 use crate::runtime::consts::{runtime_consts, MASTER_REGISTRY_WAIT_TICK};
 use crate::runtime::execution_graph::ExecutionGraph;
@@ -39,7 +39,9 @@ pub(super) struct PipelineContext {
     pub pipeline_id: String,
     pub spec: PipelineSpec,
     pub execution_graph: ExecutionGraph,
+    pub request_graph: Option<RequestGraph>,
     pub expected_workers: usize,
+    pub expected_request_workers: usize,
 }
 
 #[derive(Default)]
@@ -74,6 +76,7 @@ impl WorkerRegistry {
         &mut self,
         nodes: HashMap<String, WorkerNode>,
         expected: usize,
+        role: WorkerRole,
     ) -> WorkerReadiness {
         for record in self.workers.values_mut() {
             record.discovered = None;
@@ -87,10 +90,9 @@ impl WorkerRegistry {
             .iter()
             .filter_map(|(worker_id, record)| {
                 if record.registered && !record.replacing {
-                    record
-                        .discovered
-                        .clone()
-                        .map(|node| (worker_id.clone(), node))
+                    record.discovered.clone().and_then(|node| {
+                        (node.role == role).then(|| (worker_id.clone(), node))
+                    })
                 } else {
                     None
                 }
@@ -101,7 +103,11 @@ impl WorkerRegistry {
                 .workers
                 .iter()
                 .filter(|(_, record)| {
-                    record.discovered.is_some() && (!record.registered || record.replacing)
+                    record
+                        .discovered
+                        .as_ref()
+                        .is_some_and(|node| node.role == role)
+                        && (!record.registered || record.replacing)
                 })
                 .map(|(worker_id, _)| worker_id.clone())
                 .collect();
@@ -123,10 +129,13 @@ impl WorkerRegistry {
         }
     }
 
-    /// Assign exactly `worker_ids` to `execution_attempt_id` (clears others).
+    /// Assign exactly `worker_ids` to `execution_attempt_id` (clears other streaming workers).
     fn set_execution_attempt(&mut self, execution_attempt_id: u64, worker_ids: &[String]) {
         let selected: HashSet<&str> = worker_ids.iter().map(String::as_str).collect();
         for (worker_id, record) in self.workers.iter_mut() {
+            if record.discovered.as_ref().is_some_and(|node| node.is_request()) {
+                continue;
+            }
             record.execution_attempt_id = if selected.contains(worker_id.as_str()) {
                 Some(execution_attempt_id)
             } else {
@@ -137,6 +146,9 @@ impl WorkerRegistry {
 
     fn clear_execution_attempt(&mut self) {
         for record in self.workers.values_mut() {
+            if record.discovered.as_ref().is_some_and(|node| node.is_request()) {
+                continue;
+            }
             record.execution_attempt_id = None;
         }
     }
@@ -276,7 +288,9 @@ impl MasterState {
             pipeline_id,
             spec: config.spec,
             execution_graph: config.execution_graph,
+            request_graph: config.request_graph,
             expected_workers: config.expected_workers,
+            expected_request_workers: config.expected_request_workers,
         })
     }
 
@@ -529,14 +543,18 @@ impl MasterState {
         &self,
         expected: usize,
         timeout: Duration,
+        role: WorkerRole,
     ) -> Result<HashMap<String, WorkerNode>, WorkerReadinessError> {
-        println!("[MASTER] Waiting for {} ready workers", expected);
+        println!(
+            "[MASTER] Waiting for {} ready {:?} workers",
+            expected, role
+        );
         let start = Instant::now();
         loop {
             let discovered = self.orchestrator.get_worker_nodes().await;
             let readiness = {
                 let mut workers = self.workers.lock().await;
-                workers.reconcile_readiness(discovered, expected)
+                workers.reconcile_readiness(discovered, expected, role)
             };
             match readiness {
                 WorkerReadiness::Ready(workers) => return Ok(workers),
@@ -561,5 +579,47 @@ impl MasterState {
         })
         .await;
         self.orchestrator.request_replacement(worker_ids).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn readiness_splits_streaming_and_request_pools() {
+        let mut registry = WorkerRegistry::default();
+        let streaming = WorkerNode::new(
+            "worker-1".to_string(),
+            "127.0.0.1".to_string(),
+            1,
+            2,
+        );
+        let request = WorkerNode::request(
+            "request-worker-1".to_string(),
+            "127.0.0.1".to_string(),
+            3,
+            4,
+        );
+        registry.register(streaming.worker_id.clone());
+        registry.register(request.worker_id.clone());
+        let mut nodes = HashMap::new();
+        nodes.insert(streaming.worker_id.clone(), streaming.clone());
+        nodes.insert(request.worker_id.clone(), request.clone());
+
+        match registry.reconcile_readiness(nodes.clone(), 1, WorkerRole::Streaming) {
+            WorkerReadiness::Ready(ready) => {
+                assert_eq!(ready.len(), 1);
+                assert_eq!(ready[&streaming.worker_id].role, WorkerRole::Streaming);
+            }
+            WorkerReadiness::Waiting { .. } => panic!("streaming pool should be ready"),
+        }
+        match registry.reconcile_readiness(nodes, 1, WorkerRole::Request) {
+            WorkerReadiness::Ready(ready) => {
+                assert_eq!(ready.len(), 1);
+                assert_eq!(ready[&request.worker_id].role, WorkerRole::Request);
+            }
+            WorkerReadiness::Waiting { .. } => panic!("request pool should be ready"),
+        }
     }
 }

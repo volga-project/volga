@@ -222,9 +222,9 @@ Delete or stop using once PR1–PR2 land:
 - [x] `RequestRoutePartition` / `SOURCE_TASK_INDEX_FIELD`
 - [x] Response accumulation by `expected_record_count`
 - [x] `WorkerInner.request_source_processor` + unused `stop_request_source_processor_if_needed`
-- [ ] `execution_graph.rs` WO+WRO same-node TODO
-- [ ] Single `MasterConfig.expected_workers` / `wait_for_ready_workers` over a mixed node list
-- [ ] `recover()` draining request sessions
+- [x] `execution_graph.rs` WO+WRO same-node TODO
+- [x] Single `MasterConfig.expected_workers` / `wait_for_ready_workers` over a mixed node list
+- [x] `recover()` draining request sessions
 - [ ] `pipeline_exec` as the request-mode runtime (`SingleWorker` mixed graph)
 - [x] `RequestSourceSinkSpec` / `bind_address` as the replica listen address
 

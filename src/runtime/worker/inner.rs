@@ -7,7 +7,9 @@ use std::sync::Arc;
 use kameo::prelude::ActorRef;
 use tokio::runtime::{Builder, Runtime};
 
+use crate::orchestrator::orchestrator::WorkerRole;
 use crate::runtime::health::WorkerHealth;
+use crate::runtime::request::RequestExecutor;
 use crate::runtime::metrics::MetricsLabels;
 use crate::runtime::observability::snapshot_types::WorkerSnapshot;
 use crate::runtime::operators::source::SourceHandles;
@@ -33,21 +35,25 @@ pub(crate) struct WorkerInner {
     pub(crate) tasks_state_polling_handle: Option<tokio::task::JoinHandle<()>>,
     pub(crate) state_maintenance_handle: Option<tokio::task::JoinHandle<()>>,
     pub(crate) fatal_watcher_handle: Option<tokio::task::JoinHandle<()>>,
+    pub(crate) request_executor: Option<RequestExecutor>,
     pub(crate) source_handles: Arc<SourceHandles>,
 }
 
 impl WorkerInner {
     pub(crate) fn from_config(config: WorkerConfig) -> Self {
         let health = Arc::new(WorkerHealth::new());
+        let is_request = config.role == WorkerRole::Request;
         let mut task_runtimes = HashMap::new();
-        for vertex_id in &config.vertex_ids {
-            let task_runtime = Builder::new_multi_thread()
-                .worker_threads(config.num_threads_per_task)
-                .enable_all()
-                .thread_name(format!("task-runtime-{}", vertex_id))
-                .build()
-                .unwrap();
-            task_runtimes.insert(vertex_id.clone(), task_runtime);
+        if !is_request {
+            for vertex_id in &config.vertex_ids {
+                let task_runtime = Builder::new_multi_thread()
+                    .worker_threads(config.num_threads_per_task)
+                    .enable_all()
+                    .thread_name(format!("task-runtime-{}", vertex_id))
+                    .build()
+                    .unwrap();
+                task_runtimes.insert(vertex_id.clone(), task_runtime);
+            }
         }
 
         let worker_state = Arc::new(tokio::sync::Mutex::new(WorkerSnapshot::new(
@@ -67,26 +73,33 @@ impl WorkerInner {
         ));
         state_registry.set_maintenance_enabled(config.state_maintenance_enabled);
 
-        Self {
-            config,
-            health,
-            task_actors: HashMap::new(),
-            backend_actor: None,
-            task_runtimes,
-            transport_backend_runtime: Some(
+        let transport_backend_runtime = if is_request {
+            None
+        } else {
+            Some(
                 Builder::new_multi_thread()
                     .worker_threads(1)
                     .enable_all()
                     .thread_name("transport-backend-runtime")
                     .build()
                     .unwrap(),
-            ),
+            )
+        };
+
+        Self {
+            config,
+            health,
+            task_actors: HashMap::new(),
+            backend_actor: None,
+            task_runtimes,
+            transport_backend_runtime,
             worker_state,
             state_registry,
             running: Arc::new(AtomicBool::new(false)),
             tasks_state_polling_handle: None,
             state_maintenance_handle: None,
             fatal_watcher_handle: None,
+            request_executor: None,
             source_handles: Arc::new(SourceHandles::new()),
         }
     }
@@ -135,6 +148,9 @@ impl WorkerInner {
         }
 
         // Close: signal after Finished; abort mid-run so dispose cannot hang.
+        if let Some(mut executor) = self.request_executor.take() {
+            executor.stop().await;
+        }
         if !self.task_actors.is_empty() {
             self.signal_tasks_close().await;
         }
@@ -187,6 +203,7 @@ impl Drop for WorkerInner {
         if let Some(handle) = self.state_maintenance_handle.take() {
             handle.abort();
         }
+        self.request_executor.take();
         self.close_sync_dispose_runtimes();
     }
 }

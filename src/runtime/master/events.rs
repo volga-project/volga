@@ -67,6 +67,12 @@ pub enum LifecycleEvent {
         attempt_id: u64,
         detail: String,
     },
+    RequestWorkersStarted {
+        worker_ids: Vec<String>,
+    },
+    RequestWorkerReplaced {
+        worker_id: String,
+    },
     PipelineFinished,
     PipelineFailed {
         detail: String,

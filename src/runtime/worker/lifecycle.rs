@@ -4,6 +4,7 @@ use crate::runtime::observability::snapshot_types::WorkerSnapshot;
 use crate::runtime::observability::StreamTaskStatus;
 use crate::runtime::operators::operator::operator_config_requires_checkpoint;
 use crate::runtime::operators::operator::OperatorType;
+use crate::runtime::request::{RequestExecutor, RequestExecutorOptions};
 use crate::runtime::stream_task::StreamTaskMessage;
 
 use super::config::WorkerConfig;
@@ -43,6 +44,9 @@ impl Worker {
 
     pub(crate) async fn start(&mut self) -> Result<(), String> {
         let inner = self.require_inner()?;
+        if inner.config.is_request() {
+            return inner.start_request_executor().await;
+        }
         inner.spawn_actors().await;
         inner.start_tasks(None).await;
         Ok(())
@@ -50,6 +54,9 @@ impl Worker {
 
     pub(crate) async fn signal_tasks_run(&mut self) -> Result<(), String> {
         let inner = self.require_inner()?;
+        if inner.config.is_request() {
+            return Ok(());
+        }
         inner.start_transport_backend().await;
         inner
             .send_signal_to_task_actors(crate::runtime::stream_task::StreamTaskMessage::Run)
@@ -201,6 +208,29 @@ impl Worker {
 }
 
 impl WorkerInner {
+    pub(crate) async fn start_request_executor(&mut self) -> Result<(), String> {
+        let chain = self
+            .config
+            .request_graph
+            .clone()
+            .ok_or_else(|| "request worker is missing request graph".to_string())?;
+        let options = RequestExecutorOptions {
+            pipeline_id: self.config.pipeline_id.clone(),
+            wro_store: None,
+            bind_address: self.config.request_bind_address.clone(),
+        };
+        println!(
+            "[WORKER] Starting request executor bind={:?}",
+            options.bind_address
+        );
+        let executor = RequestExecutor::start(chain, options)
+            .await
+            .map_err(|error| error.to_string())?;
+        self.request_executor = Some(executor);
+        self.running.store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+
     pub(crate) async fn signal_tasks_close(&mut self) {
         self.send_signal_to_task_actors(crate::runtime::stream_task::StreamTaskMessage::Close)
             .await;

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::api::{compile_logical_graph, PipelineSpec};
+use crate::api::{compile_pipeline, PipelineSpec, RequestGraph};
 use crate::orchestrator::orchestrator::MasterOrchestrator;
 use crate::runtime::checkpoint::SerializedCheckpoint;
 use crate::runtime::execution_graph::ExecutionGraph;
@@ -18,6 +18,7 @@ mod service;
 mod attempt;
 mod heartbeat;
 mod lifecycle;
+mod request_pool;
 mod state;
 mod worker_client;
 
@@ -34,19 +35,31 @@ pub struct Master {
 pub struct MasterConfig {
     pub spec: PipelineSpec,
     pub execution_graph: ExecutionGraph,
+    pub request_graph: Option<RequestGraph>,
     pub expected_workers: usize,
+    pub expected_request_workers: usize,
 }
 
 impl MasterConfig {
-    /// Compile `spec` to an execution graph and configure the master.
+    /// Compile `spec` to streaming + optional request graphs and configure the master.
     pub fn from_spec(spec: PipelineSpec, expected_workers: usize) -> Self {
+        Self::from_spec_counts(spec, expected_workers, 0)
+    }
+
+    pub fn from_spec_counts(
+        spec: PipelineSpec,
+        expected_workers: usize,
+        expected_request_workers: usize,
+    ) -> Self {
         spec.validate()
             .unwrap_or_else(|error| panic!("invalid pipeline spec: {error}"));
-        let execution_graph = compile_logical_graph(&spec, None).to_execution_graph();
+        let compiled = compile_pipeline(&spec, None);
         Self {
             spec,
-            execution_graph,
+            execution_graph: compiled.streaming.to_execution_graph(),
+            request_graph: compiled.request,
             expected_workers,
+            expected_request_workers,
         }
     }
 }

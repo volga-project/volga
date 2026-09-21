@@ -50,16 +50,21 @@ async fn main() -> Result<()> {
 
     let spec = orchestrator.get_spec().await;
     let expected_workers = orchestrator.get_num_expected_workers().await;
+    let expected_request_workers = orchestrator.get_num_expected_request_workers().await;
 
     let mut master_server = MasterServer::new(orchestrator.clone());
     master_server
-        .configure(MasterConfig::from_spec(spec, expected_workers))
+        .configure(MasterConfig::from_spec_counts(
+            spec,
+            expected_workers,
+            expected_request_workers,
+        ))
         .await;
     master_server.start(&bind_addr).await?;
 
     println!(
-        "[VOLGA_MASTER] started on {}, expected_workers={}",
-        bind_addr, expected_workers
+        "[VOLGA_MASTER] started on {}, expected_workers={} expected_request_workers={}",
+        bind_addr, expected_workers, expected_request_workers
     );
 
     tokio::select! {

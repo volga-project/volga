@@ -139,13 +139,15 @@ impl LocalClusterResources {
         } else {
             None
         };
-        let local_orchestrator = LocalTestOrchestrator::new(
+        let local_orchestrator = LocalTestOrchestrator::with_counts(
             launch.worker_count,
+            launch.request_worker_count,
             Uuid::new_v4().to_string(),
         )
         .with_spec(spec.clone());
         let worker_nodes = local_orchestrator.get_worker_nodes().await;
         let expected_workers = local_orchestrator.get_num_expected_workers().await;
+        let expected_request_workers = local_orchestrator.get_num_expected_request_workers().await;
         let master_addr = format!("127.0.0.1:{}", crate::common::ports::gen_unique_grpc_port());
         let worker_orchestrator: Arc<dyn WorkerOrchestrator> =
             Arc::new(LocalWorkerOrchestrator::new(master_addr.clone()));
@@ -164,7 +166,11 @@ impl LocalClusterResources {
         let mut master = LocalMaster::new(master_addr, master_orchestrator);
         master
             .server
-            .configure(MasterConfig::from_spec(spec, expected_workers))
+            .configure(MasterConfig::from_spec_counts(
+                spec,
+                expected_workers,
+                expected_request_workers,
+            ))
             .await;
         master.server.start(&master.addr).await?;
         wait_until_addr_listening(&master.addr, std::time::Duration::from_secs(5))
