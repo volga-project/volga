@@ -144,7 +144,7 @@
       ]
     },
     "EventTimeSpec": {
-      "description": "Pipeline-wide event-time defaults (SQL / streaming).\n\nWatermark knobs are shared; window `allowed_lateness_ms` is retention-only\n(prune after advance). Streaming late ingest is `ts ≤ task watermark`.",
+      "description": "Pipeline-wide event-time defaults (SQL / streaming).\n\nWatermark knobs are shared; window `allowed_lateness_ms` is retention-only\n(prune after advance). Streaming late ingest is `ts \u2264 task watermark`.",
       "type": "object",
       "properties": {
         "watermark": {
@@ -219,12 +219,33 @@
       ]
     },
     "OperatorStateBackendConfig": {
-      "type": "string",
-      "enum": [
-        "in_memory"
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "in_memory"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "scylla": {
+              "$ref": "#/$defs/ScyllaConfig"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "scylla"
+          ]
+        }
       ]
     },
-    "RequestStoreConfig": false,
+    "RequestStoreConfig": {
+      "type": "string",
+      "enum": [
+        "scylla"
+      ]
+    },
     "StateSpec": {
       "type": "object",
       "properties": {
@@ -339,12 +360,36 @@
       "type": "object",
       "properties": {
         "allowed_lateness_ms": {
-          "description": "Window state retention after advance (ms). Default `0`: prune below\n`watermark − max_window_length`. Does not delay watermarks or accept\npost-frontier ingest; CDC late-data is separate.",
+          "description": "Window state retention after advance (ms). Default `0`: prune below\n`watermark \u2212 max_window_length`. Does not delay watermarks or accept\npost-frontier ingest; CDC late-data is separate.",
           "type": "integer",
           "format": "int64",
           "default": 0
         }
       }
+    },
+    "ScyllaConfig": {
+      "type": "object",
+      "properties": {
+        "contact_points": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "datacenter": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "keyspace": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "contact_points",
+        "keyspace"
+      ]
     }
   }
 }
