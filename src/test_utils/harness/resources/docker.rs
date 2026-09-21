@@ -37,6 +37,7 @@ impl DockerResources {
         const WORKER_CONTROL_PORT: u16 = 50052;
         const WORKER_TRANSPORT_PORT: u16 = 60052;
         const REQUEST_HTTP_PORT: u16 = 8080;
+        const STORAGE_CONTAINER_PORT: u16 = 50071;
 
         let master_port = gen_unique_grpc_port();
         let storage_port = gen_unique_grpc_port();
