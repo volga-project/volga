@@ -86,7 +86,9 @@ fn min_seek(bucket: i64, shard: i32, after: Option<Cursor>) -> Seek {
             fire_seq: i64::MAX,
             business_key: Vec::new(),
             kind: i8::MAX,
+            window_id: i64::MAX,
             attempt: i64::MAX,
+            epoch: i64::MAX,
         },
         Some(c) => Seek {
             bucket,
