@@ -91,6 +91,8 @@ async fn consumed_triggers_are_removed_after_completed_watermark() {
 
     let _ = h.watermark_and_output(2_000).await;
     let _ = h.drain_passthrough_watermark().await;
+    h.complete_checkpoint(1).await;
+    h.run_maintenance().await;
     assert_eq!(due_trigger_count(&h, 2_000).await, 0);
     assert_eq!(due_trigger_count(&h, 8_000).await, 1);
 }
@@ -107,11 +109,15 @@ async fn future_triggers_remain_across_partial_watermarks() {
 
     let partial = h.watermark_and_output(2_000).await;
     let _ = h.drain_passthrough_watermark().await;
+    h.complete_checkpoint(1).await;
+    h.run_maintenance().await;
     assert_eq!(partial.num_rows(), 2);
     assert_eq!(due_trigger_count(&h, 5_000).await, 1);
 
     let rest = h.watermark_and_output(5_000).await;
     let _ = h.drain_passthrough_watermark().await;
+    h.complete_checkpoint(2).await;
+    h.run_maintenance().await;
     assert_eq!(rest.num_rows(), 1);
     assert_eq!(due_trigger_count(&h, 5_000).await, 0);
 }
@@ -137,6 +143,8 @@ async fn raw_and_tiles_are_retained_through_wo_floor() {
 
     let _ = h.watermark_and_output(10_000).await;
     let _ = h.drain_passthrough_watermark().await;
+    h.complete_checkpoint(1).await;
+    h.run_maintenance().await;
 
     // floor = 10000 - 5000 - 0 = 5000; keep ts >= 5000
     assert_eq!(raw_timestamps(&h, "A").await, vec![5_000, 10_000]);
@@ -169,6 +177,8 @@ async fn lateness_extends_retention_floor() {
 
     let _ = h.watermark_and_output(10_000).await;
     let _ = h.drain_passthrough_watermark().await;
+    h.complete_checkpoint(1).await;
+    h.run_maintenance().await;
 
     // floor = 10000 - 5000 - 2000 = 3000
     assert_eq!(raw_timestamps(&h, "A").await, vec![3_000, 5_000, 10_000]);
@@ -189,6 +199,8 @@ async fn checkpoint_before_cleanup_restores_pre_prune_state() {
 
     let _ = original.watermark_and_output(10_000).await;
     let _ = original.drain_passthrough_watermark().await;
+    original.complete_checkpoint(2).await;
+    original.run_maintenance().await;
     // floor = 10000 - 5000 = 5000 → only ts=10000 remains
     assert_eq!(raw_timestamps(&original, "A").await, vec![10_000]);
     assert_eq!(due_trigger_count(&original, 10_000).await, 0);
@@ -238,6 +250,7 @@ async fn state_only_prunes_without_triggers_or_evaluation_state() {
     )
     .await
     .expect("watermark");
+    h.complete_checkpoint(1).await;
     h.run_maintenance().await;
 
     assert_eq!(raw_timestamps(&h, "A").await, vec![5_000, 10_000]);

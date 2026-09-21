@@ -145,6 +145,18 @@ impl Harness {
             .expect("maintain");
     }
 
+    /// Capture and complete a checkpoint so GC can advance the committed floor.
+    pub async fn complete_checkpoint(&mut self, checkpoint_id: u64) {
+        self.op
+            .checkpoint(checkpoint_id)
+            .await
+            .expect("checkpoint");
+        self.op
+            .notify_checkpoint_complete(checkpoint_id)
+            .await
+            .expect("checkpoint complete");
+    }
+
     pub async fn ingest(&mut self, b: RecordBatch, partition: &str) {
         let mut out = VecOutput::default();
         self.op

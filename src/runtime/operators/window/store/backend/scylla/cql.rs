@@ -19,6 +19,17 @@ pub(super) const SELECT_META: &str = "SELECT cur_attempt, cut, prev_cut, prev_ch
 pub(super) const INSERT_META: &str = "INSERT INTO window_kg_meta (namespace, key_group, cur_attempt, cut, prev_cut, prev_checkpoint_id, committed_wm, retention_floor, checkpoint_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) IF NOT EXISTS";
 pub(super) const PUBLISH_META: &str = "UPDATE window_kg_meta SET cur_attempt = ?, prev_cut = ?, prev_checkpoint_id = ?, cut = ?, committed_wm = ?, retention_floor = ?, checkpoint_id = ? WHERE namespace = ? AND key_group = ? IF cur_attempt <= ? AND checkpoint_id = ?";
 pub(super) const TAKE_ATTEMPT: &str = "UPDATE window_kg_meta SET cur_attempt = ? WHERE namespace = ? AND key_group = ? IF cur_attempt <= ?";
+pub(super) const SELECT_KG_BUCKETS: &str = "SELECT bucket_start, business_key FROM window_kg_buckets WHERE namespace = ? AND key_group = ?";
+pub(super) const SELECT_KEY_STATE_VERSIONS: &str = "SELECT attempt, epoch FROM window_key_states WHERE namespace = ? AND key_group = ? AND business_key = ?";
+pub(super) const SELECT_RAW_VERSIONS: &str = "SELECT event_ts, seq_no, attempt, epoch FROM window_raw WHERE namespace = ? AND key_group = ? AND business_key = ? AND bucket_start = ?";
+pub(super) const SELECT_TILE_VERSIONS: &str = "SELECT tile_start, attempt, epoch FROM window_tiles WHERE namespace = ? AND key_group = ? AND business_key = ? AND granularity_ms = ? AND bucket_start = ?";
+pub(super) const DELETE_RAW: &str = "DELETE FROM window_raw WHERE namespace = ? AND key_group = ? AND business_key = ? AND bucket_start = ?";
+pub(super) const DELETE_TILES: &str = "DELETE FROM window_tiles WHERE namespace = ? AND key_group = ? AND business_key = ? AND granularity_ms = ? AND bucket_start = ?";
+pub(super) const DELETE_KG_BUCKETS: &str = "DELETE FROM window_kg_buckets WHERE namespace = ? AND key_group = ? AND bucket_start = ? AND business_key = ?";
+pub(super) const DELETE_KEY_STATE_VERSION: &str = "DELETE FROM window_key_states WHERE namespace = ? AND key_group = ? AND business_key = ? AND attempt = ? AND epoch = ?";
+pub(super) const DELETE_RAW_VERSION: &str = "DELETE FROM window_raw WHERE namespace = ? AND key_group = ? AND business_key = ? AND bucket_start = ? AND event_ts = ? AND seq_no = ? AND attempt = ? AND epoch = ?";
+pub(super) const DELETE_TILE_VERSION: &str = "DELETE FROM window_tiles WHERE namespace = ? AND key_group = ? AND business_key = ? AND granularity_ms = ? AND bucket_start = ? AND tile_start = ? AND attempt = ? AND epoch = ?";
+pub(super) const DELETE_META: &str = "DELETE FROM window_kg_meta WHERE namespace = ? AND key_group = ?";
 
 pub(super) struct PreparedDml {
     pub(super) insert_raw: PreparedStatement,
@@ -35,6 +46,21 @@ pub(super) struct PreparedDml {
     pub(super) insert_meta: PreparedStatement,
     pub(super) publish_meta: PreparedStatement,
     pub(super) take_attempt: PreparedStatement,
+}
+
+#[derive(Clone)]
+pub(super) struct PreparedGc {
+    pub(super) select_kg_buckets: PreparedStatement,
+    pub(super) select_key_state_versions: PreparedStatement,
+    pub(super) select_raw_versions: PreparedStatement,
+    pub(super) select_tile_versions: PreparedStatement,
+    pub(super) delete_raw: PreparedStatement,
+    pub(super) delete_tiles: PreparedStatement,
+    pub(super) delete_kg_buckets: PreparedStatement,
+    pub(super) delete_key_state_version: PreparedStatement,
+    pub(super) delete_raw_version: PreparedStatement,
+    pub(super) delete_tile_version: PreparedStatement,
+    pub(super) delete_meta: PreparedStatement,
 }
 
 pub(super) async fn prepare_stmts<const N: usize>(

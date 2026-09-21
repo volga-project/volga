@@ -535,7 +535,7 @@ impl InMemWindowStore {
         task_id: &str,
     ) -> Result<u64> {
         self.triggers.write().retain(|trigger| {
-            !Self::owns_partition(&trigger.partition, scope) || trigger.fire_at.ts > watermark
+            !Self::owns_partition(&trigger.partition, scope) || trigger.fire_at.ts > floor
         });
         let slots: Vec<_> = self
             .partitions
@@ -674,7 +674,7 @@ impl OperatorStore for InMemWindowStore {
         let Some(wo) = state.as_any().downcast_ref::<WindowOperatorState>() else {
             return Ok(());
         };
-        let Some((watermark, floor)) = wo.retention_cutoff() else {
+        let Some((watermark, floor)) = wo.committed_retention_cutoff() else {
             return Ok(());
         };
         self.maintain_cutoff(
@@ -1264,6 +1264,7 @@ mod tests {
         task_state
             .watermark_frontier
             .store(5_000, std::sync::atomic::Ordering::Release);
+        task_state.seed_committed_watermark(5_000);
         store.maintain(&namespace, &task_state).await.unwrap();
 
         let work = collect_due(&client, None, Cursor::new(10_000, u64::MAX))
@@ -1571,6 +1572,7 @@ mod tests {
         task0
             .watermark_frontier
             .store(5_000, std::sync::atomic::Ordering::Release);
+        task0.seed_committed_watermark(5_000);
         store.maintain(&ns, &task0).await.unwrap();
 
         assert!(collect_due(&c0, None, Cursor::new(10_000, u64::MAX))

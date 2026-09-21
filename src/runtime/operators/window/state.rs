@@ -39,6 +39,8 @@ pub struct WindowOperatorState {
     max_window_length_ms: i64,
     /// Task watermark frontier; [`WATERMARK_UNSET`] until the first advance.
     pub watermark_frontier: AtomicI64,
+    /// Watermark of the last **completed** checkpoint. GC reads this, never the live frontier.
+    committed_wm: AtomicI64,
     /// Cuts captured at each barrier, published on completion (#300).
     pending_checkpoints: Mutex<HashMap<u64, WindowStateSnapshot>>,
 }
@@ -71,6 +73,7 @@ impl WindowOperatorState {
             lateness_ms,
             max_window_length_ms,
             watermark_frontier: AtomicI64::new(WATERMARK_UNSET),
+            committed_wm: AtomicI64::new(WATERMARK_UNSET),
             pending_checkpoints: Mutex::new(HashMap::new()),
         }
     }
@@ -119,13 +122,39 @@ impl WindowOperatorState {
     /// Raw rows with `ts < floor` and tiles fully below the floor may be pruned.
     /// Consumed triggers (`fire_at.ts <= W`) are dropped separately.
     pub fn retention_cutoff(&self) -> Option<(i64, i64)> {
-        let watermark = self.watermark_frontier()?;
-        let lateness_ms = self.lateness_ms.max(0);
-        let max_window_length_ms = self.max_window_length_ms.max(0);
-        let floor = watermark
-            .saturating_sub(max_window_length_ms)
-            .saturating_sub(lateness_ms);
-        Some((watermark, floor))
+        self.cutoff_at(self.watermark_frontier())
+    }
+
+    /// Floor for physical delete: last completed checkpoint, not the live watermark.
+    pub fn committed_retention_cutoff(&self) -> Option<(i64, i64)> {
+        self.cutoff_at(self.committed_watermark())
+    }
+
+    pub fn committed_watermark(&self) -> Option<i64> {
+        let v = self.committed_wm.load(Ordering::Acquire);
+        (v != WATERMARK_UNSET).then_some(v)
+    }
+
+    fn cutoff_at(&self, watermark: Option<i64>) -> Option<(i64, i64)> {
+        let watermark = watermark?;
+        Some((watermark, self.retention_floor_at(Some(watermark))?))
+    }
+
+    pub fn tile_granularity_ms(&self) -> Vec<i64> {
+        let mut seen = std::collections::BTreeSet::new();
+        for window in self.window_configs.values() {
+            if let Some(tiling) = &window.tiling {
+                for g in &tiling.granularities {
+                    seen.insert(g.to_millis());
+                }
+            }
+        }
+        seen.into_iter().collect()
+    }
+
+    #[cfg(test)]
+    pub fn seed_committed_watermark(&self, watermark: i64) {
+        self.committed_wm.store(watermark, Ordering::Release);
     }
 
     pub fn partition(&self, key: &Key) -> PartitionKey {
@@ -159,10 +188,10 @@ impl WindowOperatorState {
             "window checkpoint namespace does not match runtime namespace",
         );
         self.store.restore(&restore.backend).await?;
-        self.watermark_frontier.store(
-            restore.watermark_frontier.unwrap_or(WATERMARK_UNSET),
-            Ordering::Release,
-        );
+        let restored_wm = restore.watermark_frontier.unwrap_or(WATERMARK_UNSET);
+        self.watermark_frontier
+            .store(restored_wm, Ordering::Release);
+        self.committed_wm.store(restored_wm, Ordering::Release);
         self.store
             .prepare_attempt(
                 &restore.backend,
@@ -183,6 +212,10 @@ impl WindowOperatorState {
         let Some(snap) = snap else {
             return Ok(());
         };
+        self.committed_wm.store(
+            snap.watermark_frontier.unwrap_or(WATERMARK_UNSET),
+            Ordering::Release,
+        );
         self.store
             .on_checkpoint_complete(
                 checkpoint_id,

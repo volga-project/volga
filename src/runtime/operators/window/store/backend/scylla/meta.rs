@@ -7,9 +7,54 @@ use anyhow::Result;
 use scylla::client::session::Session;
 use scylla::statement::prepared::PreparedStatement;
 
-use crate::runtime::operators::window::store::backend::version::CutHistory;
+use crate::runtime::operators::window::store::backend::version::{Attempt, CutHistory};
 
 use super::store::ScyllaWindowStoreClient;
+
+pub(super) struct MetaCuts {
+    pub cur_attempt: Attempt,
+    pub cut: CutHistory,
+    pub prev_cut: CutHistory,
+}
+
+fn decode_cut(bytes: Option<Vec<u8>>) -> Result<CutHistory> {
+    match bytes {
+        None => Ok(CutHistory::empty()),
+        Some(b) if b.is_empty() => Ok(CutHistory::empty()),
+        Some(b) => Ok(CutHistory::decode(&b)?),
+    }
+}
+
+pub(super) async fn load_cuts(
+    client: &ScyllaWindowStoreClient,
+    kg: i32,
+) -> Result<Option<MetaCuts>> {
+    let session = client.inner.session();
+    let prepared = client.inner.prepared().await?;
+    let ns = client.scope.namespace.bytes.as_slice();
+    let result = session
+        .execute_unpaged(&prepared.select_meta, (ns.to_vec(), kg))
+        .await?;
+    let rows = result.into_rows_result()?;
+    let Some((cur_attempt, cut, prev_cut, _prev_cp, _wm, _floor, _cp_id)) =
+        rows.maybe_first_row::<(
+            Option<i64>,
+            Option<Vec<u8>>,
+            Option<Vec<u8>>,
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
+        )>()?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(MetaCuts {
+        cur_attempt: cur_attempt.unwrap_or(0) as Attempt,
+        cut: decode_cut(cut)?,
+        prev_cut: decode_cut(prev_cut)?,
+    }))
+}
 
 const CAS_RETRIES: usize = 8;
 

@@ -18,12 +18,14 @@ use crate::runtime::operators::window::store::backend::{
 use crate::runtime::state::{OperatorStore, OperatorTaskState, StateSessionHandle};
 
 use super::cql::{
-    configure_lwt, prepare_stmts, PreparedDml, INSERT_KEY_STATES, INSERT_KG_BUCKETS, INSERT_META,
-    INSERT_RAW, INSERT_TILES, INSERT_TRIGGERS, PUBLISH_META, SELECT_KEY_STATE, SELECT_KEY_STATE_AT,
-    SELECT_META, SELECT_RAW, SELECT_TILES, SELECT_TRIGGERS, TAKE_ATTEMPT,
+    configure_lwt, prepare_stmts, PreparedDml, PreparedGc, DELETE_KG_BUCKETS, DELETE_KEY_STATE_VERSION,
+    DELETE_META, DELETE_RAW, DELETE_RAW_VERSION, DELETE_TILES, DELETE_TILE_VERSION, INSERT_KEY_STATES,
+    INSERT_KG_BUCKETS, INSERT_META, INSERT_RAW, INSERT_TILES, INSERT_TRIGGERS, PUBLISH_META,
+    SELECT_KEY_STATE, SELECT_KEY_STATE_AT, SELECT_KEY_STATE_VERSIONS, SELECT_KG_BUCKETS, SELECT_META,
+    SELECT_RAW, SELECT_RAW_VERSIONS, SELECT_TILES, SELECT_TILE_VERSIONS, SELECT_TRIGGERS, TAKE_ATTEMPT,
 };
 use super::schema::TABLES;
-use super::{checkpoint, read, triggers, write};
+use super::{checkpoint, maintain, read, triggers, write};
 
 #[derive(Default)]
 struct GroupClock {
@@ -36,6 +38,7 @@ pub struct ScyllaWindowStore {
     pub(super) config: ScyllaConfig,
     session: Arc<Session>,
     prepared: Arc<OnceCell<PreparedDml>>,
+    prepared_gc: Arc<OnceCell<PreparedGc>>,
 }
 
 impl std::fmt::Debug for ScyllaWindowStore {
@@ -52,6 +55,7 @@ impl ScyllaWindowStore {
             config,
             session,
             prepared: Arc::new(OnceCell::new()),
+            prepared_gc: Arc::new(OnceCell::new()),
         }
     }
 
@@ -138,6 +142,58 @@ impl ScyllaWindowStore {
             .map_err(|e| anyhow!("{e}"))
     }
 
+    pub(super) async fn prepared_gc(&self) -> Result<&PreparedGc> {
+        let _ = self.prepared().await?;
+        self.prepared_gc
+            .get_or_try_init(|| async {
+                let session = self.session();
+                let [
+                    select_kg_buckets,
+                    select_key_state_versions,
+                    select_raw_versions,
+                    select_tile_versions,
+                    delete_raw,
+                    delete_tiles,
+                    delete_kg_buckets,
+                    delete_key_state_version,
+                    delete_raw_version,
+                    delete_tile_version,
+                    delete_meta,
+                ] = prepare_stmts(
+                    session.as_ref(),
+                    [
+                        SELECT_KG_BUCKETS,
+                        SELECT_KEY_STATE_VERSIONS,
+                        SELECT_RAW_VERSIONS,
+                        SELECT_TILE_VERSIONS,
+                        DELETE_RAW,
+                        DELETE_TILES,
+                        DELETE_KG_BUCKETS,
+                        DELETE_KEY_STATE_VERSION,
+                        DELETE_RAW_VERSION,
+                        DELETE_TILE_VERSION,
+                        DELETE_META,
+                    ],
+                )
+                .await?;
+                Ok::<_, anyhow::Error>(PreparedGc {
+                    select_kg_buckets,
+                    select_key_state_versions,
+                    select_raw_versions,
+                    select_tile_versions,
+                    delete_raw,
+                    delete_tiles,
+                    delete_kg_buckets,
+                    delete_key_state_version,
+                    delete_raw_version,
+                    delete_tile_version,
+                    delete_meta,
+                })
+            })
+            .await
+            .map_err(|e| anyhow!("{e}"))
+    }
+
     pub fn client(&self, scope: WindowStoreTaskScope) -> ScyllaWindowStoreClient {
         ScyllaWindowStoreClient {
             inner: Arc::new(self.clone()),
@@ -145,6 +201,7 @@ impl ScyllaWindowStore {
             groups: Arc::new(Mutex::new(HashMap::new())),
             in_flight_keys: Arc::new(Mutex::new(HashSet::new())),
             cp_cut: Arc::new(Mutex::new(HashMap::new())),
+            prev_cut: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -157,6 +214,7 @@ pub struct ScyllaWindowStoreClient {
     in_flight_keys: Arc<Mutex<HashSet<Vec<u8>>>>,
     /// Restored overlay; empty until restore.
     cp_cut: Arc<Mutex<HashMap<i32, CutHistory>>>,
+    prev_cut: Arc<Mutex<HashMap<i32, CutHistory>>>,
 }
 
 impl std::fmt::Debug for ScyllaWindowStoreClient {
@@ -235,11 +293,40 @@ impl ScyllaWindowStoreClient {
 
     pub(super) fn reset_for_restore(&self, cuts: HashMap<i32, CutHistory>) {
         *self.cp_cut.lock().expect("cp_cut") = cuts;
+        self.prev_cut.lock().expect("prev_cut").clear();
         *self.groups.lock().expect("groups") = HashMap::new();
         self.in_flight_keys
             .lock()
             .expect("in_flight_keys")
             .clear();
+    }
+
+    pub(super) fn advance_published_cuts(&self, cuts: HashMap<i32, CutHistory>) {
+        let mut cp = self.cp_cut.lock().expect("cp_cut");
+        let mut prev = self.prev_cut.lock().expect("prev_cut");
+        for (kg, cut) in cuts {
+            if let Some(old) = cp.insert(kg, cut) {
+                prev.insert(kg, old);
+            }
+        }
+    }
+
+    pub(super) fn cp_cut_for(&self, kg: i32) -> CutHistory {
+        self.cp_cut
+            .lock()
+            .expect("cp_cut")
+            .get(&kg)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub(super) fn prev_cut_for(&self, kg: i32) -> CutHistory {
+        self.prev_cut
+            .lock()
+            .expect("prev_cut")
+            .get(&kg)
+            .cloned()
+            .unwrap_or_default()
     }
 
     pub(super) fn in_flight_key_count(&self) -> usize {
@@ -379,10 +466,10 @@ impl OperatorStore for ScyllaWindowStoreClient {
 
     async fn maintain(
         &self,
-        _ns: &crate::runtime::operators::window::model::StateNamespace,
-        _state: &dyn OperatorTaskState,
+        ns: &crate::runtime::operators::window::model::StateNamespace,
+        state: &dyn OperatorTaskState,
     ) -> Result<()> {
-        anyhow::bail!("Scylla maintain lands in feat/scylla-wo-maintain")
+        maintain::maintain(self, ns, state).await
     }
 }
 
@@ -394,9 +481,23 @@ impl OperatorStore for ScyllaWindowStore {
 
     async fn maintain(
         &self,
-        _ns: &crate::runtime::operators::window::model::StateNamespace,
-        _state: &dyn OperatorTaskState,
+        ns: &crate::runtime::operators::window::model::StateNamespace,
+        state: &dyn OperatorTaskState,
     ) -> Result<()> {
-        anyhow::bail!("Scylla maintain lands in feat/scylla-wo-maintain")
+        let Some(wo) = state
+            .as_any()
+            .downcast_ref::<crate::runtime::operators::window::state::WindowOperatorState>()
+        else {
+            return Ok(());
+        };
+        if let Some(client) = wo
+            .store()
+            .as_any()
+            .downcast_ref::<ScyllaWindowStoreClient>()
+        {
+            return maintain::maintain(client, ns, state).await;
+        }
+        let client = self.client(wo.scope().clone());
+        maintain::maintain(&client, ns, state).await
     }
 }

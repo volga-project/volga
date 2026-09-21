@@ -113,9 +113,6 @@ pub(super) async fn on_checkpoint_complete(
     committed_wm: Option<i64>,
     retention_floor: Option<i64>,
 ) -> Result<()> {
-    if !client.scope.request_mode {
-        return Ok(());
-    }
     let WindowBackendSnapshot::Versioned { range, cuts, .. } = snapshot else {
         anyhow::bail!("Scylla on_checkpoint_complete requires a Versioned snapshot");
     };
@@ -123,6 +120,14 @@ pub(super) async fn on_checkpoint_complete(
         cuts.len() == range.end.saturating_sub(range.start),
         "Versioned cuts must be parallel to the bound key-group range"
     );
+    let mut by_group = std::collections::HashMap::new();
+    for (offset, cut) in cuts.iter().enumerate() {
+        by_group.insert((range.start + offset) as i32, cut.clone());
+    }
+    client.advance_published_cuts(by_group);
+    if !client.scope.request_mode {
+        return Ok(());
+    }
     try_join_all(cuts.iter().enumerate().map(|(offset, cut)| {
         let kg = (range.start + offset) as i32;
         let payload = PublishPayload {
