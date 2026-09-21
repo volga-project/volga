@@ -11,9 +11,12 @@ services:
       VOLGA_MASTER_HOLD_ON_FINISH: "true"
       VOLGA_PIPELINE_ID: "${PIPELINE_ID}"
       VOLGA_WORKER_COUNT: "${WORKER_COUNT}"
+      VOLGA_REQUEST_WORKER_COUNT: "${REQUEST_WORKER_COUNT:-0}"
       VOLGA_WORKER_HOST_PREFIX: "${WORKER_HOST_PREFIX}"
+      VOLGA_REQUEST_WORKER_HOST_PREFIX: "${REQUEST_WORKER_HOST_PREFIX:-request-worker-}"
       VOLGA_WORKER_PORT: "${WORKER_CONTROL_PORT}"
       VOLGA_WORKER_TRANSPORT_PORT: "${WORKER_TRANSPORT_PORT}"
+      VOLGA_REQUEST_HTTP_PORT: "${REQUEST_HTTP_PORT:-8080}"
       VOLGA_PIPELINE_SPEC_PATH: "/app/pipeline-spec.json"
 
   worker-0:
@@ -47,6 +50,45 @@ services:
       VOLGA_MASTER_SERVICE_ADDR: "master:${MASTER_CONTAINER_PORT}"
       VOLGA_WORKER_HOLD_ON_FINISH: "true"
       VOLGA_WORKER_HOST_PREFIX: "${WORKER_HOST_PREFIX}"
+      VOLGA_WORKER_INDEX: "2"
+
+  request-worker-0:
+    profiles: ["request-workers"]
+    image: volga:latest
+    command: ["volga-worker"]
+    depends_on: ["master"]
+    environment:
+      VOLGA_WORKER_BIND_ADDR: "0.0.0.0:${WORKER_CONTROL_PORT}"
+      VOLGA_REQUEST_BIND_ADDR: "0.0.0.0:${REQUEST_HTTP_PORT:-8080}"
+      VOLGA_MASTER_SERVICE_ADDR: "master:${MASTER_CONTAINER_PORT}"
+      VOLGA_WORKER_HOLD_ON_FINISH: "true"
+      VOLGA_WORKER_HOST_PREFIX: "${REQUEST_WORKER_HOST_PREFIX:-request-worker-}"
+      VOLGA_WORKER_INDEX: "0"
+
+  request-worker-1:
+    profiles: ["request-workers"]
+    image: volga:latest
+    command: ["volga-worker"]
+    depends_on: ["master"]
+    environment:
+      VOLGA_WORKER_BIND_ADDR: "0.0.0.0:${WORKER_CONTROL_PORT}"
+      VOLGA_REQUEST_BIND_ADDR: "0.0.0.0:${REQUEST_HTTP_PORT:-8080}"
+      VOLGA_MASTER_SERVICE_ADDR: "master:${MASTER_CONTAINER_PORT}"
+      VOLGA_WORKER_HOLD_ON_FINISH: "true"
+      VOLGA_WORKER_HOST_PREFIX: "${REQUEST_WORKER_HOST_PREFIX:-request-worker-}"
+      VOLGA_WORKER_INDEX: "1"
+
+  request-worker-2:
+    profiles: ["request-workers"]
+    image: volga:latest
+    command: ["volga-worker"]
+    depends_on: ["master"]
+    environment:
+      VOLGA_WORKER_BIND_ADDR: "0.0.0.0:${WORKER_CONTROL_PORT}"
+      VOLGA_REQUEST_BIND_ADDR: "0.0.0.0:${REQUEST_HTTP_PORT:-8080}"
+      VOLGA_MASTER_SERVICE_ADDR: "master:${MASTER_CONTAINER_PORT}"
+      VOLGA_WORKER_HOLD_ON_FINISH: "true"
+      VOLGA_WORKER_HOST_PREFIX: "${REQUEST_WORKER_HOST_PREFIX:-request-worker-}"
       VOLGA_WORKER_INDEX: "2"
 
   storage:

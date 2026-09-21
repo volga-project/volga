@@ -17,7 +17,7 @@ use crate::api::{KubePipelineSpec, PipelineSpec};
 use crate::common::failure::{FailureEvent, FailureKind};
 
 use super::orchestrator::{
-    MasterOrchestrator, WorkerHealthWatchHandle, WorkerNode, WorkerOrchestrator,
+    MasterOrchestrator, WorkerHealthWatchHandle, WorkerNode, WorkerOrchestrator, WorkerRole,
 };
 
 const VOLGA_CRD_GROUP: &str = "volga.io";
@@ -259,9 +259,11 @@ pub struct KubeMasterOrchestrator {
     api: Arc<KubeApiClient>,
     crd_name: String,
     worker_label_selector: String,
+    request_worker_label_selector: String,
     worker_id_label_key: String,
     worker_port: u16,
     transport_port: u16,
+    request_http_port: u16,
 }
 
 #[derive(Clone)]
@@ -277,6 +279,8 @@ impl KubeMasterOrchestrator {
             .unwrap_or_else(|_| panic!("VOLGA_PIPELINE_CRD_NAME is required"));
         let worker_label_selector = env::var("VOLGA_WORKER_LABEL_SELECTOR")
             .unwrap_or_else(|_| panic!("VOLGA_WORKER_LABEL_SELECTOR is required"));
+        let request_worker_label_selector =
+            env::var("VOLGA_REQUEST_WORKER_LABEL_SELECTOR").unwrap_or_default();
         let worker_id_label_key = env::var("VOLGA_WORKER_ID_LABEL")
             .unwrap_or_else(|_| panic!("VOLGA_WORKER_ID_LABEL is required"));
         let worker_port = env::var("VOLGA_WORKER_PORT")
@@ -287,13 +291,19 @@ impl KubeMasterOrchestrator {
             .unwrap_or_else(|_| panic!("VOLGA_WORKER_TRANSPORT_PORT is required"))
             .parse::<u16>()
             .unwrap_or_else(|e| panic!("failed to parse VOLGA_WORKER_TRANSPORT_PORT as u16: {e}"));
+        let request_http_port = env::var("VOLGA_REQUEST_HTTP_PORT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(8080);
         Ok(Self {
             api,
             crd_name,
             worker_label_selector,
+            request_worker_label_selector,
             worker_id_label_key,
             worker_port,
             transport_port,
+            request_http_port,
         })
     }
 
@@ -317,6 +327,60 @@ impl KubeMasterOrchestrator {
                     .and_then(|v| v.as_str())
                     .map(ToString::to_string)
             })
+    }
+
+    async fn discover_nodes(
+        &self,
+        label_selector: &str,
+        role: WorkerRole,
+    ) -> HashMap<String, WorkerNode> {
+        if label_selector.is_empty() {
+            return HashMap::new();
+        }
+        let path = format!("/api/v1/namespaces/{}/pods", self.api.namespace);
+        let pods = match self
+            .api
+            .get_json(&path, &[("labelSelector", label_selector)])
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => panic!("failed to discover worker pods from kube api: {}", e),
+        };
+        let mut out = HashMap::new();
+        if let Some(items) = pods.get("items").and_then(|v| v.as_array()) {
+            for item in items {
+                if !worker_pod_ready(item) {
+                    continue;
+                }
+                let pod_ip = json_get_path(item, &["status", "podIP"])
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                if let Some(worker_id) = self.worker_id_from_pod(item) {
+                    let data_port = if role == WorkerRole::Request {
+                        self.request_http_port
+                    } else {
+                        self.transport_port
+                    };
+                    let node = if role == WorkerRole::Request {
+                        WorkerNode::request(
+                            worker_id.clone(),
+                            pod_ip.to_string(),
+                            self.worker_port,
+                            data_port,
+                        )
+                    } else {
+                        WorkerNode::new(
+                            worker_id.clone(),
+                            pod_ip.to_string(),
+                            self.worker_port,
+                            data_port,
+                        )
+                    };
+                    out.insert(worker_id, node);
+                }
+            }
+        }
+        out
     }
 
     /// List matching worker pods and classify Ready vs unhealthy (includes non-ready pods).
@@ -460,39 +524,14 @@ impl KubeWorkerOrchestrator {
 #[async_trait]
 impl MasterOrchestrator for KubeMasterOrchestrator {
     async fn get_worker_nodes(&self) -> HashMap<String, WorkerNode> {
-        let path = format!("/api/v1/namespaces/{}/pods", self.api.namespace);
-        let pods = match self
-            .api
-            .get_json(
-                &path,
-                &[("labelSelector", self.worker_label_selector.as_str())],
-            )
-            .await
-        {
-            Ok(v) => v,
-            Err(e) => panic!("failed to discover worker pods from kube api: {}", e),
-        };
-        let mut out = HashMap::new();
-        if let Some(items) = pods.get("items").and_then(|v| v.as_array()) {
-            for item in items {
-                if !worker_pod_ready(item) {
-                    continue;
-                }
-                let pod_ip = json_get_path(item, &["status", "podIP"])
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default();
-                if let Some(worker_id) = self.worker_id_from_pod(item) {
-                    out.insert(
-                        worker_id.clone(),
-                        WorkerNode::new(
-                            worker_id,
-                            pod_ip.to_string(),
-                            self.worker_port,
-                            self.transport_port,
-                        ),
-                    );
-                }
-            }
+        let mut out = self
+            .discover_nodes(&self.worker_label_selector, WorkerRole::Streaming)
+            .await;
+        if !self.request_worker_label_selector.is_empty() {
+            out.extend(
+                self.discover_nodes(&self.request_worker_label_selector, WorkerRole::Request)
+                    .await,
+            );
         }
         out
     }
@@ -593,7 +632,18 @@ impl MasterOrchestrator for KubeMasterOrchestrator {
             return v;
         }
         let nodes = self.get_worker_nodes().await;
-        nodes.len()
+        nodes
+            .values()
+            .filter(|node| node.role == WorkerRole::Streaming)
+            .count()
+    }
+
+    async fn get_num_expected_request_workers(&self) -> usize {
+        let crd = match self.get_crd().await {
+            Ok(v) => v,
+            Err(e) => panic!("failed to fetch pipeline CRD from kube api: {}", e),
+        };
+        json_get_usize(&crd, &[&["spec", "requestWorkers", "replicas"]]).unwrap_or(0)
     }
 
     /// Delete the pods backing the given worker ids so the StatefulSet recreates them.
@@ -612,30 +662,49 @@ impl MasterOrchestrator for KubeMasterOrchestrator {
                 &[("labelSelector", self.worker_label_selector.as_str())],
             )
             .await?;
+        let request_pods = if self.request_worker_label_selector.is_empty() {
+            None
+        } else {
+            Some(
+                self.api
+                    .get_json(
+                        &list_path,
+                        &[("labelSelector", self.request_worker_label_selector.as_str())],
+                    )
+                    .await?,
+            )
+        };
 
         let mut deleted = 0usize;
-        if let Some(items) = pods.get("items").and_then(|v| v.as_array()) {
-            for item in items {
-                let worker_id =
-                    json_get_path(item, &["metadata", "labels", &self.worker_id_label_key])
-                        .and_then(|v| v.as_str())
-                        .or_else(|| {
-                            json_get_path(item, &["metadata", "name"]).and_then(|v| v.as_str())
-                        });
-                let pod_name = json_get_path(item, &["metadata", "name"]).and_then(|v| v.as_str());
-                if let (Some(worker_id), Some(pod_name)) = (worker_id, pod_name) {
-                    if target.contains(worker_id) {
-                        let delete_path = format!(
-                            "/api/v1/namespaces/{}/pods/{}",
-                            self.api.namespace, pod_name
-                        );
-                        self.api.delete(&delete_path).await?;
-                        deleted += 1;
-                        println!(
-                            "[MASTER] Requested replacement: deleted pod {} (worker_id={})",
-                            pod_name, worker_id
-                        );
-                    }
+        let mut items: Vec<&Value> = Vec::new();
+        if let Some(arr) = pods.get("items").and_then(|v| v.as_array()) {
+            items.extend(arr);
+        }
+        if let Some(request_pods) = &request_pods {
+            if let Some(arr) = request_pods.get("items").and_then(|v| v.as_array()) {
+                items.extend(arr);
+            }
+        }
+        for item in items {
+            let worker_id =
+                json_get_path(item, &["metadata", "labels", &self.worker_id_label_key])
+                    .and_then(|v| v.as_str())
+                    .or_else(|| {
+                        json_get_path(item, &["metadata", "name"]).and_then(|v| v.as_str())
+                    });
+            let pod_name = json_get_path(item, &["metadata", "name"]).and_then(|v| v.as_str());
+            if let (Some(worker_id), Some(pod_name)) = (worker_id, pod_name) {
+                if target.contains(worker_id) {
+                    let delete_path = format!(
+                        "/api/v1/namespaces/{}/pods/{}",
+                        self.api.namespace, pod_name
+                    );
+                    self.api.delete(&delete_path).await?;
+                    deleted += 1;
+                    println!(
+                        "[MASTER] Requested replacement: deleted pod {} (worker_id={})",
+                        pod_name, worker_id
+                    );
                 }
             }
         }

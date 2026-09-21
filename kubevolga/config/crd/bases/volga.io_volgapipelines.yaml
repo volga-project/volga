@@ -40,6 +40,12 @@ spec:
                     replicas:
                       type: integer
                       format: int32
+                requestWorkers:
+                  type: object
+                  properties:
+                    replicas:
+                      type: integer
+                      format: int32
                 image:
                   type: string
                 imagePullPolicy:

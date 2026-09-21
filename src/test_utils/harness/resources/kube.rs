@@ -158,6 +158,7 @@ impl KubeClusterResources {
             &pipeline_name,
             launch.pipeline,
             launch.worker_count,
+            launch.request_worker_count,
             launch.kube_worker_health_poll,
             launch.runtime_consts_profile,
             needs_store,
@@ -270,6 +271,7 @@ fn write_pipeline_manifest(
     pipeline_name: &str,
     pipeline: PipelineSpec,
     worker_count: usize,
+    request_worker_count: usize,
     kube_worker_health_poll: bool,
     runtime_consts_profile: crate::runtime::consts::RuntimeConstsProfile,
     needs_store: bool,
@@ -318,6 +320,9 @@ fn write_pipeline_manifest(
     }
     manifest["spec"]["pipelineSpec"] = pipeline_json;
     manifest["spec"]["workers"]["replicas"] = Value::Number(worker_count.into());
+    manifest["spec"]["requestWorkers"] = serde_json::json!({
+        "replicas": request_worker_count,
+    });
 
     let path = std::env::temp_dir().join(format!("{pipeline_name}-pipeline.json"));
     fs::write(&path, serde_json::to_vec_pretty(&manifest)?)?;

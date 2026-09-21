@@ -42,6 +42,8 @@ pub struct DockerMasterOrchestrator {
     worker_nodes: HashMap<String, WorkerNode>,
     pipeline_id: String,
     spec: PipelineSpec,
+    num_expected_workers: usize,
+    num_expected_request_workers: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -55,10 +57,20 @@ impl DockerMasterOrchestrator {
         let pipeline_id = env::var("VOLGA_PIPELINE_ID")
             .unwrap_or_else(|_| panic!("VOLGA_PIPELINE_ID is required for docker orchestrator"));
         let worker_count = parse_env_usize("VOLGA_WORKER_COUNT").max(1);
+        let request_worker_count = env::var("VOLGA_REQUEST_WORKER_COUNT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
         let worker_host_prefix = env::var("VOLGA_WORKER_HOST_PREFIX")
             .unwrap_or_else(|_| panic!("VOLGA_WORKER_HOST_PREFIX is required for docker orchestrator"));
+        let request_worker_host_prefix = env::var("VOLGA_REQUEST_WORKER_HOST_PREFIX")
+            .unwrap_or_else(|_| "request-worker-".to_string());
         let worker_port = parse_env_u16("VOLGA_WORKER_PORT");
         let transport_port = parse_env_u16("VOLGA_WORKER_TRANSPORT_PORT");
+        let request_http_port = env::var("VOLGA_REQUEST_HTTP_PORT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(8080);
         let mut worker_nodes = HashMap::new();
         for i in 0..worker_count {
             let ordinal = i;
@@ -73,11 +85,25 @@ impl DockerMasterOrchestrator {
                 ),
             );
         }
+        for i in 0..request_worker_count {
+            let worker_id = format!("{}{}", request_worker_host_prefix, i);
+            worker_nodes.insert(
+                worker_id.clone(),
+                WorkerNode::request(
+                    worker_id.clone(),
+                    worker_id,
+                    worker_port,
+                    request_http_port,
+                ),
+            );
+        }
         let spec = parse_pipeline_spec_from_env()?;
         Ok(Self {
             worker_nodes,
             pipeline_id,
             spec,
+            num_expected_workers: worker_count,
+            num_expected_request_workers: request_worker_count,
         })
     }
 }
@@ -110,7 +136,11 @@ impl MasterOrchestrator for DockerMasterOrchestrator {
     }
 
     async fn get_num_expected_workers(&self) -> usize {
-        self.worker_nodes.len()
+        self.num_expected_workers
+    }
+
+    async fn get_num_expected_request_workers(&self) -> usize {
+        self.num_expected_request_workers
     }
 }
 

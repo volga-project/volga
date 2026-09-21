@@ -32,11 +32,11 @@ struct DockerResources {
 }
 
 impl DockerResources {
-    fn start(spec_json: &str, worker_count: usize) -> Result<Self> {
+    fn start(spec_json: &str, worker_count: usize, request_worker_count: usize) -> Result<Self> {
         const MASTER_CONTAINER_PORT: u16 = 50051;
         const WORKER_CONTROL_PORT: u16 = 50052;
         const WORKER_TRANSPORT_PORT: u16 = 60052;
-        const STORAGE_CONTAINER_PORT: u16 = 50071;
+        const REQUEST_HTTP_PORT: u16 = 8080;
 
         let master_port = gen_unique_grpc_port();
         let storage_port = gen_unique_grpc_port();
@@ -54,9 +54,12 @@ impl DockerResources {
                  SPEC_FILE={}\n\
                  PIPELINE_ID={}\n\
                  WORKER_COUNT={worker_count}\n\
+                 REQUEST_WORKER_COUNT={request_worker_count}\n\
                  WORKER_HOST_PREFIX=worker-\n\
+                 REQUEST_WORKER_HOST_PREFIX=request-worker-\n\
                  WORKER_CONTROL_PORT={WORKER_CONTROL_PORT}\n\
                  WORKER_TRANSPORT_PORT={WORKER_TRANSPORT_PORT}\n\
+                 REQUEST_HTTP_PORT={REQUEST_HTTP_PORT}\n\
                  STORAGE_PORT={storage_port}\n\
                  STORAGE_CONTAINER_PORT={STORAGE_CONTAINER_PORT}\n",
                 spec_file.display(),
@@ -73,8 +76,16 @@ impl DockerResources {
             master_port,
             storage_port,
         };
-        resources.compose(&["up", "-d"])?;
+        resources.compose_up(request_worker_count > 0)?;
         Ok(resources)
+    }
+
+    fn compose_up(&self, with_request_workers: bool) -> Result<()> {
+        if with_request_workers {
+            self.compose(&["--profile", "request-workers", "up", "-d"])
+        } else {
+            self.compose(&["up", "-d"])
+        }
     }
 
     fn compose(&self, args: &[&str]) -> Result<()> {
@@ -215,6 +226,7 @@ impl DockerClusterResources {
             resources: Some(DockerResources::start(
                 &serde_json::to_string(&spec)?,
                 launch.worker_count,
+                launch.request_worker_count,
             )?),
             expected_workers: launch.worker_count,
         })

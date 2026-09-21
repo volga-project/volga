@@ -42,6 +42,7 @@ const (
 	masterPort             = int32(50051)
 	workerControlPort      = int32(50052)
 	workerTransportPort    = int32(60052)
+	requestHttpPort        = int32(8080)
 	metricsPort            = int32(9090)
 	defaultVolgaImage      = "volga:latest"
 	workerIDLabelKey       = "statefulset.kubernetes.io/pod-name"
@@ -80,6 +81,10 @@ func (r *PipelineReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if replicas <= 0 {
 		replicas = 1
 	}
+	requestReplicas := vp.Spec.RequestWorkers.Replicas
+	if requestReplicas < 0 {
+		requestReplicas = 0
+	}
 
 	volgaImage := vp.Spec.Image
 	if volgaImage == "" {
@@ -102,10 +107,14 @@ func (r *PipelineReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 	masterLabels := cloneAndAdd(baseLabels, map[string]string{"volga.io/component": "master"})
 	workerLabels := cloneAndAdd(baseLabels, map[string]string{"volga.io/component": "worker"})
+	requestWorkerLabels := cloneAndAdd(baseLabels, map[string]string{"volga.io/component": "request-worker"})
 	workerLabelSelector := fmt.Sprintf("volga.io/name=%s,volga.io/component=worker", vp.Name)
+	requestWorkerLabelSelector := fmt.Sprintf("volga.io/name=%s,volga.io/component=request-worker", vp.Name)
 
 	masterServiceName := fmt.Sprintf("%s-master", vp.Name)
 	workerServiceName := fmt.Sprintf("%s-workers", vp.Name)
+	requestWorkerServiceName := fmt.Sprintf("%s-request-workers", vp.Name)
+	requestHttpServiceName := fmt.Sprintf("%s-request", vp.Name)
 	runtimeServiceAccountName := fmt.Sprintf("%s-runtime", vp.Name)
 	runtimeRoleName := fmt.Sprintf("%s-runtime-role", vp.Name)
 	runtimeRoleBindingName := fmt.Sprintf("%s-runtime-rolebinding", vp.Name)
@@ -154,6 +163,14 @@ func (r *PipelineReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if err := r.reconcileWorkerHeadlessService(ctx, &vp, workerServiceName, workerLabels); err != nil {
 		return ctrl.Result{}, err
 	}
+	if requestReplicas > 0 {
+		if err := r.reconcileRequestWorkerHeadlessService(ctx, &vp, requestWorkerServiceName, requestWorkerLabels); err != nil {
+			return ctrl.Result{}, err
+		}
+		if err := r.reconcileRequestHttpService(ctx, &vp, requestHttpServiceName, requestWorkerLabels); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
 	if err := r.reconcileRuntimeServiceAccount(ctx, &vp, runtimeServiceAccountName); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -172,6 +189,7 @@ func (r *PipelineReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		masterResources,
 		masterLabels,
 		workerLabelSelector,
+		requestWorkerLabelSelector,
 		masterServiceAddr,
 		pipelineID,
 	); err != nil {
@@ -191,6 +209,21 @@ func (r *PipelineReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		); err != nil {
 			return ctrl.Result{}, err
 		}
+		if requestReplicas > 0 {
+			if err := r.reconcileRequestWorkerStatefulSet(
+				ctx,
+				&vp,
+				requestWorkerServiceName,
+				volgaImage,
+				workerPullPolicy,
+				workerResources,
+				requestWorkerLabels,
+				requestReplicas,
+				masterServiceAddr,
+			); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
 	}
 
 	phase := "Starting"
@@ -201,9 +234,17 @@ func (r *PipelineReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		}
 		var sts appsv1.StatefulSet
 		if err := r.Get(ctx, client.ObjectKey{Namespace: vp.Namespace, Name: fmt.Sprintf("%s-worker", vp.Name)}, &sts); err == nil {
-			if masterPod.Status.Phase == corev1.PodRunning &&
+			workersReady := masterPod.Status.Phase == corev1.PodRunning &&
 				sts.Status.ReadyReplicas == replicas &&
-				r.storageReady(ctx, vp.Namespace, vp.Name, createsStore) {
+				r.storageReady(ctx, vp.Namespace, vp.Name, createsStore)
+			requestReady := requestReplicas == 0
+			if requestReplicas > 0 {
+				var requestSts appsv1.StatefulSet
+				if err := r.Get(ctx, client.ObjectKey{Namespace: vp.Namespace, Name: fmt.Sprintf("%s-request-worker", vp.Name)}, &requestSts); err == nil {
+					requestReady = requestSts.Status.ReadyReplicas == requestReplicas
+				}
+			}
+			if workersReady && requestReady {
 				phase = "Running"
 			}
 		}
@@ -272,6 +313,61 @@ func (r *PipelineReconciler) reconcileWorkerHeadlessService(
 				{Name: "control", Port: workerControlPort},
 				{Name: "transport", Port: workerTransportPort},
 				{Name: "metrics", Port: metricsPort},
+			}
+			return nil
+		})
+		return err
+	})
+	return err
+}
+
+func (r *PipelineReconciler) reconcileRequestWorkerHeadlessService(
+	ctx context.Context,
+	vp *v1alpha1.VolgaPipeline,
+	name string,
+	labels map[string]string,
+) error {
+	var svc corev1.Service
+	svc.Namespace = vp.Namespace
+	svc.Name = name
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		_, err := controllerutil.CreateOrUpdate(ctx, r.Client, &svc, func() error {
+			if err := controllerutil.SetControllerReference(vp, &svc, r.Scheme); err != nil {
+				return err
+			}
+			svc.Labels = labels
+			svc.Spec.ClusterIP = "None"
+			svc.Spec.Selector = labels
+			svc.Spec.Ports = []corev1.ServicePort{
+				{Name: "control", Port: workerControlPort},
+				{Name: "http", Port: requestHttpPort},
+				{Name: "metrics", Port: metricsPort},
+			}
+			return nil
+		})
+		return err
+	})
+	return err
+}
+
+func (r *PipelineReconciler) reconcileRequestHttpService(
+	ctx context.Context,
+	vp *v1alpha1.VolgaPipeline,
+	name string,
+	labels map[string]string,
+) error {
+	var svc corev1.Service
+	svc.Namespace = vp.Namespace
+	svc.Name = name
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		_, err := controllerutil.CreateOrUpdate(ctx, r.Client, &svc, func() error {
+			if err := controllerutil.SetControllerReference(vp, &svc, r.Scheme); err != nil {
+				return err
+			}
+			svc.Labels = labels
+			svc.Spec.Selector = labels
+			svc.Spec.Ports = []corev1.ServicePort{
+				{Name: "http", Port: requestHttpPort},
 			}
 			return nil
 		})
@@ -415,6 +511,7 @@ func (r *PipelineReconciler) reconcileMasterPod(
 	resources corev1.ResourceRequirements,
 	labels map[string]string,
 	workerLabelSelector string,
+	requestWorkerLabelSelector string,
 	masterServiceAddr string,
 	pipelineID string,
 ) error {
@@ -457,9 +554,11 @@ func (r *PipelineReconciler) reconcileMasterPod(
 						{Name: "VOLGA_MASTER_HOLD_ON_FINISH", Value: holdOnFinish},
 						{Name: "VOLGA_PIPELINE_CRD_NAME", Value: vp.Name},
 						{Name: "VOLGA_WORKER_LABEL_SELECTOR", Value: workerLabelSelector},
+						{Name: "VOLGA_REQUEST_WORKER_LABEL_SELECTOR", Value: requestWorkerLabelSelector},
 						{Name: "VOLGA_WORKER_ID_LABEL", Value: workerIDLabelKey},
 						{Name: "VOLGA_WORKER_PORT", Value: strconv.FormatInt(int64(workerControlPort), 10)},
 						{Name: "VOLGA_WORKER_TRANSPORT_PORT", Value: strconv.FormatInt(int64(workerTransportPort), 10)},
+						{Name: "VOLGA_REQUEST_HTTP_PORT", Value: strconv.FormatInt(int64(requestHttpPort), 10)},
 						{Name: "VOLGA_PIPELINE_ID", Value: pipelineID},
 						{Name: "KUBE_API_SERVER", Value: kubeAPIServerInCluster},
 						{
@@ -534,6 +633,71 @@ func (r *PipelineReconciler) reconcileWorkerStatefulSet(
 				Env: []corev1.EnvVar{
 					{Name: "VOLGA_ORCHESTRATOR_KIND", Value: "kube"},
 					{Name: "VOLGA_WORKER_BIND_ADDR", Value: "0.0.0.0:" + strconv.FormatInt(int64(workerControlPort), 10)},
+					{Name: "VOLGA_METRICS_BIND_ADDR", Value: "0.0.0.0:" + strconv.FormatInt(int64(metricsPort), 10)},
+					{Name: "VOLGA_WORKER_HOLD_ON_FINISH", Value: holdOnFinish},
+					{Name: "MASTER_SERVICE_ADDR", Value: masterServiceAddr},
+					{
+						Name: "VOLGA_WORKER_ID",
+						ValueFrom: &corev1.EnvVarSource{
+							FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"},
+						},
+					},
+				},
+			}}
+			applyPodPlacement(&sts.Spec.Template.Spec, vp.Spec.Worker)
+			return nil
+		})
+		return err
+	})
+	return err
+}
+
+func (r *PipelineReconciler) reconcileRequestWorkerStatefulSet(
+	ctx context.Context,
+	vp *v1alpha1.VolgaPipeline,
+	serviceName string,
+	image string,
+	imagePullPolicy corev1.PullPolicy,
+	resources corev1.ResourceRequirements,
+	labels map[string]string,
+	replicas int32,
+	masterServiceAddr string,
+) error {
+	var sts appsv1.StatefulSet
+	sts.Namespace = vp.Namespace
+	sts.Name = fmt.Sprintf("%s-request-worker", vp.Name)
+
+	holdOnFinish := "false"
+	if vp.Spec.HoldOnFinish {
+		holdOnFinish = "true"
+	}
+
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		_, err := controllerutil.CreateOrUpdate(ctx, r.Client, &sts, func() error {
+			if err := controllerutil.SetControllerReference(vp, &sts, r.Scheme); err != nil {
+				return err
+			}
+			sts.Labels = labels
+			sts.Spec.ServiceName = serviceName
+			sts.Spec.Replicas = ptr.To(replicas)
+			sts.Spec.Selector = &metav1.LabelSelector{MatchLabels: labels}
+			sts.Spec.Template.ObjectMeta.Labels = labels
+			sts.Spec.Template.ObjectMeta.Annotations = prometheusScrapeAnnotations()
+			sts.Spec.Template.Spec.Containers = []corev1.Container{{
+				Name:            "worker",
+				Image:           image,
+				ImagePullPolicy: imagePullPolicy,
+				Resources:       resources,
+				Command:         []string{"volga-worker"},
+				Ports: []corev1.ContainerPort{
+					{ContainerPort: workerControlPort, Name: "control"},
+					{ContainerPort: requestHttpPort, Name: "http"},
+					{ContainerPort: metricsPort, Name: "metrics"},
+				},
+				Env: []corev1.EnvVar{
+					{Name: "VOLGA_ORCHESTRATOR_KIND", Value: "kube"},
+					{Name: "VOLGA_WORKER_BIND_ADDR", Value: "0.0.0.0:" + strconv.FormatInt(int64(workerControlPort), 10)},
+					{Name: "VOLGA_REQUEST_BIND_ADDR", Value: "0.0.0.0:" + strconv.FormatInt(int64(requestHttpPort), 10)},
 					{Name: "VOLGA_METRICS_BIND_ADDR", Value: "0.0.0.0:" + strconv.FormatInt(int64(metricsPort), 10)},
 					{Name: "VOLGA_WORKER_HOLD_ON_FINISH", Value: holdOnFinish},
 					{Name: "MASTER_SERVICE_ADDR", Value: masterServiceAddr},

@@ -11,6 +11,7 @@ import (
 type VolgaPipelineSpec struct {
 	PipelineSpec    json.RawMessage   `json:"pipelineSpec"`
 	Workers         VolgaWorkerSpec   `json:"workers,omitempty"`
+	RequestWorkers  VolgaWorkerSpec   `json:"requestWorkers,omitempty"`
 	Image           string            `json:"image,omitempty"`
 	HoldOnFinish    bool              `json:"holdOnFinish,omitempty"`
 	ImagePullPolicy corev1.PullPolicy `json:"imagePullPolicy,omitempty"`
