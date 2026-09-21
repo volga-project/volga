@@ -42,6 +42,8 @@ pub struct WindowStoreTaskScope {
     pub key_group_range: KeyGroupRange,
     pub writer_id: WriterId,
     pub attempt: Attempt,
+    /// When true, restore/complete write `window_kg_meta` (request mode).
+    pub request_mode: bool,
 }
 
 impl WindowStoreTaskScope {
@@ -52,6 +54,7 @@ impl WindowStoreTaskScope {
             key_group_range: KeyGroupRange::full(1),
             writer_id: WriterId(Vec::new()),
             attempt: 1,
+            request_mode: false,
         }
     }
 }
@@ -111,7 +114,12 @@ pub type StateVersion = Version;
 pub enum WindowBackendSnapshot {
     /// Development/test-only inline snapshot.
     InMemory { snapshot: Vec<u8> },
-    Versioned { version: StateVersion },
+    Versioned {
+        attempt: Attempt,
+        /// Parallel to [`cuts`]: the assignment this blob was captured under.
+        range: KeyGroupRange,
+        cuts: Vec<CutHistory>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -189,6 +197,38 @@ pub trait WindowOperatorStore: OperatorStore {
     /// Complete all pending writes before capturing the returned snapshot.
     async fn checkpoint(&self) -> Result<WindowBackendSnapshot>;
     async fn restore(&self, snapshot: &WindowBackendSnapshot) -> Result<()>;
+    /// Request mode: take `cur_attempt` / heal published cut. No-op for InMem.
+    async fn prepare_attempt(
+        &self,
+        restored: &WindowBackendSnapshot,
+        committed_wm: Option<i64>,
+        retention_floor: Option<i64>,
+        restored_checkpoint_id: Option<u64>,
+    ) -> Result<()> {
+        let _ = (
+            restored,
+            committed_wm,
+            retention_floor,
+            restored_checkpoint_id,
+        );
+        Ok(())
+    }
+    /// Request mode: publish the cut of a globally completed checkpoint.
+    async fn on_checkpoint_complete(
+        &self,
+        checkpoint_id: u64,
+        snapshot: &WindowBackendSnapshot,
+        committed_wm: Option<i64>,
+        retention_floor: Option<i64>,
+    ) -> Result<()> {
+        let _ = (
+            checkpoint_id,
+            snapshot,
+            committed_wm,
+            retention_floor,
+        );
+        Ok(())
+    }
 }
 
 /// Coherent point-lookup reads used by the Window Request Operator.

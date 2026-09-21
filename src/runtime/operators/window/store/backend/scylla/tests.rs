@@ -1,9 +1,8 @@
-//! Docker / testcontainer contract for the 287 write-path store.
+//! Docker / testcontainer contract for the Scylla window store.
 //!
 //! Ignored by default (`src/tests/README.md`). Point at an already-running
 //! cluster with `VOLGA_SCYLLA_CONTACT=127.0.0.1:9042` (unique keyspace per
-//! test). Otherwise each test starts `scylladb/scylla:5.4`. Later PRs add
-//! checkpoint / overlay-restore / maintain / WRO cases to this file.
+//! test). Otherwise each test starts `scylladb/scylla:5.4`.
 
 use crate::api::spec::state::ScyllaConfig;
 use crate::runtime::operators::window::model::{
@@ -11,7 +10,7 @@ use crate::runtime::operators::window::model::{
     TimeGranularity, WindowTiles, WindowTrigger, WindowTriggerKind,
 };
 use crate::runtime::operators::window::store::backend::{
-    collect_due, WindowOperatorStore, WindowStoreTaskScope,
+    collect_due, Version, WindowBackendSnapshot, WindowOperatorStore, WindowStoreTaskScope,
 };
 use crate::runtime::operators::window::store::data::cursors_from_batch;
 use crate::test_utils::window_aggs as test_utils;
@@ -104,7 +103,7 @@ async fn scylla_commit_load_and_stream_due() {
     let docker = clients::Cli::default();
     let (_container, store) = connect(&docker, "volga_loop").await;
     let ns = StateNamespace::new(b"op");
-    let client = store.client(scope(&ns, b"a"));
+    let client = store.client(scope(&ns, 1));
     let partition = partition(&ns);
     let events = test_utils::batch(&[(1_000, 1_000.0, "key", 1)]);
     client
@@ -149,7 +148,7 @@ async fn scylla_empty_loads_and_empty_runs() {
     let docker = clients::Cli::default();
     let (_container, store) = connect(&docker, "volga_empty").await;
     let ns = StateNamespace::new(b"op");
-    let client = store.client(scope(&ns, b"a"));
+    let client = store.client(scope(&ns, 1));
     let partition = partition(&ns);
     let raw_runs = [raw_run((0, 0), (10, 0))];
     let tile_runs = [TileRun {
@@ -194,7 +193,7 @@ async fn scylla_commit_stores_raw_tiles_and_key_state() {
     let docker = clients::Cli::default();
     let (_container, store) = connect(&docker, "volga_commit").await;
     let ns = StateNamespace::new(b"op");
-    let client = store.client(scope(&ns, b"a"));
+    let client = store.client(scope(&ns, 1));
     let partition = partition(&ns);
     let meta = KeyState {
         next_seq: 3,
@@ -247,7 +246,7 @@ async fn scylla_store_key_state_leaves_raw_and_tiles_unchanged() {
     let docker = clients::Cli::default();
     let (_container, store) = connect(&docker, "volga_keystate").await;
     let ns = StateNamespace::new(b"op");
-    let client = store.client(scope(&ns, b"a"));
+    let client = store.client(scope(&ns, 1));
     let partition = partition(&ns);
     let stored_tiles = tiles(&[(TimeGranularity::Seconds(1), 1_000, 7)]);
     client
@@ -310,7 +309,7 @@ async fn scylla_raw_ranges_are_half_open_and_ordered() {
     let docker = clients::Cli::default();
     let (_container, store) = connect(&docker, "volga_raw").await;
     let ns = StateNamespace::new(b"op");
-    let client = store.client(scope(&ns, b"a"));
+    let client = store.client(scope(&ns, 1));
     let partition = partition(&ns);
     client
         .commit_events(
@@ -359,7 +358,7 @@ async fn scylla_tile_ranges_are_half_open() {
     let docker = clients::Cli::default();
     let (_container, store) = connect(&docker, "volga_tiles").await;
     let ns = StateNamespace::new(b"op");
-    let client = store.client(scope(&ns, b"a"));
+    let client = store.client(scope(&ns, 1));
     let partition = partition(&ns);
     let stored_tiles = tiles(&[
         (TimeGranularity::Seconds(1), 0, 0),
@@ -406,8 +405,8 @@ async fn scylla_overlay_hides_other_attempt() {
     let docker = clients::Cli::default();
     let (_container, store) = connect(&docker, "volga_overlay").await;
     let ns = StateNamespace::new(b"op");
-    let writer = store.client(scope(&ns, b"a"));
-    let other = store.client(scope(&ns, b"b"));
+    let writer = store.client(scope(&ns, 1));
+    let other = store.client(scope(&ns, 2));
     let partition = partition(&ns);
     writer
         .commit_events(
@@ -451,3 +450,54 @@ async fn scylla_overlay_hides_other_attempt() {
         .unwrap()
         .is_empty());
 }
+
+#[tokio::test]
+#[ignore]
+async fn scylla_restore_sees_checkpointed_prefix() {
+    let docker = clients::Cli::default();
+    let (_container, store) = connect(&docker, "volga_restore").await;
+    let ns = StateNamespace::new(b"op");
+    let writer = store.client(scope(&ns, 1));
+    let partition = partition(&ns);
+    writer
+        .commit_events(
+            &partition,
+            0,
+            &batch(&[(1_000, 1)]),
+            &tiles(&[(TimeGranularity::Seconds(1), 1_000, 1)]),
+            &KeyState {
+                next_seq: 2,
+                ..Default::default()
+            },
+            &[],
+        )
+        .await
+        .unwrap();
+    let snap = writer.checkpoint().await.unwrap();
+    match &snap {
+        WindowBackendSnapshot::Versioned {
+            attempt,
+            range: _,
+            cuts,
+        } => {
+            assert_eq!(*attempt, 1);
+            assert_eq!(cuts.len(), 1);
+            assert!(cuts[0].allows(Version {
+                attempt: 1,
+                epoch: 0
+            }));
+        }
+        WindowBackendSnapshot::InMemory { .. } => panic!("expected Versioned snapshot"),
+    }
+
+    let successor = store.client(scope(&ns, 2));
+    successor.restore(&snap).await.unwrap();
+    assert_eq!(successor.load_key_state(&partition).await.unwrap().next_seq, 2);
+
+    let other = store.client(scope(&ns, 3));
+    assert_eq!(
+        other.load_key_state(&partition).await.unwrap(),
+        KeyState::default()
+    );
+}
+

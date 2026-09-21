@@ -19,12 +19,23 @@ pub struct CutHistory {
 }
 
 impl CutHistory {
+    /// v1 does not retire entries; fail rather than let the list grow without bound.
+    pub const MAX_ENTRIES: usize = 1024;
+
     pub fn empty() -> Self {
         Self { entries: Vec::new() }
     }
 
     pub fn entries(&self) -> &[Version] {
         &self.entries
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>, bincode::Error> {
+        bincode::serialize(self)
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, bincode::Error> {
+        bincode::deserialize(bytes)
     }
 
     pub fn allows(&self, v: Version) -> bool {
@@ -100,5 +111,12 @@ mod tests {
             .advance(2, Some(3));
         assert_eq!(cut.entries()[0].epoch, 10);
         assert_eq!(cut.entries()[1].epoch, 3);
+    }
+
+    #[test]
+    fn encode_round_trips() {
+        let cut = CutHistory::empty().advance(1, Some(4));
+        let bytes = cut.encode().unwrap();
+        assert_eq!(CutHistory::decode(&bytes).unwrap(), cut);
     }
 }

@@ -57,6 +57,18 @@ pub const TABLES: &[&str] = &[
         epoch bigint,
         PRIMARY KEY ((namespace, bucket_start, kg_shard), fire_ts, fire_seq, business_key, trigger_kind, window_id, attempt, epoch)
     ) WITH CLUSTERING ORDER BY (fire_ts ASC, fire_seq ASC, business_key ASC, trigger_kind ASC, window_id ASC, attempt DESC, epoch DESC)"#,
+    r#"CREATE TABLE IF NOT EXISTS window_kg_meta (
+        namespace blob,
+        key_group int,
+        cur_attempt bigint,
+        cut blob,
+        prev_cut blob,
+        prev_checkpoint_id bigint,
+        committed_wm bigint,
+        retention_floor bigint,
+        checkpoint_id bigint,
+        PRIMARY KEY ((namespace, key_group))
+    )"#,
 ];
 
 pub fn align_down(ts: i64, width: i64) -> i64 {

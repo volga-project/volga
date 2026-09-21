@@ -378,6 +378,7 @@ impl OperatorTrait for WindowOperator {
                 key_group_range,
                 writer_id: WriterId(context.vertex_id().as_bytes().to_vec()),
                 attempt,
+                request_mode: context.request_store().is_some(),
             };
             let store = open_window_operator_store(registry, backend, &scope)?;
             let task_id = context.vertex_id_arc();
@@ -416,8 +417,8 @@ impl OperatorTrait for WindowOperator {
         self.base.operator_config()
     }
 
-    async fn checkpoint(&mut self, _checkpoint_id: u64) -> Result<SerializedCheckpoint> {
-        let snapshot = self.state_ref().checkpoint().await?;
+    async fn checkpoint(&mut self, checkpoint_id: u64) -> Result<SerializedCheckpoint> {
+        let snapshot = self.state_ref().checkpoint(checkpoint_id).await?;
         Ok(SerializedCheckpoint::new(bincode::serialize(&snapshot)?))
     }
 
@@ -426,6 +427,12 @@ impl OperatorTrait for WindowOperator {
         let snapshot: WindowStateSnapshot = bincode::deserialize(&bytes)?;
         self.state_ref().restore(snapshot).await?;
         Ok(())
+    }
+
+    async fn notify_checkpoint_complete(&mut self, checkpoint_id: u64) -> Result<()> {
+        self.state_ref()
+            .notify_checkpoint_complete(checkpoint_id)
+            .await
     }
 }
 

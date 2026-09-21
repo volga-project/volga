@@ -1448,10 +1448,9 @@ mod tests {
         let store = InMemWindowStore::new();
         let error = client(&store, &StateNamespace::new("test-namespace"))
             .restore(&WindowBackendSnapshot::Versioned {
-                version: StateVersion {
-                    attempt: 1,
-                    epoch: 1,
-                },
+                attempt: 1,
+                range: crate::common::KeyGroupRange::full(1),
+                cuts: Vec::new(),
             })
             .await
             .unwrap_err();
@@ -1474,6 +1473,7 @@ mod tests {
                 key_group_range: KeyGroupRange::for_subtask(task_index, parallelism, max_parallelism),
                 writer_id: WriterId(format!("task-{task_index}").into_bytes()),
                 attempt: 1,
+                request_mode: false,
             })
         };
         let c0 = bind(0);
@@ -1565,6 +1565,7 @@ mod tests {
                 key_group_range: KeyGroupRange::for_subtask(0, parallelism, max_parallelism),
                 writer_id: WriterId(b"task-0".to_vec()),
                 attempt: 1,
+                request_mode: false,
             },
         );
         task0
@@ -1606,6 +1607,7 @@ mod tests {
                 ),
                 writer_id: WriterId(format!("task-{task_index}").into_bytes()),
                 attempt: 1,
+                request_mode: false,
             })
         };
         let c0 = bind(0);
@@ -1654,6 +1656,7 @@ mod tests {
             key_group_range: KeyGroupRange::for_subtask(0, parallelism, max_parallelism),
             writer_id: WriterId(b"task-0".to_vec()),
             attempt: 1,
+            request_mode: false,
         });
         let part1 = partition_for_group(&ns, 2, max_parallelism, b"k1");
         let error = c0.load_key_state(&part1).await.unwrap_err();

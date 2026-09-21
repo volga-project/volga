@@ -1,7 +1,7 @@
 use std::any::Any;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use arrow::array::{RecordBatch, TimestampMillisecondArray, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
@@ -39,12 +39,16 @@ pub struct WindowOperatorState {
     max_window_length_ms: i64,
     /// Task watermark frontier; [`WATERMARK_UNSET`] until the first advance.
     pub watermark_frontier: AtomicI64,
+    /// Cuts captured at each barrier, published on completion (#300).
+    pending_checkpoints: Mutex<HashMap<u64, WindowStateSnapshot>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WindowStateSnapshot {
     pub namespace: Vec<u8>,
     pub watermark_frontier: Option<i64>,
+    #[serde(default)]
+    pub checkpoint_id: Option<u64>,
     pub backend: WindowBackendSnapshot,
 }
 
@@ -67,6 +71,7 @@ impl WindowOperatorState {
             lateness_ms,
             max_window_length_ms,
             watermark_frontier: AtomicI64::new(WATERMARK_UNSET),
+            pending_checkpoints: Mutex::new(HashMap::new()),
         }
     }
 
@@ -127,12 +132,25 @@ impl WindowOperatorState {
         PartitionKey::new(&self.scope.namespace, key)
     }
 
-    pub async fn checkpoint(&self) -> anyhow::Result<WindowStateSnapshot> {
-        Ok(WindowStateSnapshot {
+    fn retention_floor_at(&self, watermark: Option<i64>) -> Option<i64> {
+        watermark.map(|w| {
+            w.saturating_sub(self.max_window_length_ms.max(0))
+                .saturating_sub(self.lateness_ms.max(0))
+        })
+    }
+
+    pub async fn checkpoint(&self, checkpoint_id: u64) -> anyhow::Result<WindowStateSnapshot> {
+        let snap = WindowStateSnapshot {
             namespace: self.scope.namespace.bytes.clone(),
             watermark_frontier: self.watermark_frontier(),
+            checkpoint_id: Some(checkpoint_id),
             backend: self.store.checkpoint().await?,
-        })
+        };
+        self.pending_checkpoints
+            .lock()
+            .expect("pending_checkpoints")
+            .insert(checkpoint_id, snap.clone());
+        Ok(snap)
     }
 
     pub async fn restore(&self, restore: WindowStateSnapshot) -> anyhow::Result<()> {
@@ -145,7 +163,34 @@ impl WindowOperatorState {
             restore.watermark_frontier.unwrap_or(WATERMARK_UNSET),
             Ordering::Release,
         );
+        self.store
+            .prepare_attempt(
+                &restore.backend,
+                restore.watermark_frontier,
+                self.retention_floor_at(restore.watermark_frontier),
+                restore.checkpoint_id,
+            )
+            .await?;
         Ok(())
+    }
+
+    pub async fn notify_checkpoint_complete(&self, checkpoint_id: u64) -> anyhow::Result<()> {
+        let snap = self
+            .pending_checkpoints
+            .lock()
+            .expect("pending_checkpoints")
+            .remove(&checkpoint_id);
+        let Some(snap) = snap else {
+            return Ok(());
+        };
+        self.store
+            .on_checkpoint_complete(
+                checkpoint_id,
+                &snap.backend,
+                snap.watermark_frontier,
+                self.retention_floor_at(snap.watermark_frontier),
+            )
+            .await
     }
 
     pub async fn insert_batch(

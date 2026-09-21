@@ -18,12 +18,12 @@ use crate::runtime::operators::window::store::backend::{
 use crate::runtime::state::{OperatorStore, OperatorTaskState, StateSessionHandle};
 
 use super::cql::{
-    prepare_stmts, PreparedDml, INSERT_KEY_STATES, INSERT_KG_BUCKETS, INSERT_RAW, INSERT_TILES,
-    INSERT_TRIGGERS, SELECT_KEY_STATE, SELECT_KEY_STATE_AT, SELECT_RAW, SELECT_TILES,
-    SELECT_TRIGGERS,
+    configure_lwt, prepare_stmts, PreparedDml, INSERT_KEY_STATES, INSERT_KG_BUCKETS, INSERT_META,
+    INSERT_RAW, INSERT_TILES, INSERT_TRIGGERS, PUBLISH_META, SELECT_KEY_STATE, SELECT_KEY_STATE_AT,
+    SELECT_META, SELECT_RAW, SELECT_TILES, SELECT_TRIGGERS, TAKE_ATTEMPT,
 };
 use super::schema::TABLES;
-use super::{read, triggers, write};
+use super::{checkpoint, read, triggers, write};
 
 #[derive(Default)]
 struct GroupClock {
@@ -90,6 +90,10 @@ impl ScyllaWindowStore {
                     select_raw,
                     select_tiles,
                     select_triggers,
+                    select_meta,
+                    mut insert_meta,
+                    mut publish_meta,
+                    mut take_attempt,
                 ] = prepare_stmts(
                     session.as_ref(),
                     [
@@ -103,9 +107,16 @@ impl ScyllaWindowStore {
                         SELECT_RAW,
                         SELECT_TILES,
                         SELECT_TRIGGERS,
+                        SELECT_META,
+                        INSERT_META,
+                        PUBLISH_META,
+                        TAKE_ATTEMPT,
                     ],
                 )
                 .await?;
+                configure_lwt(&mut insert_meta);
+                configure_lwt(&mut publish_meta);
+                configure_lwt(&mut take_attempt);
                 Ok::<_, anyhow::Error>(PreparedDml {
                     insert_raw,
                     insert_kg_buckets,
@@ -117,6 +128,10 @@ impl ScyllaWindowStore {
                     select_raw,
                     select_tiles,
                     select_triggers,
+                    select_meta,
+                    insert_meta,
+                    publish_meta,
+                    take_attempt,
                 })
             })
             .await
@@ -140,7 +155,7 @@ pub struct ScyllaWindowStoreClient {
     pub(super) scope: WindowStoreTaskScope,
     groups: Arc<Mutex<HashMap<i32, GroupClock>>>,
     in_flight_keys: Arc<Mutex<HashSet<Vec<u8>>>>,
-    /// Restored overlay; empty until #288 restore.
+    /// Restored overlay; empty until restore.
     cp_cut: Arc<Mutex<HashMap<i32, CutHistory>>>,
 }
 
@@ -187,7 +202,6 @@ impl ScyllaWindowStoreClient {
         }
     }
 
-    #[allow(dead_code)]
     pub(super) fn cut_top(&self, kg: i32) -> Option<u64> {
         let groups = self.groups.lock().expect("groups");
         let clock = groups.get(&kg)?;
@@ -198,6 +212,38 @@ impl ScyllaWindowStoreClient {
             None if clock.next_epoch == 0 => None,
             None => Some(clock.next_epoch - 1),
         }
+    }
+
+    pub(super) fn snapshot_cuts(&self) -> Result<Vec<CutHistory>> {
+        let range = self.scope.key_group_range;
+        let n = range.end.saturating_sub(range.start);
+        let cp = self.cp_cut.lock().expect("cp_cut").clone();
+        let mut cuts = Vec::with_capacity(n);
+        for g in range.start..range.end {
+            let kg = g as i32;
+            let inherited = cp.get(&kg).cloned().unwrap_or_default();
+            let advanced = inherited.advance(self.scope.attempt, self.cut_top(kg));
+            anyhow::ensure!(
+                advanced.entries().len() <= CutHistory::MAX_ENTRIES,
+                "cut history for key group {g} exceeded {} entries",
+                CutHistory::MAX_ENTRIES
+            );
+            cuts.push(advanced);
+        }
+        Ok(cuts)
+    }
+
+    pub(super) fn reset_for_restore(&self, cuts: HashMap<i32, CutHistory>) {
+        *self.cp_cut.lock().expect("cp_cut") = cuts;
+        *self.groups.lock().expect("groups") = HashMap::new();
+        self.in_flight_keys
+            .lock()
+            .expect("in_flight_keys")
+            .clear();
+    }
+
+    pub(super) fn in_flight_key_count(&self) -> usize {
+        self.in_flight_keys.lock().expect("in_flight_keys").len()
     }
 
     pub(super) fn begin_key(&self, key: &[u8]) -> Result<()> {
@@ -283,11 +329,45 @@ impl WindowOperatorStore for ScyllaWindowStoreClient {
     }
 
     async fn checkpoint(&self) -> Result<WindowBackendSnapshot> {
-        anyhow::bail!("Scylla checkpoint lands in feat/scylla-wo-checkpoint")
+        checkpoint::checkpoint(self).await
     }
 
-    async fn restore(&self, _snapshot: &WindowBackendSnapshot) -> Result<()> {
-        anyhow::bail!("Scylla restore lands in feat/scylla-wo-checkpoint")
+    async fn restore(&self, snapshot: &WindowBackendSnapshot) -> Result<()> {
+        checkpoint::restore(self, snapshot).await
+    }
+
+    async fn prepare_attempt(
+        &self,
+        restored: &WindowBackendSnapshot,
+        committed_wm: Option<i64>,
+        retention_floor: Option<i64>,
+        restored_checkpoint_id: Option<u64>,
+    ) -> Result<()> {
+        checkpoint::prepare_attempt(
+            self,
+            restored,
+            committed_wm,
+            retention_floor,
+            restored_checkpoint_id,
+        )
+        .await
+    }
+
+    async fn on_checkpoint_complete(
+        &self,
+        checkpoint_id: u64,
+        snapshot: &WindowBackendSnapshot,
+        committed_wm: Option<i64>,
+        retention_floor: Option<i64>,
+    ) -> Result<()> {
+        checkpoint::on_checkpoint_complete(
+            self,
+            checkpoint_id,
+            snapshot,
+            committed_wm,
+            retention_floor,
+        )
+        .await
     }
 }
 
