@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::spec::state::{OperatorStateBackendConfig, RequestStoreConfig};
 use crate::common::KeyGroupRange;
+use crate::runtime::consts::{runtime_consts, WINDOW_PROCESS_PAGE_SIZE};
 use crate::runtime::operators::window::model::{
     Cursor, KeyState, PartitionKey, RawRun, StateNamespace, TileMap, TileRun, WindowTrigger,
 };
@@ -15,10 +16,8 @@ use crate::runtime::state::{OperatorStore, StateRegistry};
 
 use super::WindowData;
 
-mod due;
 mod inmem;
 
-pub use due::{collect_due, trigger_page_size};
 pub use inmem::{InMemWindowStore, InMemWindowStoreClient};
 
 /// Job-level execution attempt stamped on published versions.
@@ -92,11 +91,26 @@ pub enum WindowBackendSnapshot {
     Versioned { version: StateVersion },
 }
 
-#[derive(Debug, Clone)]
-pub struct DueWindowWork {
-    pub partition: PartitionKey,
-    pub key_state: KeyState,
-    pub triggers: Vec<WindowTrigger>,
+/// Drain `(after, through]` for tests. The operator loops `load_triggers` itself.
+pub async fn collect_triggers(
+    store: &dyn WindowOperatorStore,
+    after: Option<Cursor>,
+    through: Cursor,
+) -> Result<Vec<WindowTrigger>> {
+    let limit = runtime_consts().u64(WINDOW_PROCESS_PAGE_SIZE).max(1) as usize;
+    let mut resume = None;
+    let mut out = Vec::new();
+    loop {
+        let (triggers, next) = store
+            .load_triggers(after, through, resume.as_ref(), limit)
+            .await?;
+        out.extend(triggers);
+        match next {
+            Some(token) => resume = Some(token),
+            None => break,
+        }
+    }
+    Ok(out)
 }
 
 /// Opaque pager token. Only the backend that produced it should pass it back.

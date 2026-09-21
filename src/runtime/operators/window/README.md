@@ -82,7 +82,8 @@ keys.
 
 Emitting WO pages durable triggers through the requested watermark:
 
-1. Load a backend-sized page of due triggers grouped by partition.
+1. Loop `load_triggers` until `next` is `None`; group each hop by partition
+   and eval+emit before the next hop.
 2. Use trigger cursors as exact emit points.
 3. Build one `EvalPlan` per emitted result and window expression.
 4. Merge emit-row and historical coverage, then load raw rows and tiles once.
@@ -141,7 +142,7 @@ store access.
 
 - load partition metadata and exact raw/tile runs;
 - atomically commit ingest data, metadata, and triggers;
-- page due triggers and publish evaluation state after advancement;
+- load due triggers (`load_triggers`) and publish evaluation state after advancement;
 - flush, checkpoint, and restore a namespace.
 
 Physical retention is via `OperatorStore::maintain` (worker cleaner), reading

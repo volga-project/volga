@@ -12,7 +12,7 @@ use crate::runtime::operators::window::request::{
     WindowRequestOperator, WindowRequestOperatorConfig,
 };
 use crate::runtime::operators::window::store::{
-    collect_due, InMemWindowStore, PartitionKey, StateNamespace, WindowStoreTaskScope,
+    collect_triggers, InMemWindowStore, PartitionKey, StateNamespace, WindowStoreTaskScope,
 };
 use crate::test_utils::window::harness::{
     assert_window_values, batch, key, keyed_message, runtime_context, watermark_message,
@@ -164,9 +164,9 @@ async fn state_only_publishes_on_ingest_and_advances_on_watermark() {
     let meta = h.store.load_key_state(&partition).await.expect("state");
     assert!(meta.evaluation.is_none());
     let client = h.store.client(WindowStoreTaskScope::for_test(h.namespace.clone()));
-    let due = collect_due(&client, None, Cursor::new(2000, u64::MAX))
+    let due = collect_triggers(&client, None, Cursor::new(2000, u64::MAX))
         .await
-        .expect("due page");
+        .expect("due triggers");
     assert!(due.is_empty());
 
     let mut wro = open_wro(h.store.clone(), h.namespace.clone()).await;

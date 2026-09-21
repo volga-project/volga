@@ -706,7 +706,8 @@ impl OperatorStore for InMemWindowStoreClient {
 mod tests {
     use super::*;
     use crate::common::KeyGroupRange;
-    use crate::runtime::operators::window::store::{collect_due, trigger_page_size};
+    use crate::runtime::consts::{runtime_consts, WINDOW_PROCESS_PAGE_SIZE};
+    use crate::runtime::operators::window::store::collect_triggers;
 
     use crate::runtime::operators::window::model::{
         KeyEvaluationState, TileRun, TimeGranularity, WindowTiles, WindowTriggerKind,
@@ -1109,7 +1110,7 @@ mod tests {
         let store = InMemWindowStore::new();
         let partition = partition();
         let namespace = StateNamespace::new(&partition.namespace);
-        let page = trigger_page_size();
+        let page = runtime_consts().u64(WINDOW_PROCESS_PAGE_SIZE).max(1) as usize;
         let extra = 34;
         let n = page + extra;
         let triggers = (0..n)
@@ -1266,10 +1267,10 @@ mod tests {
             .store(5_000, std::sync::atomic::Ordering::Release);
         store.maintain(&namespace, &task_state).await.unwrap();
 
-        let work = collect_due(&client, None, Cursor::new(10_000, u64::MAX))
+        let due = collect_triggers(&client, None, Cursor::new(10_000, u64::MAX))
             .await
             .unwrap();
-        assert_eq!(work[0].triggers, vec![triggers[2].clone()]);
+        assert_eq!(due, vec![triggers[2].clone()]);
 
         let loaded = store
             .load_raw(&partition, &[raw_run((0, 0), (20_000, 0))])
@@ -1349,15 +1350,14 @@ mod tests {
 
         assert_meta(&restored.load_key_state(&partition).await.unwrap(), &meta);
         let restored_client = client(&restored, &namespace);
-        let work = collect_due(
+        let due = collect_triggers(
             &restored_client,
             Some(Cursor::new(1_000, u64::MAX)),
             Cursor::new(2_000, u64::MAX),
         )
         .await
         .unwrap();
-        assert_eq!(work.len(), 1);
-        assert_eq!(work[0].triggers, vec![triggers[1].clone()]);
+        assert_eq!(due, vec![triggers[1].clone()]);
         let loaded = restored
             .load_raw(&partition, &[raw_run((0, 0), (3_000, 0))])
             .await
@@ -1572,14 +1572,14 @@ mod tests {
             .store(5_000, std::sync::atomic::Ordering::Release);
         store.maintain(&ns, &task0).await.unwrap();
 
-        assert!(collect_due(&c0, None, Cursor::new(10_000, u64::MAX))
+        assert!(collect_triggers(&c0, None, Cursor::new(10_000, u64::MAX))
             .await
             .unwrap()
             .is_empty());
-        let work1 = collect_due(&c1, None, Cursor::new(10_000, u64::MAX))
+        let due1 = collect_triggers(&c1, None, Cursor::new(10_000, u64::MAX))
             .await
             .unwrap();
-        assert_eq!(work1[0].triggers, vec![triggers1[0].clone()]);
+        assert_eq!(due1, vec![triggers1[0].clone()]);
         assert_eq!(c1.load_key_state(&part1).await.unwrap().next_seq, 21);
         assert_packed(
             &c1.load_raw(&part1, &[raw_run((0, 0), (20_000, 0))])

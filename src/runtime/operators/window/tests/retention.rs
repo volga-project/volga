@@ -6,7 +6,7 @@ use crate::runtime::operators::window::model::{Cursor, RawRun, TileRun};
 use crate::runtime::operators::window::operator::{WindowOperatorConfig, WindowOutputMode};
 use crate::runtime::operators::window::spec::WindowSpec;
 use crate::runtime::operators::window::store::{
-    collect_due, PartitionKey, WindowStoreTaskScope,
+    collect_triggers, PartitionKey, WindowStoreTaskScope,
 };
 use crate::test_utils::window::harness::{
     batch, key, watermark_message, window_exec_from_sql, Harness,
@@ -23,12 +23,10 @@ WINDOW w AS (
 
 async fn due_trigger_count(h: &Harness, through: i64) -> usize {
     let client = h.store.client(WindowStoreTaskScope::for_test(h.namespace.clone()));
-    collect_due(&client, None, Cursor::new(through, u64::MAX))
+    collect_triggers(&client, None, Cursor::new(through, u64::MAX))
         .await
-        .expect("due page")
-        .into_iter()
-        .map(|work| work.triggers.len())
-        .sum()
+        .expect("due triggers")
+        .len()
 }
 
 async fn raw_timestamps(h: &Harness, partition: &str) -> Vec<i64> {
