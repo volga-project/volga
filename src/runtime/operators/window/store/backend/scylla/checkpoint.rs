@@ -125,16 +125,13 @@ pub(super) async fn on_checkpoint_complete(
     );
     try_join_all(cuts.iter().enumerate().map(|(offset, cut)| {
         let kg = (range.start + offset) as i32;
-        meta::publish(
-            client,
-            kg,
-            &PublishPayload {
-                cut: cut.clone(),
-                committed_wm,
-                retention_floor,
-                checkpoint_id,
-            },
-        )
+        let payload = PublishPayload {
+            cut: cut.clone(),
+            committed_wm,
+            retention_floor,
+            checkpoint_id,
+        };
+        async move { meta::publish(client, kg, &payload).await }
     }))
     .await?;
     Ok(())
