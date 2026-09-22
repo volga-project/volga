@@ -967,7 +967,7 @@ mod tests {
                    FROM events";
         
         let mut streaming = planner.sql_to_graph(sql).unwrap();
-        let request = streaming.to_request_mode(&request).unwrap();
+        let request = crate::api::GraphSplitter::split(&mut streaming, &request).unwrap();
         let request = &request.graph;
 
         let streaming_nodes: Vec<_> = streaming.get_nodes().collect();

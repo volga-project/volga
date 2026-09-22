@@ -1,18 +1,15 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::fmt;
 use std::time::Duration;
-use arrow::datatypes::{Schema as ArrowSchema, SchemaRef};
+use arrow::datatypes::Schema as ArrowSchema;
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::prelude::EdgeRef;
 use petgraph::Direction;
 use crate::runtime::operators::operator::OperatorConfig;
 use crate::runtime::execution_graph::{ExecutionGraph, ExecutionVertex, ExecutionEdge};
-use crate::runtime::operators::window::operator::WindowOutputMode;
-use crate::runtime::operators::window::request::WindowRequestOperatorConfig;
 use crate::runtime::partition::PartitionType;
 use crate::api::spec::event_time::EventTimeSpec;
-use crate::api::spec::pipeline::RequestSpec;
 use crate::runtime::watermark::{TimeHint, WatermarkAssignConfig};
 
 #[derive(Debug, Clone)]
@@ -54,22 +51,13 @@ pub struct LogicalEdge {
 
 #[derive(Debug, Clone)]
 pub struct LogicalGraph {
-    graph: DiGraph<LogicalNode, LogicalEdge>,
-    operator_type_counters: HashMap<String, u32>,
-    root_node_index: Option<NodeIndex>,
-    watermarks_enabled: bool,
-    event_time: EventTimeSpec,
-    emit_interval: Duration,
-    max_parallelism: usize,
-}
-
-/// Operator chain served by one HTTP request. HTTP decode/encode stays outside the graph.
-#[derive(Debug, Clone)]
-pub struct RequestChain {
-    pub graph: LogicalGraph,
-    pub max_pending_requests: usize,
-    pub request_timeout_ms: u64,
-    pub schema: SchemaRef,
+    pub(crate) graph: DiGraph<LogicalNode, LogicalEdge>,
+    pub(crate) operator_type_counters: HashMap<String, u32>,
+    pub(crate) root_node_index: Option<NodeIndex>,
+    pub(crate) watermarks_enabled: bool,
+    pub(crate) event_time: EventTimeSpec,
+    pub(crate) emit_interval: Duration,
+    pub(crate) max_parallelism: usize,
 }
 
 impl LogicalGraph {
@@ -365,194 +353,6 @@ impl LogicalGraph {
         logical_graph
     }
 
-    /// Split the write path from the read path.
-    ///
-    /// `self` keeps the streaming component (WO `StateOnly`, no outgoing). Returns the
-    /// request operator chain (`keyby → WRO → followers`) at parallelism 1.
-    pub fn to_request_mode(&mut self, request: &RequestSpec) -> Result<RequestChain, String> {
-        // Step 1: Find all window operators
-        let mut window_nodes = Vec::new();
-        
-        for node_idx in self.graph.node_indices() {
-            if matches!(&self.graph[node_idx].operator_config, OperatorConfig::WindowConfig(_)) {
-                window_nodes.push(node_idx);
-            }
-        }
-        
-        if window_nodes.is_empty() {
-            return Err("No window operators found in graph".to_string());
-        }
-        
-        // Step 2: Find top-level window operator (closest to root)
-        let root_node = self.root_node_index
-            .ok_or_else(|| "Root node not set in graph".to_string())?;
-        
-        let top_window_node = {
-            // Find window operator with shortest path from root
-            let mut min_distance = usize::MAX;
-            let mut top_window = window_nodes[0];
-            
-            for &window_idx in &window_nodes {
-                let distance = distance(&self.graph, root_node, window_idx);
-                if distance < min_distance {
-                    min_distance = distance;
-                    top_window = window_idx;
-                }
-            }
-            top_window
-        };
-
-        // The WO maintains state for WRO without emitting rows into the DAG.
-        if let Some(node) = self.graph.node_weight_mut(top_window_node) {
-            if let OperatorConfig::WindowConfig(ref mut config) = node.operator_config {
-                config.output_mode = WindowOutputMode::StateOnly;
-            }
-        }
-        
-        // Step 3: Get the KeyBy operator that precedes the window operator
-        // Window node should have exactly one preceding node, which must be a KeyBy
-        let incoming: Vec<NodeIndex> = self.graph
-            .neighbors_directed(top_window_node, Direction::Incoming)
-            .collect();
-        
-        assert_eq!(incoming.len(), 1, "Window operator should have exactly one preceding node");
-        let keyby_node = incoming[0];
-        
-        assert!(
-            matches!(&self.graph[keyby_node].operator_config, OperatorConfig::KeyByConfig(_)),
-            "Preceding node of window operator must be a KeyBy operator"
-        );
-        
-        let keyby_config = self.graph[keyby_node].operator_config.clone();
-
-        let window_config = match &self.graph[top_window_node].operator_config {
-            OperatorConfig::WindowConfig(config) => config.clone(),
-            _ => return Err("Expected WindowConfig".to_string()),
-        };
-        let schema = window_config.window_exec.input().schema();
-
-        let keyby_node_new = LogicalNode::new(keyby_config, 1, None, None);
-        let keyby_idx_new = self.add_node(keyby_node_new);
-
-        let mut window_request_config =
-            WindowRequestOperatorConfig::from_window_operator_config(window_config);
-        window_request_config.state_owner_operator_id =
-            Some(self.graph[top_window_node].operator_id.clone());
-        let window_request_node = LogicalNode::new(
-            OperatorConfig::WindowRequestConfig(window_request_config),
-            1,
-            None,
-            None,
-        );
-        let window_request_idx = self.add_node(window_request_node);
-
-        self.add_edge(keyby_idx_new, window_request_idx);
-
-        let outgoing: Vec<NodeIndex> = self
-            .graph
-            .neighbors_directed(top_window_node, Direction::Outgoing)
-            .collect();
-
-        assert_eq!(outgoing.len(), 1, "Window operator should have exactly one outgoing edge");
-        let target_node = outgoing[0];
-
-        let edge_idx = self
-            .graph
-            .find_edge(top_window_node, target_node)
-            .expect("Window operator should have exactly one outgoing edge");
-        self.graph.remove_edge(edge_idx);
-        self.add_edge(window_request_idx, target_node);
-
-        let graph = self.split_off_request_component(keyby_idx_new);
-        Ok(RequestChain {
-            graph,
-            max_pending_requests: request.max_pending_requests,
-            request_timeout_ms: request.request_timeout_ms,
-            schema,
-        })
-    }
-
-    /// Directed closure from `start`, copied at parallelism 1, then removed from `self`.
-    fn split_off_request_component(&mut self, start: NodeIndex) -> LogicalGraph {
-        let mut request_idx = HashSet::new();
-        let mut stack = vec![start];
-        while let Some(idx) = stack.pop() {
-            if !request_idx.insert(idx) {
-                continue;
-            }
-            stack.extend(self.graph.neighbors_directed(idx, Direction::Outgoing));
-        }
-
-        let mixed = self.clone();
-
-        let mut request = LogicalGraph::new();
-        request.watermarks_enabled = mixed.watermarks_enabled;
-        request.event_time = mixed.event_time.clone();
-        request.emit_interval = mixed.emit_interval;
-        request.max_parallelism = mixed.max_parallelism;
-
-        let mut id_to_new = HashMap::new();
-        for idx in mixed.graph.node_indices() {
-            if !request_idx.contains(&idx) {
-                continue;
-            }
-            let mut node = mixed.graph[idx].clone();
-            node.parallelism = 1;
-            let new_idx = request.graph.add_node(node);
-            id_to_new.insert(request.graph[new_idx].operator_id.clone(), new_idx);
-        }
-        for edge in mixed.graph.edge_references() {
-            if !request_idx.contains(&edge.source()) || !request_idx.contains(&edge.target()) {
-                continue;
-            }
-            let src = mixed.graph[edge.source()].operator_id.clone();
-            let tgt = mixed.graph[edge.target()].operator_id.clone();
-            request.add_edge(id_to_new[&src], id_to_new[&tgt]);
-        }
-        if let Some(root) = mixed.root_node_index {
-            if request_idx.contains(&root) {
-                let id = mixed.graph[root].operator_id.clone();
-                request.root_node_index = Some(id_to_new[&id]);
-            }
-        }
-
-        let mut streaming = LogicalGraph::new();
-        streaming.watermarks_enabled = mixed.watermarks_enabled;
-        streaming.event_time = mixed.event_time.clone();
-        streaming.emit_interval = mixed.emit_interval;
-        streaming.max_parallelism = mixed.max_parallelism;
-        streaming.operator_type_counters = mixed.operator_type_counters.clone();
-
-        let mut streaming_ids = HashMap::new();
-        for idx in mixed.graph.node_indices() {
-            if request_idx.contains(&idx) {
-                continue;
-            }
-            let node = mixed.graph[idx].clone();
-            let new_idx = streaming.graph.add_node(node);
-            streaming_ids.insert(streaming.graph[new_idx].operator_id.clone(), new_idx);
-        }
-        for edge in mixed.graph.edge_references() {
-            if request_idx.contains(&edge.source()) || request_idx.contains(&edge.target()) {
-                continue;
-            }
-            let src = mixed.graph[edge.source()].operator_id.clone();
-            let tgt = mixed.graph[edge.target()].operator_id.clone();
-            streaming.add_edge(streaming_ids[&src], streaming_ids[&tgt]);
-        }
-        if let Some(window) = streaming.graph.node_indices().find(|&idx| {
-            matches!(
-                streaming.graph[idx].operator_config,
-                OperatorConfig::WindowConfig(_)
-            )
-        }) {
-            streaming.root_node_index = Some(window);
-        }
-
-        *self = streaming;
-        request
-    }
-    
     /// Generate DOT format string
     pub fn to_dot(&self) -> String {
         let mut dot_string = String::from("digraph LogicalGraph {\n");
@@ -580,31 +380,6 @@ impl LogicalGraph {
     }
 }
 
-
-/// Find distance from source to target node using BFS
-fn distance(graph: &DiGraph<LogicalNode, LogicalEdge>, source: NodeIndex, target: NodeIndex) -> usize {
-    use std::collections::VecDeque;
-    let mut queue = VecDeque::new();
-    let mut visited = std::collections::HashSet::new();
-    
-    queue.push_back((source, 0));
-    visited.insert(source);
-    
-    while let Some((node, distance)) = queue.pop_front() {
-        if node == target {
-            return distance;
-        }
-        
-        for neighbor in graph.neighbors_directed(node, Direction::Outgoing) {
-            if !visited.contains(&neighbor) {
-                visited.insert(neighbor);
-                queue.push_back((neighbor, distance + 1));
-            }
-        }
-    }
-    
-    usize::MAX // No path found
-}
 
 /// Groups a linear operator list into chains that do not cross a shuffle
 /// ([`PartitionType::Hash`]). Not wired into execution; kept for a later

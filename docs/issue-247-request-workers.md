@@ -122,11 +122,11 @@ PR5  cluster e2e                               → after #291
 
 Compile:
 
-- `to_request_mode` **extracts** a request `LogicalGraph` (or a small `RequestChain` type) instead of splicing vertices into the streaming graph.
+- `GraphSplitter` extracts a `RequestGraph` (`keyby → WRO → followers`) instead of splicing vertices into the streaming graph.
 - Streaming graph: ingest → … → WO `StateOnly`, no outgoing edge to the read path.
 - Request chain: `keyby → WRO` (`state_owner_operator_id` unchanged) `→ followers`. No HTTP source or request sink vertices, no copied WO parallelism, no `to_execution_graph` with `task_index` slices. HTTP decode/encode is `RequestExecutor`.
 - `RequestSpec` on the pipeline is `max_pending_requests` and `request_timeout_ms`. Listen address is per process, not spec. Input schema is the window input schema.
-- `compile_*` returns `{ streaming, request: Option<RequestChain> }`.
+- `compile_*` returns `{ streaming, request: Option<RequestGraph> }`.
 - `MasterConfig` holds the streaming graph only.
 - `PipelineSpec`: **no** `request_parallelism`. Replica count is not an engine field.
 
@@ -213,7 +213,7 @@ Smoke: request STS comes up, port binds, master sees N request workers Ready. Do
 
 Delete or stop using once PR1–PR2 land:
 
-- [x] `LogicalGraph::to_request_mode` copying WO parallelism into one mixed graph
+- [x] `GraphSplitter` copying WO parallelism into one mixed graph
 - [x] `graph_has_request_io` / `OperatorPerWorker` panic pointing at #247
 - [x] `extract_request_source_config`
 - [x] `RequestSourceProcessor` + shared `Mutex<Receiver>` fetch

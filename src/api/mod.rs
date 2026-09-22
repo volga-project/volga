@@ -5,6 +5,7 @@ pub mod planner;
 pub mod logical_optimizer_examples;
 pub mod compiler;
 pub mod spec;
+pub mod graph_splitter;
 
 pub use logical_graph::{
     LogicalGraph, LogicalNode, LogicalEdge, ConnectorConfig
@@ -13,7 +14,7 @@ pub use logical_graph::{
 pub use planner::{Planner, PlanningContext};
 // pub use pipeline_context::PipelineContext;
 pub use compiler::{compile_logical_graph, compile_pipeline, CompiledPipeline};
-pub use logical_graph::RequestChain;
+pub use graph_splitter::{GraphSplitter, RequestGraph};
 pub use spec::kube::KubePipelineSpec;
 pub use spec::event_time::{EventTimeSpec, WatermarkSpec, WindowEventTimeSpec};
 pub use spec::pipeline::{

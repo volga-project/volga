@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use arrow_integration_test::schema_from_json;
-use crate::api::{LogicalGraph, Planner, PlanningContext, RequestChain};
+use crate::api::graph_splitter::GraphSplitter;
+use crate::api::{LogicalGraph, Planner, PlanningContext, RequestGraph};
 use crate::api::spec::connectors::{SourceSpec, SourceSpecKind};
 use crate::api::spec::event_time::EventTimeSpec;
 use crate::api::spec::operators::{OperatorOverrides, OperatorTuningSpec};
@@ -112,8 +113,7 @@ fn compile_logical_graph_from_parts(
     let request = if execution_mode == ExecutionMode::Request {
         if let Some(request_spec) = request_spec {
             Some(
-                streaming
-                    .to_request_mode(request_spec)
+                GraphSplitter::split(&mut streaming, request_spec)
                     .expect("failed to split request graph"),
             )
         } else {
@@ -134,7 +134,7 @@ fn compile_logical_graph_from_parts(
 #[derive(Debug, Clone)]
 pub struct CompiledPipeline {
     pub streaming: LogicalGraph,
-    pub request: Option<RequestChain>,
+    pub request: Option<RequestGraph>,
 }
 
 pub fn compile_pipeline(spec: &PipelineSpec, connector_overrides: Option<&ConnectorConfigs>) -> CompiledPipeline {

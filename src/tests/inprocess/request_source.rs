@@ -1,5 +1,5 @@
 use crate::{
-    api::{logical_graph::LogicalGraph, Planner, PlanningContext, RequestChain},
+    api::{logical_graph::LogicalGraph, Planner, PlanningContext, RequestGraph},
     common::ports::gen_unique_grpc_port,
     common::types::PipelineId,
     test_utils::common::IdentityMapFunction,
@@ -325,7 +325,7 @@ async fn test_request_source_sink_e2e() {
         OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction)),
     ];
 
-    let chain = RequestChain {
+    let chain = RequestGraph {
         graph: LogicalGraph::from_linear_operators(operators, 1),
         max_pending_requests,
         request_timeout_ms,

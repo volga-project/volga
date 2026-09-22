@@ -12,7 +12,7 @@ use tokio::sync::{mpsc, oneshot, Semaphore};
 
 use serde::{Deserialize, Serialize};
 
-use crate::api::{LogicalGraph, RequestChain};
+use crate::api::{LogicalGraph, RequestGraph};
 use crate::common::message::Message;
 use crate::common::types::PipelineId;
 use crate::runtime::functions::source::json_utils::{json_to_record_batch, record_batch_to_json};
@@ -56,14 +56,14 @@ pub struct RequestExecutorOptions {
 }
 
 impl RequestExecutor {
-    pub async fn start(chain: RequestChain, options: RequestExecutorOptions) -> Result<Self> {
-        let schema = chain.schema.clone();
-        let max_pending = chain.max_pending_requests.max(1);
-        let timeout_ms = chain.request_timeout_ms;
-        let operators = build_chain(&chain.graph, &options)?;
+    pub async fn start(request: RequestGraph, options: RequestExecutorOptions) -> Result<Self> {
+        let schema = request.schema.clone();
+        let max_pending = request.max_pending_requests.max(1);
+        let timeout_ms = request.request_timeout_ms;
+        let operators = build_chain(&request.graph, &options)?;
         let (work_tx, work_rx) = mpsc::channel(max_pending);
         let pipeline_id = options.pipeline_id.clone();
-        let graph_for_ctx = chain.graph.clone();
+        let graph_for_ctx = request.graph.clone();
         let worker = tokio::spawn(run_chain(graph_for_ctx, pipeline_id, operators, work_rx));
 
         let mut exec = Self {
