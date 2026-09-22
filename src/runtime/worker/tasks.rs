@@ -12,9 +12,6 @@ use tokio::time::{sleep, Duration};
 use crate::common::types::PipelineId;
 use crate::runtime::checkpoint::TaskKey;
 use crate::runtime::execution_graph::ExecutionGraph;
-use crate::runtime::functions::source::request_source::{
-    extract_request_source_config, RequestSourceProcessor,
-};
 use crate::runtime::metrics::{
     collect_stream_task_metrics, MetricsLabels, TaskMetrics, WorkerAggregateMetrics,
 };
@@ -237,16 +234,6 @@ impl WorkerInner {
                 vertex.operator_id.clone(),
             );
             runtime_context.set_source_handles(self.source_handles.clone());
-            if let Some(request_source_processor) = &self.request_source_processor {
-                runtime_context.set_request_sink_source_request_receiver(
-                    request_source_processor
-                        .get_shared_request_receiver()
-                        .clone(),
-                );
-                runtime_context.set_request_sink_source_response_sender(
-                    request_source_processor.get_response_sender(),
-                );
-            }
             let mut transport_cfg = transport_client_configs.remove(vertex_id).unwrap();
             transport_cfg.set_metrics_labels(MetricsLabels {
                 pipeline_id: config.pipeline_id.0.clone(),
@@ -418,53 +405,6 @@ impl WorkerInner {
             })
             .await
             .unwrap();
-    }
-
-    pub(crate) async fn start_request_source_processor_if_needed(&mut self) {
-        let config = self.config.clone();
-        if let Some(request_runtime) = &self.request_source_processor_runtime {
-            let request_source_config =
-                extract_request_source_config(&config.graph, &config.vertex_ids)
-                    .expect("request_source_config should be set");
-            println!("[WORKER] Starting request source processor");
-
-            let mut processor = RequestSourceProcessor::new(request_source_config);
-
-            let (processor, start_result) = request_runtime
-                .spawn(async move {
-                    let result = processor.start().await;
-                    (processor, result)
-                })
-                .await
-                .unwrap();
-
-            self.request_source_processor = Some(processor);
-
-            if let Err(e) = start_result {
-                panic!("Failed to start request source processor: {}", e);
-            }
-        }
-    }
-
-    pub(crate) async fn stop_request_source_processor_if_needed(&mut self) {
-        if let Some(mut processor) = self.request_source_processor.take() {
-            let request_runtime = self
-                .request_source_processor_runtime
-                .as_ref()
-                .expect("request_source_processor_runtime should be set");
-            println!("[WORKER] Stopping request source processor");
-
-            let stop_result = request_runtime
-                .spawn(async move { processor.stop().await })
-                .await
-                .unwrap();
-
-            if let Err(e) = stop_result {
-                panic!("Failed to stop request source processor: {}", e);
-            }
-
-            println!("[WORKER] Request source processor stopped");
-        }
     }
 
     pub(crate) async fn send_signal_to_task_actors(&mut self, signal: StreamTaskMessage) {

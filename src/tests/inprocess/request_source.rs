@@ -1,21 +1,15 @@
 use crate::{
-    api::{
-        logical_graph::LogicalGraph, spec::pipeline::ExecutionProfile, PipelineSpecBuilder,
-        Planner, PlanningContext,
-    },
+    api::{logical_graph::LogicalGraph, Planner, PlanningContext, RequestGraph},
     common::ports::gen_unique_grpc_port,
+    common::types::PipelineId,
     test_utils::common::IdentityMapFunction,
-    test_utils::pipeline_exec,
     runtime::{
         functions::{
             key_by::{key_by_function::extract_datafusion_window_exec, KeyByFunction},
             map::MapFunction,
-            source::{request_source::RequestSourceConfig, RequestSourceSinkSpec},
         },
-        operators::{
-            operator::OperatorConfig, sink::sink_operator::SinkConfig,
-            source::source_operator::SourceConfig,
-        },
+        operators::{operator::OperatorConfig, source::source_operator::SourceConfig},
+        request::{RequestExecutor, RequestExecutorOptions},
     },
 };
 use arrow::datatypes::{DataType, Field, Schema};
@@ -26,20 +20,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tokio::time::{interval, sleep, Duration, Instant};
-
-pub fn create_test_config(
-    max_pending_requests: usize,
-    request_timeout_ms: u64,
-) -> RequestSourceConfig {
-    let port = gen_unique_grpc_port();
-    RequestSourceConfig::new(RequestSourceSinkSpec {
-        bind_address: format!("127.0.0.1:{}", port),
-        max_pending_requests,
-        request_timeout_ms,
-        schema_json: None,
-        sink: None,
-    })
-}
 
 #[derive(Debug, Clone)]
 pub struct RequestResult {
@@ -318,23 +298,17 @@ async fn test_request_source_sink_e2e() {
     let total_requests = 400;
 
     // Create test configuration
-    let config = create_test_config(max_pending_requests, request_timeout_ms);
-    let bind_address = config.spec.bind_address.clone();
+    let bind_address = format!("127.0.0.1:{}", gen_unique_grpc_port());
 
-    // Create schema that matches our test data
     let schema = Arc::new(Schema::new(vec![
         Field::new("name", DataType::Utf8, false),
         Field::new("department", DataType::Utf8, false),
         Field::new("salary", DataType::Int64, false),
     ]));
 
-    let config = config.set_schema(schema.clone());
-
-    // Create DataFusion planner to extract window exec
     let ctx = SessionContext::new();
     let mut planner = Planner::new(PlanningContext::new(ctx));
 
-    // Register a dummy source with our schema
     planner.register_source(
         "employees".to_string(),
         SourceConfig::VectorSourceConfig(
@@ -343,39 +317,31 @@ async fn test_request_source_sink_e2e() {
         schema.clone(),
     );
 
-    // Extract window exec from SQL query
     let sql = "SELECT name, department, salary, ROW_NUMBER() OVER (PARTITION BY name, department ORDER BY salary) as rn FROM employees";
     let window_exec = extract_datafusion_window_exec(sql, &mut planner).await;
 
-    // Create pipeline operators
-    let parallelism = 4; // Test with parallelism > 1
     let operators = vec![
-        OperatorConfig::SourceConfig(SourceConfig::HttpRequestSourceConfig(config)),
         OperatorConfig::KeyByConfig(KeyByFunction::new_window(window_exec)),
         OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction)),
-        OperatorConfig::SinkConfig(SinkConfig::RequestSinkConfig),
     ];
 
-    // Create logical graph (one vertex per operator; chaining is not wired).
-    let logical_graph = LogicalGraph::from_linear_operators(operators, parallelism);
+    let chain = RequestGraph {
+        graph: LogicalGraph::from_linear_operators(operators, 1),
+        max_pending_requests,
+        request_timeout_ms,
+        schema,
+    };
+    let mut executor = RequestExecutor::start(
+        chain,
+        RequestExecutorOptions {
+            pipeline_id: PipelineId("request-source-e2e".to_string()),
+            wro_store: None,
+            bind_address: bind_address.clone(),
+        },
+    )
+    .await
+    .expect("start request executor");
 
-    // Build PipelineSpec with runtime knobs; logical graph is passed separately to executor.
-    let spec = PipelineSpecBuilder::new()
-        .with_parallelism(parallelism)
-        .with_execution_profile(ExecutionProfile::SingleWorker {
-            num_threads_per_task: 4,
-        })
-        .build();
-
-    // Start pipeline execution in background
-    // TODO implement stop
-    let _pipeline_handle = tokio::spawn(async move {
-        pipeline_exec::execute(spec, logical_graph)
-            .await
-            .unwrap();
-    });
-
-    // Wait for server to start
     sleep(Duration::from_millis(200)).await;
 
     // Create test client
@@ -529,5 +495,5 @@ async fn test_request_source_sink_e2e() {
         "Should have at least some successful requests"
     );
 
-    // TODO - implement stop and stop the pipeline
+    executor.stop().await;
 }

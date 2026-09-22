@@ -43,7 +43,6 @@ impl Worker {
 
     pub(crate) async fn start(&mut self) -> Result<(), String> {
         let inner = self.require_inner()?;
-        inner.start_request_source_processor_if_needed().await;
         inner.spawn_actors().await;
         inner.start_tasks(None).await;
         Ok(())
@@ -154,7 +153,6 @@ impl Worker {
                 .inner
                 .as_mut()
                 .expect("test lifecycle requires configured worker");
-            inner.start_request_source_processor_if_needed().await;
             inner.spawn_actors().await;
             inner.start_tasks(state_updates_sender).await;
         }

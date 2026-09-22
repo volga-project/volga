@@ -5,6 +5,7 @@ pub mod planner;
 pub mod logical_optimizer_examples;
 pub mod compiler;
 pub mod spec;
+pub mod graph_splitter;
 
 pub use logical_graph::{
     LogicalGraph, LogicalNode, LogicalEdge, ConnectorConfig
@@ -12,13 +13,16 @@ pub use logical_graph::{
 
 pub use planner::{Planner, PlanningContext};
 // pub use pipeline_context::PipelineContext;
-pub use compiler::compile_logical_graph;
+pub use compiler::{compile_logical_graph, compile_pipeline, CompiledPipeline};
+pub use graph_splitter::{GraphSplitter, RequestGraph};
 pub use spec::kube::KubePipelineSpec;
 pub use spec::event_time::{EventTimeSpec, WatermarkSpec, WindowEventTimeSpec};
-pub use spec::pipeline::{ConnectorConfigs, ExecutionMode, ExecutionProfile, PipelineSpec, PipelineSpecBuilder};
+pub use spec::pipeline::{
+    ConnectorConfigs, ExecutionMode, ExecutionProfile, PipelineSpec, PipelineSpecBuilder, RequestSpec,
+};
 pub use crate::orchestrator::task_assignment::TaskWorkerAssignmentStrategyType;
 pub use spec::operators::{OperatorOverride, OperatorOverrides};
-pub use spec::connectors::{DatagenSpec, RequestSourceSinkSpec, SinkSpec, SourceSpec};
+pub use spec::connectors::{DatagenSpec, SinkSpec, SourceSpec};
 pub use spec::state::{
     CheckpointSpec, CheckpointStoreConfig, OperatorStateBackendConfig, RequestStoreConfig,
     StateSpec,

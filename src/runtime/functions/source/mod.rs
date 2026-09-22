@@ -4,7 +4,6 @@ pub mod word_count_source;
 pub mod datagen_source;
 pub mod parquet;
 pub mod kafka;
-pub mod request_source;
 pub mod json_utils;
 
 pub use source_function::{
@@ -16,5 +15,4 @@ pub use datagen_source::DatagenSourceFunction;
 pub use datagen_source::DatagenSpec;
 pub use parquet::{ParquetSourceConfig, ParquetSourceFunction, ParquetSourceSpec};
 pub use kafka::{KafkaSourceConfig, KafkaSourceFunction, KafkaSourceSpec, KafkaOffsetSpec};
-pub use request_source::{HttpRequestSourceFunction, RequestSourceConfig, RequestSourceSinkSpec};
 pub use json_utils::{record_batch_to_json, json_to_record_batch}; 

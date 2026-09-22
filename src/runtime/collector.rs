@@ -40,7 +40,7 @@ impl Collector {
             panic!("Output channel already exists");
         }
         self.output_channels.push(channel);
-        // Dest index is the target task_index (KeyBy / RequestRoute). Sort
+        // Dest index is the target task_index (KeyBy). Sort
         // numerically so dest 10 is task 10, not lex-sorted `_10` before `_2`.
         self.output_channels
             .sort_by_key(target_task_index);

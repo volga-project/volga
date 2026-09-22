@@ -3,7 +3,6 @@ use crate::runtime::functions::function_trait::FunctionTrait;
 use crate::runtime::functions::sink::count::CountSinkFunction;
 use crate::runtime::functions::sink::in_memory_storage_sink::InMemoryStorageSinkFunction;
 use crate::runtime::functions::sink::parquet::ParquetSinkFunction;
-use crate::runtime::functions::sink::request_sink::RequestSinkFunction;
 use crate::runtime::operators::sink::sink_operator::SinkConfig;
 use crate::runtime::runtime_context::RuntimeContext;
 use anyhow::Result;
@@ -24,7 +23,6 @@ pub trait SinkFunctionTrait: Send + Sync + fmt::Debug {
 #[derive(Debug)]
 pub enum SinkFunction {
     InMemoryStorageGrpc(InMemoryStorageSinkFunction),
-    Request(RequestSinkFunction),
     Parquet(ParquetSinkFunction),
     Count(CountSinkFunction),
 }
@@ -33,7 +31,6 @@ impl fmt::Display for SinkFunction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             SinkFunction::InMemoryStorageGrpc(_) => write!(f, "InMemoryStorageGrpc"),
-            SinkFunction::Request(_) => write!(f, "Request"),
             SinkFunction::Parquet(_) => write!(f, "Parquet"),
             SinkFunction::Count(_) => write!(f, "Count"),
         }
@@ -45,7 +42,6 @@ impl SinkFunctionTrait for SinkFunction {
     async fn sink(&mut self, message: Message) -> Result<()> {
         match self {
             SinkFunction::InMemoryStorageGrpc(f) => f.sink(message).await,
-            SinkFunction::Request(f) => f.sink(message).await,
             SinkFunction::Parquet(f) => f.sink(message).await,
             SinkFunction::Count(f) => f.sink(message).await,
         }
@@ -54,7 +50,6 @@ impl SinkFunctionTrait for SinkFunction {
     async fn flush(&mut self) -> Result<()> {
         match self {
             SinkFunction::InMemoryStorageGrpc(f) => f.flush().await,
-            SinkFunction::Request(f) => f.flush().await,
             SinkFunction::Parquet(f) => f.flush().await,
             SinkFunction::Count(f) => f.flush().await,
         }
@@ -66,7 +61,6 @@ impl FunctionTrait for SinkFunction {
     async fn open(&mut self, context: &RuntimeContext) -> Result<()> {
         match self {
             SinkFunction::InMemoryStorageGrpc(f) => f.open(context).await,
-            SinkFunction::Request(f) => f.open(context).await,
             SinkFunction::Parquet(f) => f.open(context).await,
             SinkFunction::Count(f) => f.open(context).await,
         }
@@ -75,7 +69,6 @@ impl FunctionTrait for SinkFunction {
     async fn close(&mut self) -> Result<()> {
         match self {
             SinkFunction::InMemoryStorageGrpc(f) => f.close().await,
-            SinkFunction::Request(f) => f.close().await,
             SinkFunction::Parquet(f) => f.close().await,
             SinkFunction::Count(f) => f.close().await,
         }
@@ -99,7 +92,6 @@ pub fn create_sink_function(config: SinkConfig) -> SinkFunction {
             server_addr,
             upsert_key_columns,
         )),
-        SinkConfig::RequestSinkConfig => SinkFunction::Request(RequestSinkFunction::new()),
         SinkConfig::ParquetSinkConfig(config) => {
             SinkFunction::Parquet(ParquetSinkFunction::new(config))
         }

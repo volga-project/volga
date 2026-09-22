@@ -2,7 +2,6 @@ use async_trait::async_trait;
 use anyhow::Result;
 use std::fmt;
 use crate::common::message::Message;
-use crate::runtime::functions::source::HttpRequestSourceFunction;
 use crate::runtime::operators::source::source_operator::SourceConfig;
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::functions::function_trait::FunctionTrait;
@@ -71,7 +70,6 @@ pub enum SourceFunction {
     Vector(VectorSourceFunction),
     WordCount(WordCountSourceFunction),
     Datagen(DatagenSourceFunction),
-    HttpRequest(HttpRequestSourceFunction),
     Kafka(KafkaSourceFunction),
     Parquet(ParquetSourceFunction),
 }
@@ -82,7 +80,6 @@ impl fmt::Display for SourceFunction {
             SourceFunction::Vector(_) => write!(f, "Vector"),
             SourceFunction::WordCount(_) => write!(f, "WordCount"),
             SourceFunction::Datagen(_) => write!(f, "Datagen"),
-            SourceFunction::HttpRequest(_) => write!(f, "HttpRequest"),
             SourceFunction::Kafka(_) => write!(f, "Kafka"),
             SourceFunction::Parquet(_) => write!(f, "Parquet"),
         }
@@ -96,7 +93,6 @@ impl SourceFunctionTrait for SourceFunction {
             SourceFunction::Vector(f) => f.fetch(interrupt).await,
             SourceFunction::WordCount(f) => f.fetch(interrupt).await,
             SourceFunction::Datagen(f) => f.fetch(interrupt).await,
-            SourceFunction::HttpRequest(f) => f.fetch(interrupt).await,
             SourceFunction::Kafka(f) => f.fetch(interrupt).await,
             SourceFunction::Parquet(f) => f.fetch(interrupt).await,
         }
@@ -107,7 +103,6 @@ impl SourceFunctionTrait for SourceFunction {
             SourceFunction::Vector(f) => f.snapshot_position().await,
             SourceFunction::WordCount(f) => f.snapshot_position().await,
             SourceFunction::Datagen(f) => f.snapshot_position().await,
-            SourceFunction::HttpRequest(f) => f.snapshot_position().await,
             SourceFunction::Kafka(f) => f.snapshot_position().await,
             SourceFunction::Parquet(f) => f.snapshot_position().await,
         }
@@ -118,7 +113,6 @@ impl SourceFunctionTrait for SourceFunction {
             SourceFunction::Vector(f) => f.restore_position(bytes).await,
             SourceFunction::WordCount(f) => f.restore_position(bytes).await,
             SourceFunction::Datagen(f) => f.restore_position(bytes).await,
-            SourceFunction::HttpRequest(f) => f.restore_position(bytes).await,
             SourceFunction::Kafka(f) => f.restore_position(bytes).await,
             SourceFunction::Parquet(f) => f.restore_position(bytes).await,
         }
@@ -139,7 +133,6 @@ impl FunctionTrait for SourceFunction {
             SourceFunction::Vector(f) => f.open(context).await,
             SourceFunction::WordCount(f) => f.open(context).await,
             SourceFunction::Datagen(f) => f.open(context).await,
-            SourceFunction::HttpRequest(f) => f.open(context).await,
             SourceFunction::Kafka(f) => f.open(context).await,
             SourceFunction::Parquet(f) => f.open(context).await,
         }
@@ -150,7 +143,6 @@ impl FunctionTrait for SourceFunction {
             SourceFunction::Vector(f) => f.close().await,
             SourceFunction::WordCount(f) => f.close().await,
             SourceFunction::Datagen(f) => f.close().await,
-            SourceFunction::HttpRequest(f) => f.close().await,
             SourceFunction::Kafka(f) => f.close().await,
             SourceFunction::Parquet(f) => f.close().await,
         }
@@ -182,9 +174,6 @@ pub fn create_source_function(config: SourceConfig) -> SourceFunction {
         }
         SourceConfig::DatagenSourceConfig(datagen_config) => {
             SourceFunction::Datagen(DatagenSourceFunction::new(datagen_config))
-        }
-        SourceConfig::HttpRequestSourceConfig(config) => {
-            SourceFunction::HttpRequest(HttpRequestSourceFunction::new(config.schema.expect("Schema not set").clone()))
         }
         SourceConfig::KafkaSourceConfig(config) => {
             SourceFunction::Kafka(KafkaSourceFunction::new(config))

@@ -30,6 +30,15 @@
       ],
       "default": null
     },
+    "max_parallelism": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint",
+      "default": null,
+      "minimum": 0
+    },
     "operator_overrides": {
       "default": {
         "defaults": {
@@ -39,22 +48,21 @@
         "per_operator": {}
       }
     },
-    "max_parallelism": {
-      "type": [
-        "integer",
-        "null"
-      ],
-      "format": "uint",
-      "minimum": 0,
-      "default": null
-    },
     "parallelism": {
       "type": "integer",
       "format": "uint",
       "default": 1,
       "minimum": 0
     },
-    "request_source_sink": {
+    "request": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RequestSpec"
+        },
+        {
+          "type": "null"
+        }
+      ],
       "default": null
     },
     "sink": {
@@ -224,6 +232,26 @@
         "in_memory"
       ]
     },
+    "RequestSpec": {
+      "description": "HTTP serving knobs for a request-mode pipeline. The listen address is per replica, not spec.",
+      "type": "object",
+      "properties": {
+        "max_pending_requests": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "request_timeout_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "max_pending_requests",
+        "request_timeout_ms"
+      ]
+    },
     "RequestStoreConfig": false,
     "StateSpec": {
       "type": "object",
@@ -308,7 +336,7 @@
       "type": "object",
       "properties": {
         "emit_interval_ms": {
-          "description": "Processing-time interval for coalescing watermark emits (ms).\nUnset uses the runtime default (200ms). Batch does not assign watermarks (EOF flush only).",
+          "description": "Event-time emit period and wall-clock cap (ms). Unset uses the runtime\ndefault (200ms). Batch does not assign watermarks (EOF flush only).",
           "type": [
             "integer",
             "null"
