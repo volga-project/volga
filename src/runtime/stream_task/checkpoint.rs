@@ -20,9 +20,9 @@ use super::task::{timestamp, StreamTask};
 /// Drain at-most-once completion notifies. A failed publish does not fail the task.
 pub(super) async fn drain_checkpoint_complete(
     operator: &mut dyn OperatorTrait,
-    complete_receiver: &mut mpsc::UnboundedReceiver<u64>,
+    checkpoint_complete_receiver: &mut mpsc::UnboundedReceiver<u64>,
 ) {
-    while let Ok(checkpoint_id) = complete_receiver.try_recv() {
+    while let Ok(checkpoint_id) = checkpoint_complete_receiver.try_recv() {
         if let Err(error) = operator.notify_checkpoint_complete(checkpoint_id).await {
             println!(
                 "{:?} notify_checkpoint_complete {} failed: {error}",
