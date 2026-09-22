@@ -29,6 +29,9 @@ service WorkerService {
   // Cooperative source stop: sources go Idle → drain → PipelineFinished.
   rpc StopSources(StopSourcesRequest) returns (StopSourcesResponse);
 
+  // After a checkpoint completes globally. At-most-once; not part of the checkpoint.
+  rpc NotifyCheckpointComplete(NotifyCheckpointCompleteRequest) returns (NotifyCheckpointCompleteResponse);
+
   // Bidirectional health/heartbeat stream between master and worker.
   rpc StreamHeartbeat(stream MasterHeartbeatMessage) returns (stream WorkerHeartbeatMessage);
 }
@@ -128,6 +131,16 @@ message StopSourcesRequest {
 }
 
 message StopSourcesResponse {
+  bool success = 1;
+  string error_message = 2;
+}
+
+message NotifyCheckpointCompleteRequest {
+  uint64 checkpoint_id = 1;
+  uint64 execution_attempt_id = 2;
+}
+
+message NotifyCheckpointCompleteResponse {
   bool success = 1;
   string error_message = 2;
 }

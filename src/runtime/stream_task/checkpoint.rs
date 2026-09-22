@@ -12,9 +12,26 @@ use crate::runtime::metrics::{
 };
 use crate::runtime::operators::operator::{operator_config_requires_checkpoint, OperatorTrait};
 use crate::transport::transport_client::DataReaderControl;
+use tokio::sync::mpsc;
 
 use super::ctx::TaskCtx;
-use super::task::StreamTask;
+use super::task::{timestamp, StreamTask};
+
+/// Drain at-most-once completion notifies. A failed publish does not fail the task.
+pub(super) async fn drain_checkpoint_complete(
+    operator: &mut dyn OperatorTrait,
+    complete_receiver: &mut mpsc::UnboundedReceiver<u64>,
+) {
+    while let Ok(checkpoint_id) = complete_receiver.try_recv() {
+        if let Err(error) = operator.notify_checkpoint_complete(checkpoint_id).await {
+            println!(
+                "{:?} notify_checkpoint_complete {} failed: {error}",
+                timestamp(),
+                checkpoint_id
+            );
+        }
+    }
+}
 
 #[derive(Debug)]
 pub(crate) struct CheckpointAligner {

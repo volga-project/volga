@@ -117,6 +117,27 @@ impl Worker {
         true
     }
 
+    /// Fan out checkpoint-complete to every task. Not part of the checkpoint.
+    pub async fn notify_checkpoint_complete(&mut self, checkpoint_id: u64) -> bool {
+        let Some(inner) = self.inner.as_mut() else {
+            println!(
+                "[WORKER] Rejecting notify_checkpoint_complete {}: worker not configured",
+                checkpoint_id
+            );
+            return false;
+        };
+        println!(
+            "[WORKER] Notifying checkpoint complete {} on all tasks",
+            checkpoint_id
+        );
+        inner
+            .send_signal_to_task_actors(StreamTaskMessage::NotifyCheckpointComplete(
+                checkpoint_id,
+            ))
+            .await;
+        true
+    }
+
     /// In-process test lifecycle (master normally coordinates this).
     pub(crate) async fn run_test_lifecycle(
         &mut self,

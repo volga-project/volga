@@ -9,8 +9,8 @@ mod tasks;
 
 pub use config::{WorkerConfig, WorkerIdentity};
 pub use messages::{
-    Close, CloseTasks, Configure, GetIdentity, GetState, ReportFatal, Reset, RunTasks,
-    RunTestLifecycle, Shutdown, Start, StopSources, TriggerBarrier,
+    Close, CloseTasks, Configure, GetIdentity, GetState, NotifyCheckpointComplete, ReportFatal,
+    Reset, RunTasks, RunTestLifecycle, Shutdown, Start, StopSources, TriggerBarrier,
 };
 
 use std::sync::Arc;

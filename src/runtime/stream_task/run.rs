@@ -34,6 +34,7 @@ pub(super) struct TaskSignals {
     pub run_receiver: oneshot::Receiver<()>,
     pub close_receiver: oneshot::Receiver<()>,
     pub checkpoint_receiver: mpsc::UnboundedReceiver<u64>,
+    pub complete_receiver: mpsc::UnboundedReceiver<u64>,
 }
 
 pub(super) struct WatermarkHandles {
@@ -82,6 +83,7 @@ pub(super) async fn run(params: RunParams) -> Result<()> {
                 run_receiver,
                 close_receiver,
                 mut checkpoint_receiver,
+                mut complete_receiver,
             },
     } = params;
 
@@ -213,6 +215,7 @@ pub(super) async fn run(params: RunParams) -> Result<()> {
                 source.as_mut(),
                 ctx,
                 &mut checkpoint_receiver,
+                &mut complete_receiver,
                 &mut source_watermark_manager,
             )
             .await?;
@@ -238,6 +241,7 @@ pub(super) async fn run(params: RunParams) -> Result<()> {
                 input_stream,
                 progress,
                 reader_control,
+                &mut complete_receiver,
             )
             .await?;
         }

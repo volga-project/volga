@@ -4,8 +4,8 @@ use crate::runtime::observability::snapshot_types::WorkerSnapshot;
 
 use super::config::WorkerIdentity;
 use super::messages::{
-    Close, CloseTasks, Configure, GetIdentity, GetState, ReportFatal, Reset, RunTasks,
-    RunTestLifecycle, Shutdown, Start, StopSources, TriggerBarrier,
+    Close, CloseTasks, Configure, GetIdentity, GetState, NotifyCheckpointComplete, ReportFatal,
+    Reset, RunTasks, RunTestLifecycle, Shutdown, Start, StopSources, TriggerBarrier,
 };
 use super::Worker;
 
@@ -123,6 +123,19 @@ impl Message<TriggerBarrier> for Worker {
     ) -> Self::Reply {
         self.require_attempt(msg.execution_attempt_id)?;
         Ok(self.trigger_checkpoint_barrier(msg.checkpoint_id).await)
+    }
+}
+
+impl Message<NotifyCheckpointComplete> for Worker {
+    type Reply = Result<bool, String>;
+
+    async fn handle(
+        &mut self,
+        msg: NotifyCheckpointComplete,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.require_attempt(msg.execution_attempt_id)?;
+        Ok(self.notify_checkpoint_complete(msg.checkpoint_id).await)
     }
 }
 
