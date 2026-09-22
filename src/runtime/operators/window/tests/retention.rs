@@ -6,12 +6,12 @@ use crate::runtime::operators::window::model::{Cursor, RawRun, TileRun};
 use crate::runtime::operators::window::operator::{WindowOperatorConfig, WindowOutputMode};
 use crate::runtime::operators::window::spec::WindowSpec;
 use crate::runtime::operators::window::store::{
-    collect_due, PartitionKey, WindowStoreTaskScope,
+    collect_triggers, PartitionKey, WindowStoreTaskScope,
 };
+use crate::runtime::operators::window::{TileConfig, TimeGranularity};
 use crate::test_utils::window::harness::{
     batch, key, watermark_message, window_exec_from_sql, Harness,
 };
-use crate::runtime::operators::window::{TileConfig, TimeGranularity};
 
 const SQL: &str = r#"SELECT timestamp, value, partition_key, SUM(value) OVER w as sum_val
 FROM test_table
@@ -22,13 +22,13 @@ WINDOW w AS (
 )"#;
 
 async fn due_trigger_count(h: &Harness, through: i64) -> usize {
-    let client = h.store.client(WindowStoreTaskScope::for_test(h.namespace.clone()));
-    collect_due(&client, None, Cursor::new(through, u64::MAX))
+    let client = h
+        .store
+        .client(WindowStoreTaskScope::for_test(h.namespace.clone()));
+    collect_triggers(&client, None, Cursor::new(through, u64::MAX))
         .await
         .expect("due page")
-        .into_iter()
-        .map(|work| work.triggers.len())
-        .sum()
+        .len()
 }
 
 async fn raw_timestamps(h: &Harness, partition: &str) -> Vec<i64> {
@@ -83,7 +83,11 @@ async fn consumed_triggers_are_removed_after_completed_watermark() {
     let exec = window_exec_from_sql(SQL).await;
     let mut h = Harness::new(WindowOperatorConfig::new(exec)).await;
     h.ingest(
-        batch(vec![1000, 2000, 8000], vec![1.0, 2.0, 3.0], vec!["A", "A", "A"]),
+        batch(
+            vec![1000, 2000, 8000],
+            vec![1.0, 2.0, 3.0],
+            vec!["A", "A", "A"],
+        ),
         "A",
     )
     .await;
@@ -105,7 +109,11 @@ async fn future_triggers_remain_across_partial_watermarks() {
     let exec = window_exec_from_sql(SQL).await;
     let mut h = Harness::new(WindowOperatorConfig::new(exec)).await;
     h.ingest(
-        batch(vec![1000, 2000, 5000], vec![1.0, 2.0, 3.0], vec!["A", "A", "A"]),
+        batch(
+            vec![1000, 2000, 5000],
+            vec![1.0, 2.0, 3.0],
+            vec!["A", "A", "A"],
+        ),
         "A",
     )
     .await;
@@ -194,7 +202,11 @@ async fn checkpoint_before_cleanup_restores_pre_prune_state() {
     let mut original = Harness::new(WindowOperatorConfig::new(exec.clone())).await;
     original
         .ingest(
-            batch(vec![1_000, 2_000, 10_000], vec![1.0, 2.0, 3.0], vec!["A", "A", "A"]),
+            batch(
+                vec![1_000, 2_000, 10_000],
+                vec![1.0, 2.0, 3.0],
+                vec!["A", "A", "A"],
+            ),
             "A",
         )
         .await;

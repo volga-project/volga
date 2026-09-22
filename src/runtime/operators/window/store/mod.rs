@@ -6,9 +6,9 @@ pub use crate::runtime::operators::window::model::{
     WindowTriggerKind,
 };
 pub use backend::{
-    open_window_operator_store, open_window_request_store, collect_due, trigger_page_size,
-    Attempt, AttemptToken, CutHistory, DueWindowWork, InMemWindowStore, InMemWindowStoreClient,
-    ScyllaWindowStore, ScyllaWindowStoreClient, StateVersion, TriggerResume, Version,
-    WindowBackendSnapshot, WindowOperatorStore, WindowRequestStore, WindowStoreTaskScope, WriterId,
+    collect_triggers, open_window_operator_store, open_window_request_store, Attempt, AttemptToken,
+    CutHistory, InMemWindowStore, InMemWindowStoreClient, ScyllaWindowStore,
+    ScyllaWindowStoreClient, StateVersion, Version, WindowBackendSnapshot, WindowOperatorStore,
+    WindowRequestStore, WindowStoreTaskScope, WriterId,
 };
 pub use data::{WindowData, WindowView};

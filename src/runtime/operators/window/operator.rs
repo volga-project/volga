@@ -12,8 +12,8 @@ use async_trait::async_trait;
 use futures::{stream, StreamExt, TryStreamExt};
 
 use crate::common::key::Key;
-use crate::common::KeyGroupRange;
 use crate::common::message::{Message, WatermarkMessage};
+use crate::common::KeyGroupRange;
 use crate::common::MAX_WATERMARK_VALUE;
 use crate::runtime::checkpoint::{SerializedCheckpoint, SerializedRestore};
 use crate::runtime::consts::{
@@ -199,53 +199,50 @@ impl WindowOperator {
 
     async fn emit_due_pages(&self, through: Cursor, out: &mut dyn Output) -> Result<()> {
         let concurrency = runtime_consts().u64(WINDOW_PROCESS_KEY_CONCURRENCY).max(1) as usize;
-        let limit = runtime_consts().u64(WINDOW_PROCESS_PAGE_SIZE).max(1) as usize;
+        let page_size = runtime_consts().u64(WINDOW_PROCESS_PAGE_SIZE).max(1) as usize;
         let state = self.state_ref();
         let after = state
             .watermark_frontier()
             .map(|timestamp| Cursor::new(timestamp, u64::MAX));
-        let mut resume = None;
-        loop {
-            let (triggers, next) = state
-                .store()
-                .load_triggers(after, through, resume.as_ref(), limit)
+        let triggers = state
+            .store()
+            .load_triggers(after, through)
+            .await
+            .expect("load due window triggers");
+        if triggers.is_empty() {
+            return Ok(());
+        }
+        let mut grouped: BTreeMap<_, Vec<_>> = BTreeMap::new();
+        for trigger in triggers {
+            grouped
+                .entry(trigger.partition.clone())
+                .or_default()
+                .push(trigger);
+        }
+        let groups: Vec<_> = grouped.into_iter().collect();
+        for chunk in groups.chunks(page_size) {
+            let page = stream::iter(chunk.to_vec())
+                .map(|(partition, triggers)| {
+                    advance_key(
+                        state.store(),
+                        partition,
+                        triggers,
+                        self.window_configs.as_ref(),
+                        self.ts_column_index,
+                        &self.output_schema,
+                        &self.input_schema,
+                    )
+                })
+                .buffered(concurrency)
+                .try_collect::<Vec<_>>()
                 .await
-                .expect("load due window triggers");
-            if !triggers.is_empty() {
-                let mut grouped: BTreeMap<_, Vec<_>> = BTreeMap::new();
-                for trigger in triggers {
-                    grouped
-                        .entry(trigger.partition.clone())
-                        .or_default()
-                        .push(trigger);
-                }
-                let page = stream::iter(grouped)
-                    .map(|(partition, triggers)| {
-                        advance_key(
-                            state.store(),
-                            partition,
-                            triggers,
-                            self.window_configs.as_ref(),
-                            self.ts_column_index,
-                            &self.output_schema,
-                            &self.input_schema,
-                        )
-                    })
-                    .buffered(concurrency)
-                    .try_collect::<Vec<_>>()
-                    .await
-                    .expect("advance due window triggers");
-                let batch = if page.is_empty() {
-                    RecordBatch::new_empty(self.output_schema.clone())
-                } else {
-                    concat_batches(&self.output_schema, &page).expect("concat")
-                };
-                out.emit(Message::new(None, batch, None, None)).await?;
-            }
-            match next {
-                Some(token) => resume = Some(token),
-                None => break,
-            }
+                .expect("advance due window triggers");
+            let batch = if page.is_empty() {
+                RecordBatch::new_empty(self.output_schema.clone())
+            } else {
+                concat_batches(&self.output_schema, &page).expect("concat")
+            };
+            out.emit(Message::new(None, batch, None, None)).await?;
         }
         Ok(())
     }

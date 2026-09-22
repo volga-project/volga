@@ -9,17 +9,16 @@ use crate::runtime::operators::window::model::{Cursor, RawRun, TileRun, WindowTr
 use crate::runtime::operators::window::operator::WindowOperatorConfig;
 use crate::runtime::operators::window::spec::WindowSpec;
 use crate::runtime::operators::window::store::{
-    InMemWindowStore, KeyState, PartitionKey, StateNamespace, TileMap, TriggerResume,
-    WindowBackendSnapshot, WindowData, WindowOperatorStore, WindowRequestStore,
-    WindowStoreTaskScope,
+    InMemWindowStore, KeyState, PartitionKey, StateNamespace, TileMap, WindowBackendSnapshot,
+    WindowData, WindowOperatorStore, WindowRequestStore, WindowStoreTaskScope,
 };
 use std::any::Any;
 
+use crate::runtime::operators::window::{TileConfig, TimeGranularity};
 use crate::runtime::state::{OperatorStore, OperatorTaskState};
 use crate::test_utils::window::harness::{
     assert_window_values, batch, window_exec_from_sql, Harness, WoWroHarness,
 };
-use crate::runtime::operators::window::{TileConfig, TimeGranularity};
 
 #[derive(Debug)]
 struct RecordingWindowStore {
@@ -78,14 +77,7 @@ impl WindowOperatorStore for RecordingWindowStore {
         triggers: &[WindowTrigger],
     ) -> Result<()> {
         self.client
-            .commit_events(
-                partition,
-                ts_column_index,
-                events,
-                tiles,
-                meta,
-                triggers,
-            )
+            .commit_events(partition, ts_column_index, events, tiles, meta, triggers)
             .await
     }
 
@@ -93,12 +85,8 @@ impl WindowOperatorStore for RecordingWindowStore {
         &self,
         after: Option<Cursor>,
         through: Cursor,
-        resume: Option<&TriggerResume>,
-        limit: usize,
-    ) -> Result<(Vec<WindowTrigger>, Option<TriggerResume>)> {
-        self.client
-            .load_triggers(after, through, resume, limit)
-            .await
+    ) -> Result<Vec<WindowTrigger>> {
+        self.client.load_triggers(after, through).await
     }
 
     async fn store_key_state(&self, partition: &PartitionKey, state: &KeyState) -> Result<()> {
@@ -157,13 +145,7 @@ async fn recording_harness(sql: &str) -> (Harness, Arc<RecordingWindowStore>) {
     let inner = Arc::new(InMemWindowStore::new());
     let namespace = StateNamespace::new(b"io_planning");
     let recording = Arc::new(RecordingWindowStore::new(inner.clone(), namespace.clone()));
-    let harness = Harness::with_operator_store(
-        cfg,
-        inner,
-        recording.clone(),
-        namespace,
-    )
-    .await;
+    let harness = Harness::with_operator_store(cfg, inner, recording.clone(), namespace).await;
     (harness, recording)
 }
 
