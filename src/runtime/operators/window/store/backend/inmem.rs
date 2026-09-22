@@ -16,17 +16,14 @@ use serde::{Deserialize, Serialize};
 
 use std::any::Any;
 
+use crate::common::KeyGroupRange;
 use crate::runtime::metrics::MetricsLabels;
 use crate::runtime::operators::window::metrics;
-use crate::common::KeyGroupRange;
 use crate::runtime::operators::window::model::{Cursor, RawRun, TileRun, WindowTrigger};
 use crate::runtime::operators::window::state::WindowOperatorState;
 use crate::runtime::state::{OperatorStore, OperatorTaskState};
 
-use super::{
-    TriggerResume, WindowBackendSnapshot, WindowOperatorStore, WindowRequestStore,
-    WindowStoreTaskScope,
-};
+use super::{WindowBackendSnapshot, WindowOperatorStore, WindowRequestStore, WindowStoreTaskScope};
 use crate::runtime::operators::window::store::data::cursors_from_batch;
 use crate::runtime::operators::window::store::{
     KeyState, PartitionKey, StateNamespace, TileMap, WindowData,
@@ -385,29 +382,18 @@ impl InMemWindowStore {
         scope: &WindowStoreTaskScope,
         after: Option<Cursor>,
         through: Cursor,
-        resume: Option<&TriggerResume>,
-        limit: usize,
-    ) -> (Vec<WindowTrigger>, Option<TriggerResume>) {
-        let limit = limit.max(1);
-        let selected = self
+    ) -> Vec<WindowTrigger> {
+        let mut selected = self
             .triggers
             .read()
             .iter()
             .filter(|trigger| Self::owns_partition(&trigger.partition, scope))
             .filter(|trigger| after.map_or(true, |after| trigger.fire_at > after))
             .filter(|trigger| trigger.fire_at <= through)
-            .filter(|trigger| {
-                resume
-                    .map(|resume| **trigger > *resume.last())
-                    .unwrap_or(true)
-            })
-            .take(limit)
             .cloned()
             .collect::<Vec<_>>();
-        let next = (selected.len() == limit)
-            .then(|| selected.last().cloned().map(TriggerResume::after_visible))
-            .flatten();
-        (selected, next)
+        selected.sort();
+        selected
     }
 
     pub async fn store_key_state(&self, partition: &PartitionKey, meta: &KeyState) -> Result<()> {
@@ -619,12 +605,8 @@ impl WindowOperatorStore for InMemWindowStoreClient {
         &self,
         after: Option<Cursor>,
         through: Cursor,
-        resume: Option<&TriggerResume>,
-        limit: usize,
-    ) -> Result<(Vec<WindowTrigger>, Option<TriggerResume>)> {
-        Ok(self
-            .inner
-            .load_triggers_in(&self.scope, after, through, resume, limit))
+    ) -> Result<Vec<WindowTrigger>> {
+        Ok(self.inner.load_triggers_in(&self.scope, after, through))
     }
 
     async fn store_key_state(&self, partition: &PartitionKey, state: &KeyState) -> Result<()> {
@@ -677,12 +659,7 @@ impl OperatorStore for InMemWindowStore {
         let Some((watermark, floor)) = wo.retention_cutoff() else {
             return Ok(());
         };
-        self.maintain_cutoff(
-            wo.scope(),
-            watermark,
-            floor,
-            state.task_id(),
-        )?;
+        self.maintain_cutoff(wo.scope(), watermark, floor, state.task_id())?;
         Ok(())
     }
 }
@@ -706,7 +683,7 @@ impl OperatorStore for InMemWindowStoreClient {
 mod tests {
     use super::*;
     use crate::common::KeyGroupRange;
-    use crate::runtime::operators::window::store::{collect_due, trigger_page_size};
+    use crate::runtime::operators::window::store::collect_triggers;
 
     use crate::runtime::operators::window::model::{
         KeyEvaluationState, TileRun, TimeGranularity, WindowTiles, WindowTriggerKind,
@@ -1105,13 +1082,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn due_triggers_are_range_filtered_and_backend_paged() {
+    async fn due_triggers_are_range_filtered() {
         let store = InMemWindowStore::new();
         let partition = partition();
         let namespace = StateNamespace::new(&partition.namespace);
-        let page = trigger_page_size();
-        let extra = 34;
-        let n = page + extra;
+        let n = 40;
         let triggers = (0..n)
             .map(|seq_no| WindowTrigger {
                 fire_at: Cursor::new(10 + seq_no as i64, seq_no as u64),
@@ -1134,22 +1109,14 @@ mod tests {
         let client = client(&store, &namespace);
         let after = Some(Cursor::new(9, u64::MAX));
         let through = Cursor::new(10 + n as i64 - 1, u64::MAX);
-        let (first, resume) = client
-            .load_triggers(after, through, None, page)
-            .await
-            .unwrap();
-        assert_eq!(first.len(), page);
-        let resume = resume.expect("more pages");
-        let (second, next) = client
-            .load_triggers(after, through, Some(&resume), page)
-            .await
-            .unwrap();
-        assert_eq!(second.len(), extra);
-        assert!(next.is_none());
+        let loaded = client.load_triggers(after, through).await.unwrap();
+        assert_eq!(loaded.len(), n);
+        assert_eq!(loaded.first().unwrap().fire_at, triggers[0].fire_at);
+        assert_eq!(loaded.last().unwrap().fire_at, triggers[n - 1].fire_at);
     }
 
     #[tokio::test]
-    async fn load_triggers_resumes_same_fire_at_across_keys() {
+    async fn load_triggers_same_fire_at_across_keys() {
         let store = InMemWindowStore::new();
         let namespace = StateNamespace::new(b"test-namespace");
         let a = partition_for_group(&namespace, 0, 1, b"a");
@@ -1189,25 +1156,11 @@ mod tests {
             .unwrap();
 
         let client = client(&store, &namespace);
-        let (first, resume) = client
-            .load_triggers(None, Cursor::new(1_000, u64::MAX), None, 1)
+        let loaded = client
+            .load_triggers(None, Cursor::new(1_000, u64::MAX))
             .await
             .unwrap();
-        assert_eq!(first, vec![trigger_a.clone()]);
-        let resume = resume.expect("second key");
-        let (second, next) = client
-            .load_triggers(None, Cursor::new(1_000, u64::MAX), Some(&resume), 1)
-            .await
-            .unwrap();
-        assert_eq!(second, vec![trigger_b]);
-        // Full hop may still return a resume; EOF is the next empty hop.
-        let resume = next.expect("full page");
-        let (third, next) = client
-            .load_triggers(None, Cursor::new(1_000, u64::MAX), Some(&resume), 1)
-            .await
-            .unwrap();
-        assert!(third.is_empty());
-        assert!(next.is_none());
+        assert_eq!(loaded, vec![trigger_a, trigger_b]);
     }
 
     #[tokio::test]
@@ -1266,10 +1219,10 @@ mod tests {
             .store(5_000, std::sync::atomic::Ordering::Release);
         store.maintain(&namespace, &task_state).await.unwrap();
 
-        let work = collect_due(&client, None, Cursor::new(10_000, u64::MAX))
+        let work = collect_triggers(&client, None, Cursor::new(10_000, u64::MAX))
             .await
             .unwrap();
-        assert_eq!(work[0].triggers, vec![triggers[2].clone()]);
+        assert_eq!(work, vec![triggers[2].clone()]);
 
         let loaded = store
             .load_raw(&partition, &[raw_run((0, 0), (20_000, 0))])
@@ -1349,15 +1302,14 @@ mod tests {
 
         assert_meta(&restored.load_key_state(&partition).await.unwrap(), &meta);
         let restored_client = client(&restored, &namespace);
-        let work = collect_due(
+        let work = collect_triggers(
             &restored_client,
             Some(Cursor::new(1_000, u64::MAX)),
             Cursor::new(2_000, u64::MAX),
         )
         .await
         .unwrap();
-        assert_eq!(work.len(), 1);
-        assert_eq!(work[0].triggers, vec![triggers[1].clone()]);
+        assert_eq!(work, vec![triggers[1].clone()]);
         let loaded = restored
             .load_raw(&partition, &[raw_run((0, 0), (3_000, 0))])
             .await
@@ -1471,7 +1423,11 @@ mod tests {
             store.client(WindowStoreTaskScope {
                 namespace: ns.clone(),
                 max_parallelism,
-                key_group_range: KeyGroupRange::for_subtask(task_index, parallelism, max_parallelism),
+                key_group_range: KeyGroupRange::for_subtask(
+                    task_index,
+                    parallelism,
+                    max_parallelism,
+                ),
                 writer_id: WriterId(format!("task-{task_index}").into_bytes()),
                 attempt: 1,
             })
@@ -1572,14 +1528,14 @@ mod tests {
             .store(5_000, std::sync::atomic::Ordering::Release);
         store.maintain(&ns, &task0).await.unwrap();
 
-        assert!(collect_due(&c0, None, Cursor::new(10_000, u64::MAX))
+        assert!(collect_triggers(&c0, None, Cursor::new(10_000, u64::MAX))
             .await
             .unwrap()
             .is_empty());
-        let work1 = collect_due(&c1, None, Cursor::new(10_000, u64::MAX))
+        let work1 = collect_triggers(&c1, None, Cursor::new(10_000, u64::MAX))
             .await
             .unwrap();
-        assert_eq!(work1[0].triggers, vec![triggers1[0].clone()]);
+        assert_eq!(work1, vec![triggers1[0].clone()]);
         assert_eq!(c1.load_key_state(&part1).await.unwrap().next_seq, 21);
         assert_packed(
             &c1.load_raw(&part1, &[raw_run((0, 0), (20_000, 0))])
@@ -1634,10 +1590,7 @@ mod tests {
 
         let snap0 = c0.checkpoint().await.unwrap();
         let error = c1.restore(&snap0).await.unwrap_err();
-        assert!(
-            error.to_string().contains("same assignment"),
-            "{error}"
-        );
+        assert!(error.to_string().contains("same assignment"), "{error}");
         assert_eq!(c1.load_key_state(&part1).await.unwrap().next_seq, 20);
         assert_eq!(c0.load_key_state(&part0).await.unwrap().next_seq, 10);
     }

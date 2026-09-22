@@ -11,7 +11,7 @@ use crate::runtime::operators::window::model::{
     TimeGranularity, WindowTiles, WindowTrigger, WindowTriggerKind,
 };
 use crate::runtime::operators::window::store::backend::{
-    collect_due, WindowOperatorStore, WindowStoreTaskScope,
+    collect_triggers, WindowOperatorStore, WindowStoreTaskScope,
 };
 use crate::runtime::operators::window::store::data::cursors_from_batch;
 use crate::test_utils::window_aggs as test_utils;
@@ -71,9 +71,7 @@ fn scope(ns: &StateNamespace, attempt: u64) -> WindowStoreTaskScope {
     scope
 }
 
-fn contact<'a>(
-    docker: &'a clients::Cli,
-) -> (String, Option<Container<'a, GenericImage>>) {
+fn contact<'a>(docker: &'a clients::Cli) -> (String, Option<Container<'a, GenericImage>>) {
     if let Ok(cp) = std::env::var("VOLGA_SCYLLA_CONTACT") {
         return (cp, None);
     }
@@ -97,14 +95,14 @@ async fn connect<'a>(
     (container, store)
 }
 
-/// Full write → load_key_state / load_raw / collect_due loop.
+/// Full write → load_key_state / load_raw / collect_triggers.
 #[tokio::test]
 #[ignore]
 async fn scylla_commit_load_and_stream_due() {
     let docker = clients::Cli::default();
     let (_container, store) = connect(&docker, "volga_loop").await;
     let ns = StateNamespace::new(b"op");
-    let client = store.client(scope(&ns, b"a"));
+    let client = store.client(scope(&ns, 1));
     let partition = partition(&ns);
     let events = test_utils::batch(&[(1_000, 1_000.0, "key", 1)]);
     client
@@ -137,10 +135,10 @@ async fn scylla_commit_load_and_stream_due() {
         .await
         .unwrap();
     assert_eq!(loaded.iter().map(|b| b.num_rows()).sum::<usize>(), 1);
-    let page = collect_due(&client, None, Cursor::new(2_000, u64::MAX))
+    let page = collect_triggers(&client, None, Cursor::new(2_000, u64::MAX))
         .await
         .unwrap();
-    assert_eq!(page[0].triggers.len(), 1);
+    assert_eq!(page.len(), 1);
 }
 
 #[tokio::test]
@@ -149,7 +147,7 @@ async fn scylla_empty_loads_and_empty_runs() {
     let docker = clients::Cli::default();
     let (_container, store) = connect(&docker, "volga_empty").await;
     let ns = StateNamespace::new(b"op");
-    let client = store.client(scope(&ns, b"a"));
+    let client = store.client(scope(&ns, 1));
     let partition = partition(&ns);
     let raw_runs = [raw_run((0, 0), (10, 0))];
     let tile_runs = [TileRun {
@@ -172,20 +170,14 @@ async fn scylla_empty_loads_and_empty_runs() {
         .await
         .unwrap()
         .is_empty());
-    assert!(client
-        .load_raw(&partition, &[])
-        .await
-        .unwrap()
-        .is_empty());
-    assert!(client
-        .load_tiles(&partition, &[])
-        .await
-        .unwrap()
-        .is_empty());
-    assert!(collect_due(&client, None, Cursor::new(2_000, u64::MAX))
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(client.load_raw(&partition, &[]).await.unwrap().is_empty());
+    assert!(client.load_tiles(&partition, &[]).await.unwrap().is_empty());
+    assert!(
+        collect_triggers(&client, None, Cursor::new(2_000, u64::MAX))
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -194,7 +186,7 @@ async fn scylla_commit_stores_raw_tiles_and_key_state() {
     let docker = clients::Cli::default();
     let (_container, store) = connect(&docker, "volga_commit").await;
     let ns = StateNamespace::new(b"op");
-    let client = store.client(scope(&ns, b"a"));
+    let client = store.client(scope(&ns, 1));
     let partition = partition(&ns);
     let meta = KeyState {
         next_seq: 3,
@@ -247,7 +239,7 @@ async fn scylla_store_key_state_leaves_raw_and_tiles_unchanged() {
     let docker = clients::Cli::default();
     let (_container, store) = connect(&docker, "volga_keystate").await;
     let ns = StateNamespace::new(b"op");
-    let client = store.client(scope(&ns, b"a"));
+    let client = store.client(scope(&ns, 1));
     let partition = partition(&ns);
     let stored_tiles = tiles(&[(TimeGranularity::Seconds(1), 1_000, 7)]);
     client
@@ -310,7 +302,7 @@ async fn scylla_raw_ranges_are_half_open_and_ordered() {
     let docker = clients::Cli::default();
     let (_container, store) = connect(&docker, "volga_raw").await;
     let ns = StateNamespace::new(b"op");
-    let client = store.client(scope(&ns, b"a"));
+    let client = store.client(scope(&ns, 1));
     let partition = partition(&ns);
     client
         .commit_events(
@@ -359,7 +351,7 @@ async fn scylla_tile_ranges_are_half_open() {
     let docker = clients::Cli::default();
     let (_container, store) = connect(&docker, "volga_tiles").await;
     let ns = StateNamespace::new(b"op");
-    let client = store.client(scope(&ns, b"a"));
+    let client = store.client(scope(&ns, 1));
     let partition = partition(&ns);
     let stored_tiles = tiles(&[
         (TimeGranularity::Seconds(1), 0, 0),
@@ -406,8 +398,8 @@ async fn scylla_overlay_hides_other_attempt() {
     let docker = clients::Cli::default();
     let (_container, store) = connect(&docker, "volga_overlay").await;
     let ns = StateNamespace::new(b"op");
-    let writer = store.client(scope(&ns, b"a"));
-    let other = store.client(scope(&ns, b"b"));
+    let writer = store.client(scope(&ns, 1));
+    let other = store.client(scope(&ns, 2));
     let partition = partition(&ns);
     writer
         .commit_events(
@@ -428,7 +420,10 @@ async fn scylla_overlay_hides_other_attempt() {
         .await
         .unwrap();
 
-    assert_eq!(other.load_key_state(&partition).await.unwrap(), KeyState::default());
+    assert_eq!(
+        other.load_key_state(&partition).await.unwrap(),
+        KeyState::default()
+    );
     assert!(other
         .load_raw(&partition, &[raw_run((0, 0), (2_000, 0))])
         .await
@@ -446,7 +441,7 @@ async fn scylla_overlay_hides_other_attempt() {
         .await
         .unwrap()
         .is_empty());
-    assert!(collect_due(&other, None, Cursor::new(2_000, u64::MAX))
+    assert!(collect_triggers(&other, None, Cursor::new(2_000, u64::MAX))
         .await
         .unwrap()
         .is_empty());

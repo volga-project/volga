@@ -19,8 +19,7 @@ use crate::runtime::state::{OperatorStore, OperatorTaskState, StateSessionHandle
 
 use super::cql::{
     prepare_stmts, PreparedDml, INSERT_KEY_STATES, INSERT_KG_BUCKETS, INSERT_RAW, INSERT_TILES,
-    INSERT_TRIGGERS, SELECT_KEY_STATE, SELECT_RAW, SELECT_TILES,
-    SELECT_TRIGGERS,
+    INSERT_TRIGGERS, SELECT_KEY_STATE, SELECT_RAW, SELECT_TILES, SELECT_TRIGGERS,
 };
 use super::schema::TABLES;
 use super::{read, triggers, write};
@@ -213,11 +212,6 @@ impl ScyllaWindowStoreClient {
             .remove(key);
     }
 
-    #[allow(dead_code)]
-    pub(super) fn set_cp_cut(&self, kg: i32, cut: CutHistory) {
-        self.cp_cut.lock().expect("cp_cut").insert(kg, cut);
-    }
-
     pub(super) fn overlay_visible(&self, kg: i32, attempt: i64, epoch: i64) -> bool {
         let v = Version {
             attempt: attempt as Attempt,
@@ -258,21 +252,24 @@ impl WindowOperatorStore for ScyllaWindowStoreClient {
         meta: &KeyState,
         triggers: &[WindowTrigger],
     ) -> Result<()> {
-        write::commit_events(self, partition, ts_column_index, events, tiles, meta, triggers)
-            .await
+        write::commit_events(
+            self,
+            partition,
+            ts_column_index,
+            events,
+            tiles,
+            meta,
+            triggers,
+        )
+        .await
     }
 
     async fn load_triggers(
         &self,
         after: Option<Cursor>,
         through: Cursor,
-        resume: Option<&crate::runtime::operators::window::store::TriggerResume>,
-        limit: usize,
-    ) -> Result<(
-        Vec<WindowTrigger>,
-        Option<crate::runtime::operators::window::store::TriggerResume>,
-    )> {
-        triggers::load_triggers(self, after, through, resume, limit).await
+    ) -> Result<Vec<WindowTrigger>> {
+        triggers::load_triggers(self, after, through).await
     }
 
     async fn store_key_state(&self, partition: &PartitionKey, state: &KeyState) -> Result<()> {

@@ -1,4 +1,3 @@
-use std::any::Any;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -22,7 +21,7 @@ mod inmem;
 mod scylla;
 mod version;
 
-pub use due::{collect_due, trigger_page_size};
+pub use due::collect_triggers;
 pub use inmem::{InMemWindowStore, InMemWindowStoreClient};
 pub use scylla::{ScyllaWindowStore, ScyllaWindowStoreClient};
 pub use version::{Attempt, CutHistory, Version};
@@ -106,52 +105,12 @@ pub type StateVersion = Version;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WindowBackendSnapshot {
     /// Development/test-only inline snapshot.
-    InMemory { snapshot: Vec<u8> },
-    Versioned { version: StateVersion },
-}
-
-#[derive(Debug, Clone)]
-pub struct DueWindowWork {
-    pub partition: PartitionKey,
-    pub key_state: KeyState,
-    pub triggers: Vec<WindowTrigger>,
-}
-
-/// Opaque pager token. Only the backend that produced it should pass it back.
-#[derive(Clone)]
-pub struct TriggerResume {
-    last: Option<WindowTrigger>,
-    backend: Option<Arc<dyn Any + Send + Sync>>,
-}
-
-impl std::fmt::Debug for TriggerResume {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TriggerResume").finish_non_exhaustive()
-    }
-}
-
-impl TriggerResume {
-    pub(crate) fn after_visible(last: WindowTrigger) -> Self {
-        Self {
-            last: Some(last),
-            backend: None,
-        }
-    }
-
-    pub(crate) fn last(&self) -> &WindowTrigger {
-        self.last.as_ref().expect("visible resume")
-    }
-
-    pub(crate) fn opaque<T: Any + Send + Sync>(value: T) -> Self {
-        Self {
-            last: None,
-            backend: Some(Arc::new(value)),
-        }
-    }
-
-    pub(crate) fn downcast<T: Any>(&self) -> Option<&T> {
-        self.backend.as_ref()?.downcast_ref()
-    }
+    InMemory {
+        snapshot: Vec<u8>,
+    },
+    Versioned {
+        version: StateVersion,
+    },
 }
 
 /// Store operations used by the sole Window Operator for a partition.
@@ -170,17 +129,12 @@ pub trait WindowOperatorStore: OperatorStore {
         meta: &KeyState,
         triggers: &[WindowTrigger],
     ) -> Result<()>;
-    /// One hop of due triggers in `(after, through]`.
-    ///
-    /// Short pages and empty `triggers` with `Some(resume)` are legal. End of
-    /// range is `next is None` — do not treat an empty page as EOF.
+    /// Due triggers in `(after, through]`.
     async fn load_triggers(
         &self,
         after: Option<Cursor>,
         through: Cursor,
-        resume: Option<&TriggerResume>,
-        limit: usize,
-    ) -> Result<(Vec<WindowTrigger>, Option<TriggerResume>)>;
+    ) -> Result<Vec<WindowTrigger>>;
     async fn store_key_state(&self, partition: &PartitionKey, state: &KeyState) -> Result<()>;
     /// Complete all pending writes before capturing the returned snapshot.
     async fn checkpoint(&self) -> Result<WindowBackendSnapshot>;

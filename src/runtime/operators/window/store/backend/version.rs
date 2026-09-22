@@ -20,7 +20,9 @@ pub struct CutHistory {
 
 impl CutHistory {
     pub fn empty() -> Self {
-        Self { entries: Vec::new() }
+        Self {
+            entries: Vec::new(),
+        }
     }
 
     pub fn entries(&self) -> &[Version] {
@@ -59,19 +61,6 @@ impl CutHistory {
         }
         next
     }
-
-    /// True if `self` allows a version that `other` does not.
-    pub fn outlives(&self, other: &CutHistory) -> bool {
-        self.entries.iter().any(|e| {
-            match other
-                .entries
-                .binary_search_by_key(&e.attempt, |o| o.attempt)
-            {
-                Ok(i) => other.entries[i].epoch < e.epoch,
-                Err(_) => true,
-            }
-        })
-    }
 }
 
 #[cfg(test)]
@@ -82,22 +71,32 @@ mod tests {
     fn advance_none_is_noop() {
         let cut = CutHistory::empty().advance(1, Some(4));
         assert_eq!(cut.advance(2, None), cut);
-        assert!(!cut.allows(Version { attempt: 2, epoch: 0 }));
+        assert!(!cut.allows(Version {
+            attempt: 2,
+            epoch: 0
+        }));
     }
 
     #[test]
     fn allows_is_per_attempt_prefix() {
         let cut = CutHistory::empty().advance(1, Some(10));
-        assert!(cut.allows(Version { attempt: 1, epoch: 10 }));
-        assert!(!cut.allows(Version { attempt: 1, epoch: 11 }));
-        assert!(!cut.allows(Version { attempt: 2, epoch: 0 }));
+        assert!(cut.allows(Version {
+            attempt: 1,
+            epoch: 10
+        }));
+        assert!(!cut.allows(Version {
+            attempt: 1,
+            epoch: 11
+        }));
+        assert!(!cut.allows(Version {
+            attempt: 2,
+            epoch: 0
+        }));
     }
 
     #[test]
     fn advance_does_not_touch_other_attempts() {
-        let cut = CutHistory::empty()
-            .advance(1, Some(10))
-            .advance(2, Some(3));
+        let cut = CutHistory::empty().advance(1, Some(10)).advance(2, Some(3));
         assert_eq!(cut.entries()[0].epoch, 10);
         assert_eq!(cut.entries()[1].epoch, 3);
     }

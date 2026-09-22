@@ -82,8 +82,8 @@ keys.
 
 Emitting WO pages durable triggers through the requested watermark:
 
-1. Loop `load_triggers` until `next` is `None`; group each hop by partition
-   and eval+emit before the next hop.
+1. `load_triggers(after, through)` once; group by partition and eval+emit
+   in `process_page_size` chunks.
 2. Use trigger cursors as exact emit points.
 3. Build one `EvalPlan` per emitted result and window expression.
 4. Merge emit-row and historical coverage, then load raw rows and tiles once.
