@@ -122,9 +122,9 @@ impl Checkpoints {
         self.protocol.latest_complete()
     }
 
-    /// Persist `max(store, observed) + 1` (or `0`) before workers are configured.
-    pub async fn allocate_attempt(&self, observed: Option<u64>) -> anyhow::Result<u64> {
-        allocate_attempt(self.store()?.as_ref(), self.pipeline_id()?, observed).await
+    /// Persist last + 1 (or `0`) before workers are configured.
+    pub async fn allocate_attempt(&self) -> anyhow::Result<u64> {
+        allocate_attempt(self.store()?.as_ref(), self.pipeline_id()?).await
     }
 
     pub fn is_completed(&self, checkpoint_id: u64) -> bool {
