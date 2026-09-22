@@ -109,7 +109,6 @@ func (r *PipelineReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	workerLabels := cloneAndAdd(baseLabels, map[string]string{"volga.io/component": "worker"})
 	requestWorkerLabels := cloneAndAdd(baseLabels, map[string]string{"volga.io/component": "request-worker"})
 	workerLabelSelector := fmt.Sprintf("volga.io/name=%s,volga.io/component=worker", vp.Name)
-	requestWorkerLabelSelector := fmt.Sprintf("volga.io/name=%s,volga.io/component=request-worker", vp.Name)
 
 	masterServiceName := fmt.Sprintf("%s-master", vp.Name)
 	workerServiceName := fmt.Sprintf("%s-workers", vp.Name)
@@ -189,7 +188,6 @@ func (r *PipelineReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		masterResources,
 		masterLabels,
 		workerLabelSelector,
-		requestWorkerLabelSelector,
 		masterServiceAddr,
 		pipelineID,
 	); err != nil {
@@ -511,7 +509,6 @@ func (r *PipelineReconciler) reconcileMasterPod(
 	resources corev1.ResourceRequirements,
 	labels map[string]string,
 	workerLabelSelector string,
-	requestWorkerLabelSelector string,
 	masterServiceAddr string,
 	pipelineID string,
 ) error {
@@ -554,11 +551,9 @@ func (r *PipelineReconciler) reconcileMasterPod(
 						{Name: "VOLGA_MASTER_HOLD_ON_FINISH", Value: holdOnFinish},
 						{Name: "VOLGA_PIPELINE_CRD_NAME", Value: vp.Name},
 						{Name: "VOLGA_WORKER_LABEL_SELECTOR", Value: workerLabelSelector},
-						{Name: "VOLGA_REQUEST_WORKER_LABEL_SELECTOR", Value: requestWorkerLabelSelector},
 						{Name: "VOLGA_WORKER_ID_LABEL", Value: workerIDLabelKey},
 						{Name: "VOLGA_WORKER_PORT", Value: strconv.FormatInt(int64(workerControlPort), 10)},
 						{Name: "VOLGA_WORKER_TRANSPORT_PORT", Value: strconv.FormatInt(int64(workerTransportPort), 10)},
-						{Name: "VOLGA_REQUEST_HTTP_PORT", Value: strconv.FormatInt(int64(requestHttpPort), 10)},
 						{Name: "VOLGA_PIPELINE_ID", Value: pipelineID},
 						{Name: "KUBE_API_SERVER", Value: kubeAPIServerInCluster},
 						{
@@ -696,6 +691,7 @@ func (r *PipelineReconciler) reconcileRequestWorkerStatefulSet(
 				},
 				Env: []corev1.EnvVar{
 					{Name: "VOLGA_ORCHESTRATOR_KIND", Value: "kube"},
+					{Name: "VOLGA_WORKER_ROLE", Value: "request"},
 					{Name: "VOLGA_WORKER_BIND_ADDR", Value: "0.0.0.0:" + strconv.FormatInt(int64(workerControlPort), 10)},
 					{Name: "VOLGA_REQUEST_BIND_ADDR", Value: "0.0.0.0:" + strconv.FormatInt(int64(requestHttpPort), 10)},
 					{Name: "VOLGA_METRICS_BIND_ADDR", Value: "0.0.0.0:" + strconv.FormatInt(int64(metricsPort), 10)},
