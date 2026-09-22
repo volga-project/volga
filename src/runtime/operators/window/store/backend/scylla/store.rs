@@ -19,8 +19,8 @@ use crate::runtime::state::{OperatorStore, OperatorTaskState, StateSessionHandle
 
 use super::cql::{
     configure_lwt, prepare_stmts, PreparedDml, INSERT_KEY_STATES, INSERT_KG_BUCKETS, INSERT_META,
-    INSERT_RAW, INSERT_TILES, INSERT_TRIGGERS, PUBLISH_META, SELECT_KEY_STATE, SELECT_KEY_STATE_AT,
-    SELECT_META, SELECT_RAW, SELECT_TILES, SELECT_TRIGGERS, TAKE_ATTEMPT,
+    INSERT_RAW, INSERT_TILES, INSERT_TRIGGERS, PUBLISH_META, SELECT_KEY_STATE, SELECT_META,
+    SELECT_RAW, SELECT_TILES, SELECT_TRIGGERS, TAKE_ATTEMPT,
 };
 use super::schema::TABLES;
 use super::{checkpoint, read, triggers, write};
@@ -86,7 +86,6 @@ impl ScyllaWindowStore {
                     insert_key_states,
                     insert_triggers,
                     select_key_state,
-                    select_key_state_at,
                     select_raw,
                     select_tiles,
                     select_triggers,
@@ -103,7 +102,6 @@ impl ScyllaWindowStore {
                         INSERT_KEY_STATES,
                         INSERT_TRIGGERS,
                         SELECT_KEY_STATE,
-                        SELECT_KEY_STATE_AT,
                         SELECT_RAW,
                         SELECT_TILES,
                         SELECT_TRIGGERS,
@@ -124,7 +122,6 @@ impl ScyllaWindowStore {
                     insert_key_states,
                     insert_triggers,
                     select_key_state,
-                    select_key_state_at,
                     select_raw,
                     select_tiles,
                     select_triggers,
