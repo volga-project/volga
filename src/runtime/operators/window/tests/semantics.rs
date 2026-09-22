@@ -12,7 +12,7 @@ use crate::runtime::operators::window::request::{
     WindowRequestOperator, WindowRequestOperatorConfig,
 };
 use crate::runtime::operators::window::store::{
-    collect_triggers, InMemWindowStore, PartitionKey, StateNamespace, WindowStoreTaskScope,
+    InMemWindowStore, PartitionKey, StateNamespace, WindowOperatorStore, WindowStoreTaskScope,
 };
 use crate::runtime::operators::window::{
     TASK_METADATA_ROWS_ACCEPTED, TASK_METADATA_ROWS_DROPPED_LATE,
@@ -166,7 +166,8 @@ async fn state_only_publishes_on_ingest_and_advances_on_watermark() {
     let client = h
         .store
         .client(WindowStoreTaskScope::for_test(h.namespace.clone()));
-    let due = collect_triggers(&client, None, Cursor::new(2000, u64::MAX))
+    let due = client
+        .load_triggers(None, Cursor::new(2000, u64::MAX))
         .await
         .expect("due page");
     assert!(due.is_empty());

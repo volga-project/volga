@@ -683,7 +683,6 @@ impl OperatorStore for InMemWindowStoreClient {
 mod tests {
     use super::*;
     use crate::common::KeyGroupRange;
-    use crate::runtime::operators::window::store::collect_triggers;
 
     use crate::runtime::operators::window::model::{
         KeyEvaluationState, TileRun, TimeGranularity, WindowTiles, WindowTriggerKind,
@@ -1220,7 +1219,8 @@ mod tests {
         task_state.seed_committed_watermark(5_000);
         store.maintain(&namespace, &task_state).await.unwrap();
 
-        let work = collect_triggers(&client, None, Cursor::new(10_000, u64::MAX))
+        let work = client
+            .load_triggers(None, Cursor::new(10_000, u64::MAX))
             .await
             .unwrap();
         assert_eq!(work, vec![triggers[2].clone()]);
@@ -1303,13 +1303,13 @@ mod tests {
 
         assert_meta(&restored.load_key_state(&partition).await.unwrap(), &meta);
         let restored_client = client(&restored, &namespace);
-        let work = collect_triggers(
-            &restored_client,
-            Some(Cursor::new(1_000, u64::MAX)),
-            Cursor::new(2_000, u64::MAX),
-        )
-        .await
-        .unwrap();
+        let work = restored_client
+            .load_triggers(
+                Some(Cursor::new(1_000, u64::MAX)),
+                Cursor::new(2_000, u64::MAX),
+            )
+            .await
+            .unwrap();
         assert_eq!(work, vec![triggers[1].clone()]);
         let loaded = restored
             .load_raw(&partition, &[raw_run((0, 0), (3_000, 0))])
@@ -1531,11 +1531,13 @@ mod tests {
         task0.seed_committed_watermark(5_000);
         store.maintain(&ns, &task0).await.unwrap();
 
-        assert!(collect_triggers(&c0, None, Cursor::new(10_000, u64::MAX))
+        assert!(c0
+            .load_triggers(None, Cursor::new(10_000, u64::MAX))
             .await
             .unwrap()
             .is_empty());
-        let work1 = collect_triggers(&c1, None, Cursor::new(10_000, u64::MAX))
+        let work1 = c1
+            .load_triggers(None, Cursor::new(10_000, u64::MAX))
             .await
             .unwrap();
         assert_eq!(work1, vec![triggers1[0].clone()]);

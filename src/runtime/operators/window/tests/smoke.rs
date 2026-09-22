@@ -242,9 +242,9 @@ WINDOW w AS (
         }
     }
     assert!(saw_wm);
-    assert!(
-        pages >= 2,
-        "{n} triggers should span more than one due page"
+    assert_eq!(
+        pages, 1,
+        "one key is one advance_key / one due message (page_size chunks keys)"
     );
     assert_eq!(rows, n as usize);
 
