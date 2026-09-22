@@ -165,27 +165,40 @@ mod partition_tests {
     use super::*;
 
     #[test]
-    fn first_tick_starts_at_through_bucket() {
+    fn due_bucket_walk_is_clamped() {
         let range = KeyGroupRange::full(1);
-        let through = Cursor::new(TRIGGER_BUCKET_MS + 1, 0);
-        let parts = partitions(None, through, range, 1);
-        assert_eq!(parts, vec![(TRIGGER_BUCKET_MS, 0)]);
-    }
+        let unix = 1_700_000_000_000i64;
+        let unix_bucket = align_down(unix, TRIGGER_BUCKET_MS);
 
-    #[test]
-    fn frontier_walks_only_covered_buckets() {
-        let range = KeyGroupRange::full(1);
-        let after = Some(Cursor::new(0, u64::MAX));
-        let through = Cursor::new(TRIGGER_BUCKET_MS + 1, 0);
-        let parts = partitions(after, through, range, 1);
-        assert_eq!(parts, vec![(0, 0), (TRIGGER_BUCKET_MS, 0)]);
-    }
+        let first = partitions(None, Cursor::new(unix, 0), range, 1);
+        assert_ne!(unix_bucket, 0);
+        assert_eq!(
+            first,
+            vec![(unix_bucket, 0)],
+            "after None must not start at bucket 0 for a unix-ms through"
+        );
 
-    #[test]
-    fn close_watermark_stays_on_frontier_bucket() {
-        let range = KeyGroupRange::full(1);
-        let after = Some(Cursor::new(5_000, u64::MAX));
-        let parts = partitions(after, Cursor::new(i64::MAX, u64::MAX), range, 1);
-        assert_eq!(parts, vec![(0, 0)]);
+        let close = partitions(
+            Some(Cursor::new(5_000, u64::MAX)),
+            Cursor::new(i64::MAX, u64::MAX),
+            range,
+            1,
+        );
+        assert_eq!(close.len(), 1, "through MAX must stay finite");
+        assert_eq!(close, vec![(0, 0)]);
+
+        assert!(
+            partitions(None, Cursor::new(i64::MAX, u64::MAX), range, 1).is_empty(),
+            "close without a frontier has no trigger bucket"
+        );
+        assert_eq!(
+            partitions(
+                Some(Cursor::new(0, u64::MAX)),
+                Cursor::new(TRIGGER_BUCKET_MS + 1, 0),
+                range,
+                1,
+            ),
+            vec![(0, 0), (TRIGGER_BUCKET_MS, 0)],
+        );
     }
 }

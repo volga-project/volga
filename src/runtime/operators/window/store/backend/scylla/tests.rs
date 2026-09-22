@@ -1,9 +1,10 @@
 //! Docker contract for the Scylla window store.
 //!
 //! Ignored by default (`src/tests/README.md`). `VOLGA_SCYLLA_CONTACT` reuses a
-//! cluster; otherwise tests share one `scylladb/scylla:5.4` container. Unique
-//! keyspace per test.
+//! cluster; otherwise tests share one `scylladb/scylla:5.4` container. Each
+//! `connect` allocates a fresh keyspace so a rerun does not see prior epochs.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 
 use crate::api::spec::state::ScyllaConfig;
@@ -88,10 +89,20 @@ fn contact() -> String {
         .clone()
 }
 
-async fn connect(keyspace: &str) -> ScyllaWindowStore {
+fn unique_keyspace(prefix: &str) -> String {
+    static N: AtomicU64 = AtomicU64::new(0);
+    format!(
+        "{}_{}_{}",
+        prefix,
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+async fn connect(prefix: &str) -> ScyllaWindowStore {
     ScyllaWindowStore::connect(ScyllaConfig {
         contact_points: vec![contact()],
-        keyspace: keyspace.to_string(),
+        keyspace: unique_keyspace(prefix),
         datacenter: None,
     })
     .await
@@ -118,7 +129,6 @@ async fn scylla_commit_roundtrip() {
         (TimeGranularity::Seconds(1), 1_000, 1),
         (TimeGranularity::Seconds(1), 2_000, 2),
         (TimeGranularity::Seconds(1), 3_000, 3),
-        (TimeGranularity::Seconds(1), 70_000, 5),
         (TimeGranularity::Minutes(1), 1_000, 4),
     ]);
     let trigger = WindowTrigger {
@@ -130,17 +140,7 @@ async fn scylla_commit_roundtrip() {
         .commit_events(
             &partition,
             0,
-            &batch(&[
-                (30, 3),
-                (10, 1),
-                (20, 2),
-                (20, 1),
-                (40, 4),
-                (50, 5),
-                (50_000, 0),
-                (60_000, 0),
-                (60_000, 1),
-            ]),
+            &batch(&[(30, 3), (10, 1), (20, 2), (20, 1), (40, 4), (50, 5)]),
             &stored_tiles,
             &meta,
             &[trigger.clone()],
@@ -201,17 +201,47 @@ async fn scylla_commit_roundtrip() {
         ]
     );
     assert_eq!(
+        client
+            .load_triggers(None, Cursor::new(2_000, u64::MAX))
+            .await
+            .unwrap(),
+        vec![trigger]
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn scylla_reads_across_minute_buckets() {
+    let store = connect("volga_buckets").await;
+    let ns = StateNamespace::new(b"op");
+    let client = store.client(scope(&ns, 1));
+    let partition = partition(&ns);
+    client
+        .commit_events(
+            &partition,
+            0,
+            &batch(&[(10_000, 0), (70_000, 1)]),
+            &tiles(&[
+                (TimeGranularity::Seconds(1), 10_000, 1),
+                (TimeGranularity::Seconds(1), 70_000, 2),
+            ]),
+            &KeyState {
+                next_seq: 2,
+                ..Default::default()
+            },
+            &[],
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
         raw_cursors(
             &client
-                .load_raw(&partition, &[raw_run((50_000, 0), (60_000, 2))])
+                .load_raw(&partition, &[raw_run((0, 0), (80_000, 0))])
                 .await
                 .unwrap()
         ),
-        vec![
-            Cursor::new(50_000, 0),
-            Cursor::new(60_000, 0),
-            Cursor::new(60_000, 1),
-        ]
+        vec![Cursor::new(10_000, 0), Cursor::new(70_000, 1)]
     );
     assert_eq!(
         tile_keys(
@@ -220,7 +250,7 @@ async fn scylla_commit_roundtrip() {
                     &partition,
                     &[TileRun {
                         granularity: TimeGranularity::Seconds(1),
-                        start_ts: 1_000,
+                        start_ts: 0,
                         end_ts_exclusive: 120_000,
                     }],
                 )
@@ -228,18 +258,9 @@ async fn scylla_commit_roundtrip() {
                 .unwrap()
         ),
         vec![
-            (TimeGranularity::Seconds(1), 1_000),
-            (TimeGranularity::Seconds(1), 2_000),
-            (TimeGranularity::Seconds(1), 3_000),
+            (TimeGranularity::Seconds(1), 10_000),
             (TimeGranularity::Seconds(1), 70_000),
         ]
-    );
-    assert_eq!(
-        client
-            .load_triggers(None, Cursor::new(2_000, u64::MAX))
-            .await
-            .unwrap(),
-        vec![trigger]
     );
 }
 
