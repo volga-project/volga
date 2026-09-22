@@ -80,10 +80,6 @@ pub fn open_window_operator_store(
             Ok(Arc::new(inmem.client(scope.clone())) as Arc<dyn WindowOperatorStore>)
         }
         OperatorStateBackendConfig::Scylla(cfg) => {
-            anyhow::ensure!(
-                scope.attempt != 0,
-                "Scylla window store requires a durable execution_attempt_id (#156)"
-            );
             let cfg = cfg.clone();
             let registered = registry.get_or_insert_store(OperatorKind::Window, move |session| {
                 let session = match session {
