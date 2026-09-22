@@ -43,35 +43,11 @@ fn partitions(
     out
 }
 
-fn min_seek(after: Option<Cursor>) -> (i64, i64, Vec<u8>, i8, i64, i64, i64) {
+fn min_seek(after: Option<Cursor>) -> (i64, i64) {
     match after {
-        None => (
-            i64::MIN,
-            i64::MIN,
-            Vec::new(),
-            i8::MIN,
-            i64::MIN,
-            i64::MIN,
-            i64::MIN,
-        ),
-        Some(c) if c.seq_no == u64::MAX => (
-            c.ts,
-            i64::MAX,
-            Vec::new(),
-            i8::MAX,
-            i64::MAX,
-            i64::MAX,
-            i64::MAX,
-        ),
-        Some(c) => (
-            c.ts,
-            c.seq_no as i64,
-            Vec::new(),
-            i8::MIN,
-            i64::MIN,
-            i64::MIN,
-            i64::MIN,
-        ),
+        None => (i64::MIN, i64::MIN),
+        Some(c) if c.seq_no == u64::MAX => (c.ts, i64::MAX),
+        Some(c) => (c.ts, c.seq_no as i64),
     }
 }
 
@@ -137,16 +113,9 @@ pub(super) async fn load_triggers(
         let session = Arc::clone(&session);
         let select = prepared.select_triggers.clone();
         let ns = ns.clone();
-        let seek = seek.clone();
         async move {
             let result = session
-                .execute_unpaged(
-                    &select,
-                    (
-                        ns, bucket, shard, seek.0, seek.1, seek.2, seek.3, seek.4, seek.5, seek.6,
-                        through.ts,
-                    ),
-                )
+                .execute_unpaged(&select, (ns, bucket, shard, seek.0, seek.1, through.ts))
                 .await?;
             Ok::<_, anyhow::Error>(result)
         }
