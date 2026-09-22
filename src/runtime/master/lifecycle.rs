@@ -213,10 +213,7 @@ impl MasterLifecycle {
                 let _ = attempt.stop_gracefully().await;
 
                 self.restore_checkpoint_id = self.state.latest_complete_checkpoint().await;
-                self.attempt_id = self
-                    .state
-                    .allocate_attempt(None)
-                    .await?;
+                self.attempt_id = self.state.allocate_attempt().await?;
                 println!(
                     "[MASTER] Starting execution attempt {} restore={:?}",
                     self.attempt_id, self.restore_checkpoint_id
@@ -257,7 +254,7 @@ impl Message<Start> for MasterLifecycle {
         self.recoveries = 0;
         self.restore_checkpoint_id = None;
         self.current = None;
-        match self.state.allocate_attempt(None).await {
+        match self.state.allocate_attempt().await {
             Ok(attempt_id) => self.attempt_id = attempt_id,
             Err(error) => {
                 self.complete_execute(Err(error));
