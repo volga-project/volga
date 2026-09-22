@@ -179,7 +179,7 @@ Does **not** need Scylla to merge. You cannot serve windows with it until #291.
 
 - CRD: `spec.requestWorkers.replicas` (and later resources/selectors). Do not overload `spec.workers.replicas`.
 - Second StatefulSet + label selector. Service for `/request` (current worker Service is control / transport / metrics only).
-- Docker: `VOLGA_REQUEST_WORKER_COUNT` next to `VOLGA_WORKER_COUNT`.
+- Docker compose profile `request-workers` launches the replicas. The master does not read a request-worker count.
 - Request workers get `VOLGA_WORKER_ROLE=request` and `VOLGA_REQUEST_BIND_ADDR` from the pod spec. The master does not discover them.
 
 Smoke: request STS comes up and the port binds. Do not require the master to see those pods, and do not require WRO to read store.

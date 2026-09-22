@@ -6,6 +6,8 @@ metadata:
 spec:
   workers:
     replicas: 3
+  requestWorkers:
+    replicas: 0
   image: volga:latest
   imagePullPolicy: IfNotPresent
   master:

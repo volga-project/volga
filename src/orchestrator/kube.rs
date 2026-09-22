@@ -220,7 +220,8 @@ fn describe_unhealthy_pod(pod: &Value) -> String {
             return format!("phase={phase} reason={reason}");
         }
     }
-    if let Some(statuses) = json_get_path(pod, &["status", "containerStatuses"]).and_then(|v| v.as_array())
+    if let Some(statuses) =
+        json_get_path(pod, &["status", "containerStatuses"]).and_then(|v| v.as_array())
     {
         for status in statuses {
             if let Some(terminated) = json_get_path(status, &["state", "terminated"]) {
@@ -241,7 +242,10 @@ fn describe_unhealthy_pod(pod: &Value) -> String {
                     .unwrap_or("Waiting");
                 if matches!(
                     reason,
-                    "CrashLoopBackOff" | "ImagePullBackOff" | "ErrImagePull" | "CreateContainerError"
+                    "CrashLoopBackOff"
+                        | "ImagePullBackOff"
+                        | "ErrImagePull"
+                        | "CreateContainerError"
                 ) {
                     return format!("container waiting reason={reason}");
                 }
@@ -317,6 +321,42 @@ impl KubeMasterOrchestrator {
                     .and_then(|v| v.as_str())
                     .map(ToString::to_string)
             })
+    }
+
+    async fn discover_nodes(&self, label_selector: &str) -> HashMap<String, WorkerNode> {
+        if label_selector.is_empty() {
+            return HashMap::new();
+        }
+        let path = format!("/api/v1/namespaces/{}/pods", self.api.namespace);
+        let pods = match self
+            .api
+            .get_json(&path, &[("labelSelector", label_selector)])
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => panic!("failed to discover worker pods from kube api: {}", e),
+        };
+        let mut out = HashMap::new();
+        if let Some(items) = pods.get("items").and_then(|v| v.as_array()) {
+            for item in items {
+                if !worker_pod_ready(item) {
+                    continue;
+                }
+                let pod_ip = json_get_path(item, &["status", "podIP"])
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                if let Some(worker_id) = self.worker_id_from_pod(item) {
+                    let node = WorkerNode::new(
+                        worker_id.clone(),
+                        pod_ip.to_string(),
+                        self.worker_port,
+                        self.transport_port,
+                    );
+                    out.insert(worker_id, node);
+                }
+            }
+        }
+        out
     }
 
     /// List matching worker pods and classify Ready vs unhealthy (includes non-ready pods).
@@ -425,7 +465,11 @@ impl KubeMasterOrchestrator {
             Ok(crd) => {
                 let annotation = json_get_path(
                     &crd,
-                    &["metadata", "annotations", KUBE_WORKER_HEALTH_POLL_ANNOTATION],
+                    &[
+                        "metadata",
+                        "annotations",
+                        KUBE_WORKER_HEALTH_POLL_ANNOTATION,
+                    ],
                 )
                 .and_then(|v| v.as_str());
                 match annotation.and_then(parse_boolish) {
@@ -460,41 +504,7 @@ impl KubeWorkerOrchestrator {
 #[async_trait]
 impl MasterOrchestrator for KubeMasterOrchestrator {
     async fn get_worker_nodes(&self) -> HashMap<String, WorkerNode> {
-        let path = format!("/api/v1/namespaces/{}/pods", self.api.namespace);
-        let pods = match self
-            .api
-            .get_json(
-                &path,
-                &[("labelSelector", self.worker_label_selector.as_str())],
-            )
-            .await
-        {
-            Ok(v) => v,
-            Err(e) => panic!("failed to discover worker pods from kube api: {}", e),
-        };
-        let mut out = HashMap::new();
-        if let Some(items) = pods.get("items").and_then(|v| v.as_array()) {
-            for item in items {
-                if !worker_pod_ready(item) {
-                    continue;
-                }
-                let pod_ip = json_get_path(item, &["status", "podIP"])
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default();
-                if let Some(worker_id) = self.worker_id_from_pod(item) {
-                    out.insert(
-                        worker_id.clone(),
-                        WorkerNode::new(
-                            worker_id,
-                            pod_ip.to_string(),
-                            self.worker_port,
-                            self.transport_port,
-                        ),
-                    );
-                }
-            }
-        }
-        out
+        self.discover_nodes(&self.worker_label_selector).await
     }
 
     fn run_health_poll(
@@ -614,28 +624,24 @@ impl MasterOrchestrator for KubeMasterOrchestrator {
             .await?;
 
         let mut deleted = 0usize;
-        if let Some(items) = pods.get("items").and_then(|v| v.as_array()) {
-            for item in items {
-                let worker_id =
-                    json_get_path(item, &["metadata", "labels", &self.worker_id_label_key])
-                        .and_then(|v| v.as_str())
-                        .or_else(|| {
-                            json_get_path(item, &["metadata", "name"]).and_then(|v| v.as_str())
-                        });
-                let pod_name = json_get_path(item, &["metadata", "name"]).and_then(|v| v.as_str());
-                if let (Some(worker_id), Some(pod_name)) = (worker_id, pod_name) {
-                    if target.contains(worker_id) {
-                        let delete_path = format!(
-                            "/api/v1/namespaces/{}/pods/{}",
-                            self.api.namespace, pod_name
-                        );
-                        self.api.delete(&delete_path).await?;
-                        deleted += 1;
-                        println!(
-                            "[MASTER] Requested replacement: deleted pod {} (worker_id={})",
-                            pod_name, worker_id
-                        );
-                    }
+        let items = pods.get("items").and_then(|v| v.as_array());
+        for item in items.into_iter().flatten() {
+            let worker_id = json_get_path(item, &["metadata", "labels", &self.worker_id_label_key])
+                .and_then(|v| v.as_str())
+                .or_else(|| json_get_path(item, &["metadata", "name"]).and_then(|v| v.as_str()));
+            let pod_name = json_get_path(item, &["metadata", "name"]).and_then(|v| v.as_str());
+            if let (Some(worker_id), Some(pod_name)) = (worker_id, pod_name) {
+                if target.contains(worker_id) {
+                    let delete_path = format!(
+                        "/api/v1/namespaces/{}/pods/{}",
+                        self.api.namespace, pod_name
+                    );
+                    self.api.delete(&delete_path).await?;
+                    deleted += 1;
+                    println!(
+                        "[MASTER] Requested replacement: deleted pod {} (worker_id={})",
+                        pod_name, worker_id
+                    );
                 }
             }
         }

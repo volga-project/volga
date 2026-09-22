@@ -42,6 +42,7 @@ pub struct DockerMasterOrchestrator {
     worker_nodes: HashMap<String, WorkerNode>,
     pipeline_id: String,
     spec: PipelineSpec,
+    num_expected_workers: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -78,6 +79,7 @@ impl DockerMasterOrchestrator {
             worker_nodes,
             pipeline_id,
             spec,
+            num_expected_workers: worker_count,
         })
     }
 }
@@ -110,7 +112,7 @@ impl MasterOrchestrator for DockerMasterOrchestrator {
     }
 
     async fn get_num_expected_workers(&self) -> usize {
-        self.worker_nodes.len()
+        self.num_expected_workers
     }
 }
 
