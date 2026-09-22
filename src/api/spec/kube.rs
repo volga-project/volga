@@ -3,10 +3,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::api::spec::connectors::{RequestSourceSinkSpec, SinkSpec, SourceSpec};
+use crate::api::spec::connectors::{SinkSpec, SourceSpec};
 use crate::api::spec::event_time::EventTimeSpec;
 use crate::api::spec::operators::OperatorOverrides;
-use crate::api::spec::pipeline::{ExecutionMode, ExecutionProfile, PipelineSpec};
+use crate::api::spec::pipeline::{ExecutionMode, ExecutionProfile, PipelineSpec, RequestSpec};
 use crate::api::spec::state::StateSpec;
 use crate::api::spec::worker_runtime::WorkerRuntimeSpec;
 use crate::orchestrator::task_assignment::TaskWorkerAssignmentStrategyType;
@@ -33,7 +33,7 @@ pub struct KubePipelineSpec {
     #[serde(default = "default_sources_json")]
     pub sources: Value,
     #[serde(default)]
-    pub request_source_sink: Option<Value>,
+    pub request: Option<RequestSpec>,
     #[serde(default)]
     pub sink: Option<Value>,
     #[serde(default)]
@@ -97,13 +97,6 @@ impl TryFrom<KubePipelineSpec> for PipelineSpec {
                 .context("invalid operator_overrides")?;
         let sources: Vec<SourceSpec> =
             serde_json::from_value(normalize_json_strings(spec.sources)).context("invalid sources")?;
-        let request_source_sink: Option<RequestSourceSinkSpec> = match spec.request_source_sink {
-            Some(v) => Some(
-                serde_json::from_value(normalize_json_strings(v))
-                    .context("invalid request_source_sink")?,
-            ),
-            None => None,
-        };
         // Kube may include `create` on InMemoryStorageGrpc; engine SinkSpec ignores it.
         let sink: Option<SinkSpec> = match spec.sink {
             Some(v) => Some(
@@ -122,7 +115,7 @@ impl TryFrom<KubePipelineSpec> for PipelineSpec {
             operator_overrides,
             event_time: spec.event_time,
             sources,
-            request_source_sink,
+            request: spec.request,
             sink,
             sql: spec.sql,
             task_assignment_strategy: spec.task_assignment_strategy,

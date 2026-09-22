@@ -8,7 +8,7 @@ use crate::runtime::checkpoint::{SerializedCheckpoint, SerializedRestore};
 use crate::runtime::functions::source::{
     create_source_function, datagen_source::DatagenSourceConfig, kafka::KafkaSourceConfig,
     parquet::ParquetSourceConfig, word_count_source::BatchingMode, FetchResult,
-    RequestSourceConfig, SourceFunction, SourceFunctionTrait,
+    SourceFunction, SourceFunctionTrait,
 };
 use crate::runtime::operators::operator::{
     operator_config_requires_checkpoint, OperatorBase, OperatorConfig, OperatorTrait, OperatorType,
@@ -44,7 +44,6 @@ pub enum SourceConfig {
     VectorSourceConfig(VectorSourceConfig),
     WordCountSourceConfig(WordCountSourceConfig),
     DatagenSourceConfig(DatagenSourceConfig),
-    HttpRequestSourceConfig(RequestSourceConfig),
     KafkaSourceConfig(KafkaSourceConfig),
     ParquetSourceConfig(ParquetSourceConfig),
 }
@@ -107,7 +106,6 @@ impl SourceConfig {
             SourceConfig::VectorSourceConfig(config) => config.get_projection(),
             SourceConfig::WordCountSourceConfig(config) => config.get_projection(),
             SourceConfig::DatagenSourceConfig(config) => config.get_projection(),
-            SourceConfig::HttpRequestSourceConfig(_) => (None, None), // Request source doesn't support projection
             SourceConfig::KafkaSourceConfig(config) => config.get_projection(),
             SourceConfig::ParquetSourceConfig(config) => config.get_projection(),
         }
@@ -118,7 +116,6 @@ impl SourceConfig {
             SourceConfig::VectorSourceConfig(config) => config.set_projection(projection, schema),
             SourceConfig::WordCountSourceConfig(config) => config.set_projection(projection, schema),
             SourceConfig::DatagenSourceConfig(config) => config.set_projection(projection, schema),
-            SourceConfig::HttpRequestSourceConfig(_) => {}, // Request source doesn't support projection
             SourceConfig::KafkaSourceConfig(config) => config.set_projection(projection, schema),
             SourceConfig::ParquetSourceConfig(config) => config.set_projection(projection, schema),
         }
@@ -131,7 +128,6 @@ impl std::fmt::Display for SourceConfig {
             SourceConfig::VectorSourceConfig(_) => write!(f, "Vector"),
             SourceConfig::WordCountSourceConfig(_) => write!(f, "WordCount"),
             SourceConfig::DatagenSourceConfig(_) => write!(f, "Datagen"),
-            SourceConfig::HttpRequestSourceConfig(_) => write!(f, "HttpRequest"),
             SourceConfig::KafkaSourceConfig(_) => write!(f, "Kafka"),
             SourceConfig::ParquetSourceConfig(_) => write!(f, "Parquet"),
         }

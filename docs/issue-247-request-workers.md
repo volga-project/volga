@@ -137,7 +137,8 @@ Compile:
 
 - `to_request_mode` **extracts** a request `LogicalGraph` (or a small `RequestChain` type) instead of splicing vertices into the streaming graph.
 - Streaming graph: ingest → … → WO `StateOnly`, no outgoing edge to the read path.
-- Request chain: HTTP decode → keyby → WRO (`state_owner_operator_id` unchanged) → followers → HTTP encode. No copied WO parallelism; no `to_execution_graph` with `task_index` slices.
+- Request chain: `keyby → WRO` (`state_owner_operator_id` unchanged) `→ followers`. No HTTP source or request sink vertices, no copied WO parallelism, no `to_execution_graph` with `task_index` slices. HTTP decode/encode is `RequestExecutor`.
+- `RequestSpec` on the pipeline is `max_pending_requests` and `request_timeout_ms`. Listen address is per process, not spec. Input schema is the window input schema.
 - `compile_*` returns `{ streaming, request: Option<RequestChain> }`.
 - `MasterConfig` holds the streaming graph only.
 - `PipelineSpec`: **no** `request_parallelism`. Replica count is not an engine field.
@@ -178,14 +179,8 @@ Local harness:
 
 - Two worker pools. Kill a request worker → streaming attempt unchanged, remaining replicas still serve. Kill a streaming worker → request workers stay up.
 
-Cleanup in this PR (leftovers of the mixed worker):
+Cleanup in this PR (leftovers of the mixed worker that are not already gone in PR1):
 
-- `RequestSourceProcessor` / `HttpRequestSourceFunction` / `RequestSinkFunction` as StreamTask I/O
-- `RuntimeContext` request receiver/sender
-- `RequestRoutePartition`, `_source_task_index` (and request-id extras if unused)
-- `extract_request_source_config`
-- `WorkerInner.request_source_processor*`
-- `execution_graph.rs` TODO that wants WO+WRO on the same node (wrong; only source+sink were coupled, and both go away)
 - Request vertices in `configure_channels` / checkpoint acks / aligns (aligns already fixed in PR0)
 
 **Not in this PR:** kube Service / second STS (PR4), serving e2e against Scylla (PR5).
@@ -231,20 +226,20 @@ Smoke: request STS comes up, port binds, master sees N request workers Ready. Do
 
 Delete or stop using once PR1–PR2 land:
 
-- [ ] `LogicalGraph::to_request_mode` mutating one graph / copying WO parallelism
-- [ ] `graph_has_request_io` / `OperatorPerWorker` panic pointing at #247
-- [ ] `extract_request_source_config`
-- [ ] `RequestSourceProcessor` + shared `Mutex<Receiver>` fetch
-- [ ] `HttpRequestSourceFunction` / `RequestSinkFunction` as stream functions
-- [ ] `RuntimeContext.request_sink_source_*`
-- [ ] `RequestRoutePartition` / `SOURCE_TASK_INDEX_FIELD`
-- [ ] Response accumulation by `expected_record_count`
-- [ ] `WorkerInner.request_source_processor` + unused `stop_request_source_processor_if_needed`
-- [ ] `execution_graph.rs:255` WO+WRO same-node TODO
+- [x] `LogicalGraph::to_request_mode` copying WO parallelism into one mixed graph
+- [x] `graph_has_request_io` / `OperatorPerWorker` panic pointing at #247
+- [x] `extract_request_source_config`
+- [x] `RequestSourceProcessor` + shared `Mutex<Receiver>` fetch
+- [x] `HttpRequestSourceFunction` / `RequestSinkFunction` as stream functions
+- [x] `RuntimeContext.request_sink_source_*`
+- [x] `RequestRoutePartition` / `SOURCE_TASK_INDEX_FIELD`
+- [x] Response accumulation by `expected_record_count`
+- [x] `WorkerInner.request_source_processor` + unused `stop_request_source_processor_if_needed`
+- [ ] `execution_graph.rs` WO+WRO same-node TODO
 - [ ] Single `MasterConfig.expected_workers` / `wait_for_ready_workers` over a mixed node list
 - [ ] `recover()` draining request sessions
 - [ ] `pipeline_exec` as the request-mode runtime (`SingleWorker` mixed graph)
-- [ ] `RequestSourceSinkSpec.bind_address` as the replica listen address
+- [x] `RequestSourceSinkSpec` / `bind_address` as the replica listen address
 
 ## Out of scope
 

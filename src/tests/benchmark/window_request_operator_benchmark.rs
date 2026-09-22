@@ -1,8 +1,8 @@
 use crate::{
     api::{
         compile_logical_graph,
-        spec::connectors::{RequestSourceSinkSpec, SinkSpec, SourceSpec, SourceSpecKind},
-        spec::pipeline::ExecutionProfile,
+        spec::connectors::{SinkSpec, SourceSpec, SourceSpecKind},
+        spec::pipeline::{ExecutionProfile, RequestSpec},
         ExecutionMode, PipelineSpecBuilder,
     },
     common::ports::gen_unique_grpc_port,
@@ -157,18 +157,6 @@ pub async fn run_window_request_benchmark(
     );
     let schema = query_datagen_config.schema.clone();
 
-    // Datagen source for request input (generates requests)
-    let request_datagen_config = create_datagen_config(
-        request_rate,
-        Some(run_for_s),
-        batch_size,
-        start_ms,
-        step_ms,
-        num_unique_keys,
-        value_start,
-        value_step,
-    );
-
     let sql = "SELECT 
         event_time,
         key,
@@ -186,7 +174,6 @@ pub async fn run_window_request_benchmark(
     )";
 
     let benchmark_start = Instant::now();
-    let request_bind_address = format!("127.0.0.1:{}", gen_unique_grpc_port());
 
     let spec = PipelineSpecBuilder::new()
         .with_parallelism(parallelism)
@@ -203,13 +190,11 @@ pub async fn run_window_request_benchmark(
                 schema_to_json(schema.as_ref()),
             )
         )
-        .with_request_source_sink(RequestSourceSinkSpec {
-            bind_address: request_bind_address,
+        .with_request(RequestSpec {
             max_pending_requests: 10_000,
             request_timeout_ms: 30_000,
-            schema_json: Some(schema_to_json(request_datagen_config.schema.as_ref())),
-            sink: Some(SinkSpec::in_memory_grpc(format!("http://{}", storage_server_addr))),
         })
+        .with_sink(SinkSpec::in_memory_grpc(format!("http://{}", storage_server_addr)))
         .build();
     let logical_graph = compile_logical_graph(&spec, None);
 

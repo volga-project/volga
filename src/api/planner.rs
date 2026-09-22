@@ -120,9 +120,6 @@ pub struct PlanningContext {
     pub connector_configs: HashMap<String, SourceConfig>,
     pub sink_config: Option<SinkConfig>,
 
-    pub request_source_config: Option<SourceConfig>,
-    pub request_sink_config: Option<SinkConfig>,
-
     pub df_planner: Arc<DefaultPhysicalPlanner>,
     pub execution_mode: ExecutionMode,
 
@@ -138,8 +135,6 @@ impl PlanningContext {
             df_session_context,
             connector_configs: HashMap::new(),
             sink_config: None,
-            request_source_config: None,
-            request_sink_config: None,
             df_planner: Arc::new(DefaultPhysicalPlanner::default()),
             execution_mode: ExecutionMode::Streaming,
             parallelism: 1, // Default parallelism
@@ -168,11 +163,6 @@ impl Planner {
             node_stack: Vec::new(),
             context,
         }
-    }
-
-    pub fn register_request_source_sink(&mut self, source_config: SourceConfig, sink_config: Option<SinkConfig>) {
-        self.context.request_source_config = Some(source_config);
-        self.context.request_sink_config = sink_config;
     }
 
     pub fn register_source(&mut self, table_name: String, config: SourceConfig, schema: SchemaRef) {
@@ -549,7 +539,7 @@ impl<'a> TreeNodeVisitor<'a> for Planner {
 
 #[cfg(test)]
 mod tests {
-    use crate::runtime::{functions::source::RequestSourceConfig, operators::source::source_operator::VectorSourceConfig, partition::PartitionType};
+    use crate::runtime::{operators::source::source_operator::VectorSourceConfig, partition::PartitionType};
 
     use super::*;
     use arrow::datatypes::{Schema, Field, DataType};
@@ -959,20 +949,11 @@ mod tests {
             SourceConfig::VectorSourceConfig(VectorSourceConfig::new(vec![])), 
             schema.clone()
         );
-        let request_source_config = SourceConfig::HttpRequestSourceConfig(RequestSourceConfig::new(
-            crate::runtime::functions::source::RequestSourceSinkSpec {
-                bind_address: "127.0.0.1:8080".to_string(),
-                max_pending_requests: 100,
-                request_timeout_ms: 5000,
-                schema_json: None,
-                sink: None,
-            }
-        ));
-        planner.register_request_source_sink(
-            request_source_config.clone(),
-            Some(SinkConfig::RequestSinkConfig),
-        );
-        
+        let request = crate::api::RequestSpec {
+            max_pending_requests: 100,
+            request_timeout_ms: 5000,
+        };
+
         // Window query with SUM over a time-based window partitioned by key
         let sql = "SELECT 
                     event_time, 
@@ -986,9 +967,8 @@ mod tests {
                    FROM events";
         
         let mut streaming = planner.sql_to_graph(sql).unwrap();
-        let request = streaming
-            .to_request_mode(request_source_config, Some(SinkConfig::RequestSinkConfig))
-            .unwrap();
+        let request = streaming.to_request_mode(&request).unwrap();
+        let request = &request.graph;
 
         let streaming_nodes: Vec<_> = streaming.get_nodes().collect();
         assert_eq!(
@@ -1014,15 +994,13 @@ mod tests {
         let request_nodes: Vec<_> = request.get_nodes().collect();
         assert_eq!(
             request_nodes.len(),
-            5,
-            "request: http source, keyby, window_request, projection, request sink"
+            3,
+            "request: keyby, window_request, projection"
         );
         assert!(request_nodes.iter().all(|n| n.parallelism == 1));
         verify_edge_connectivity(&request, &[
-            (OperatorKind::Source, OperatorKind::KeyBy, PartitionType::Forward, 1),
             (OperatorKind::KeyBy, OperatorKind::WindowRequest, PartitionType::Hash, 1),
             (OperatorKind::WindowRequest, OperatorKind::Projection, PartitionType::Forward, 1),
-            (OperatorKind::Projection, OperatorKind::Sink, PartitionType::RequestRoute, 1),
         ]);
         let owner = request_nodes.iter().find_map(|n| match &n.operator_config {
             OperatorConfig::WindowRequestConfig(cfg) => cfg.state_owner_operator_id.clone(),

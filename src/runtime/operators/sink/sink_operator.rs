@@ -20,7 +20,6 @@ pub enum SinkConfig {
         /// When non-empty, explode rows and upsert into the keyed map by these columns.
         upsert_key_columns: Vec<String>,
     },
-    RequestSinkConfig,
     ParquetSinkConfig(ParquetSinkConfig),
     CountSinkConfig,
 }
@@ -48,7 +47,6 @@ impl std::fmt::Display for SinkConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SinkConfig::InMemoryStorageGrpcSinkConfig { .. } => write!(f, "InMemoryStorageGrpc"),
-            SinkConfig::RequestSinkConfig => write!(f, "Request"),
             SinkConfig::ParquetSinkConfig(_) => write!(f, "Parquet"),
             SinkConfig::CountSinkConfig => write!(f, "Count"),
         }

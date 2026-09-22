@@ -10,21 +10,32 @@ use arrow::record_batch::RecordBatch;
 use axum::{http::StatusCode, response::Json, routing::post, Router};
 use tokio::sync::{mpsc, oneshot, Semaphore};
 
-use crate::api::LogicalGraph;
+use serde::{Deserialize, Serialize};
+
+use crate::api::{LogicalGraph, RequestChain};
 use crate::common::message::Message;
 use crate::common::types::PipelineId;
 use crate::runtime::functions::source::json_utils::{json_to_record_batch, record_batch_to_json};
-use crate::runtime::functions::source::request_source::{
-    RequestPayload, RequestSourceConfig, ResponsePayload,
-};
 use crate::runtime::operators::operator::{
-    create_operator, Operator, OperatorConfig, OperatorTrait, StreamOperator, VecOutput,
+    create_operator, Operator, OperatorConfig, StreamOperator, VecOutput,
 };
-use crate::runtime::operators::sink::sink_operator::SinkConfig;
-use crate::runtime::operators::source::source_operator::SourceConfig;
 use crate::runtime::operators::window::request::WindowRequestOperator;
 use crate::runtime::operators::window::store::{StateNamespace, WindowRequestStore};
 use crate::runtime::runtime_context::RuntimeContext;
+
+use petgraph::Direction;
+
+/// JSON body posted to `/request`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RequestPayload {
+    pub data: serde_json::Value,
+}
+
+/// JSON body returned by `/request`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResponsePayload {
+    pub data: serde_json::Value,
+}
 
 struct WorkItem {
     batch: RecordBatch,
@@ -32,7 +43,7 @@ struct WorkItem {
 }
 
 pub struct RequestExecutor {
-    spec: crate::runtime::functions::source::RequestSourceSinkSpec,
+    bind_address: String,
     work_tx: mpsc::Sender<WorkItem>,
     worker: Option<tokio::task::JoinHandle<()>>,
     server: Option<tokio::task::JoinHandle<()>>,
@@ -41,37 +52,32 @@ pub struct RequestExecutor {
 pub struct RequestExecutorOptions {
     pub pipeline_id: PipelineId,
     pub wro_store: Option<(Arc<dyn WindowRequestStore>, StateNamespace)>,
+    pub bind_address: String,
 }
 
 impl RequestExecutor {
-    pub async fn start(graph: LogicalGraph, options: RequestExecutorOptions) -> Result<Self> {
-        let source = graph
-            .http_request_source_config()
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("request graph has no HTTP source"))?;
-        let schema = source
-            .schema
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("request source schema is required"))?;
-
-        let operators = build_chain(&graph, &options)?;
-        let (work_tx, work_rx) = mpsc::channel(source.spec.max_pending_requests.max(1));
+    pub async fn start(chain: RequestChain, options: RequestExecutorOptions) -> Result<Self> {
+        let schema = chain.schema.clone();
+        let max_pending = chain.max_pending_requests.max(1);
+        let timeout_ms = chain.request_timeout_ms;
+        let operators = build_chain(&chain.graph, &options)?;
+        let (work_tx, work_rx) = mpsc::channel(max_pending);
         let pipeline_id = options.pipeline_id.clone();
-        let graph_for_ctx = graph.clone();
+        let graph_for_ctx = chain.graph.clone();
         let worker = tokio::spawn(run_chain(graph_for_ctx, pipeline_id, operators, work_rx));
 
         let mut exec = Self {
-            spec: source.spec.clone(),
+            bind_address: options.bind_address.clone(),
             work_tx,
             worker: Some(worker),
             server: None,
         };
-        exec.bind_http(source, schema).await?;
+        exec.bind_http(schema, timeout_ms, max_pending).await?;
         Ok(exec)
     }
 
     pub fn bind_address(&self) -> &str {
-        &self.spec.bind_address
+        &self.bind_address
     }
 
     pub async fn stop(&mut self) {
@@ -83,11 +89,15 @@ impl RequestExecutor {
         }
     }
 
-    async fn bind_http(&mut self, source: RequestSourceConfig, schema: SchemaRef) -> Result<()> {
-        let bind_address = source.spec.bind_address.clone();
-        let timeout_ms = source.spec.request_timeout_ms;
+    async fn bind_http(
+        &mut self,
+        schema: SchemaRef,
+        timeout_ms: u64,
+        max_pending: usize,
+    ) -> Result<()> {
+        let bind_address = self.bind_address.clone();
         let work_tx = self.work_tx.clone();
-        let semaphore = Arc::new(Semaphore::new(source.spec.max_pending_requests.max(1)));
+        let semaphore = Arc::new(Semaphore::new(max_pending));
 
         let app = Router::new().route(
             "/request",
@@ -155,8 +165,6 @@ fn build_chain(
     let mut operators: Vec<Box<dyn StreamOperator>> = Vec::new();
     for config in chain_configs(graph) {
         match &config {
-            OperatorConfig::SourceConfig(_) => {}
-            OperatorConfig::SinkConfig(SinkConfig::RequestSinkConfig) => {}
             OperatorConfig::WindowRequestConfig(_) => {
                 let mut wro = WindowRequestOperator::new(config);
                 if let Some((store, namespace)) = &options.wro_store {
@@ -166,7 +174,9 @@ fn build_chain(
             }
             _ => match create_operator(config) {
                 Operator::Stream(op) => operators.push(op),
-                Operator::Source(_) => {}
+                Operator::Source(_) => {
+                    return Err(anyhow::anyhow!("request chain contains a source operator"));
+                }
             },
         }
     }
@@ -175,10 +185,9 @@ fn build_chain(
 
 fn chain_configs(graph: &LogicalGraph) -> Vec<OperatorConfig> {
     let Some(start) = graph.get_all_node_indices().into_iter().find(|&idx| {
-        matches!(
-            graph.get_node_by_index(idx).operator_config,
-            OperatorConfig::SourceConfig(SourceConfig::HttpRequestSourceConfig(_))
-        )
+        graph
+            .get_neighbors(idx, Direction::Incoming)
+            .is_empty()
     }) else {
         return Vec::new();
     };

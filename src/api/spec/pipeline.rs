@@ -5,7 +5,7 @@ use arrow::datatypes::Schema;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::api::spec::connectors::{RequestSourceSinkSpec, SinkSpec, SourceSpec};
+use crate::api::spec::connectors::{SinkSpec, SourceSpec};
 use crate::api::spec::event_time::EventTimeSpec;
 use crate::api::spec::operators::{OperatorOverride, OperatorOverrides};
 use crate::api::spec::state::StateSpec;
@@ -23,6 +23,13 @@ pub enum ExecutionMode {
     Request,
     Streaming,
     Batch,
+}
+
+/// HTTP serving knobs for a request-mode pipeline. The listen address is per replica, not spec.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct RequestSpec {
+    pub max_pending_requests: usize,
+    pub request_timeout_ms: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -49,7 +56,8 @@ pub struct PipelineSpec {
     #[serde(default)]
     pub event_time: EventTimeSpec,
     pub sources: Vec<SourceSpec>,
-    pub request_source_sink: Option<RequestSourceSinkSpec>,
+    #[serde(default)]
+    pub request: Option<RequestSpec>,
     pub sink: Option<SinkSpec>,
     pub sql: Option<String>,
     pub task_assignment_strategy: Option<TaskWorkerAssignmentStrategyType>,
@@ -58,8 +66,6 @@ pub struct PipelineSpec {
 #[derive(Clone, Debug, Default)]
 pub struct ConnectorConfigs {
     pub sources: HashMap<String, (SourceConfig, Arc<Schema>)>,
-    pub request_source: Option<SourceConfig>,
-    pub request_sink: Option<SinkConfig>,
     pub sink: Option<SinkConfig>,
 }
 
@@ -85,7 +91,7 @@ impl PipelineSpecBuilder {
                 operator_overrides: OperatorOverrides::default(),
                 event_time: EventTimeSpec::default(),
                 sources: Vec::new(),
-                request_source_sink: None,
+                request: None,
                 sink: None,
                 sql: None,
                 task_assignment_strategy: None,
@@ -253,8 +259,8 @@ impl PipelineSpecBuilder {
         self
     }
 
-    pub fn with_request_source_sink(mut self, cfg: RequestSourceSinkSpec) -> Self {
-        self.spec.request_source_sink = Some(cfg);
+    pub fn with_request(mut self, cfg: RequestSpec) -> Self {
+        self.spec.request = Some(cfg);
         self
     }
 

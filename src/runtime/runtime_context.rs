@@ -1,12 +1,10 @@
 use std::{collections::HashMap, sync::Arc};
-use tokio::sync::{mpsc, Mutex};
 use serde_json::Value;
 
 use crate::api::spec::state::{OperatorStateBackendConfig, RequestStoreConfig};
 use crate::common::types::PipelineId;
 use crate::runtime::execution_graph::ExecutionGraph;
 use crate::runtime::metrics::MetricsLabels;
-use crate::{common::Message, runtime::functions::source::request_source::PendingRequest};
 use crate::runtime::operators::source::SourceHandles;
 use crate::runtime::observability::TaskMetadata;
 use crate::runtime::state::StateRegistry;
@@ -26,9 +24,6 @@ pub struct RuntimeContext {
     operator_id: Option<String>,
     source_handles: Option<SourceHandles>,
     task_metadata: TaskMetadata,
-
-    request_sink_source_request_receiver: Option<Arc<Mutex<mpsc::Receiver<PendingRequest>>>>,
-    request_sink_source_response_sender: Option<mpsc::Sender<Message>>,
 }
 
 impl RuntimeContext {
@@ -53,8 +48,6 @@ impl RuntimeContext {
             operator_id: None,
             source_handles: None,
             task_metadata: TaskMetadata::default(),
-            request_sink_source_request_receiver: None,
-            request_sink_source_response_sender: None,
         }
     }
 
@@ -160,26 +153,5 @@ impl RuntimeContext {
 
     pub fn task_metadata(&self) -> TaskMetadata {
         self.task_metadata.clone()
-    }
-
-    pub fn set_request_sink_source_request_receiver(
-        &mut self,
-        receiver: Arc<Mutex<mpsc::Receiver<PendingRequest>>>,
-    ) {
-        self.request_sink_source_request_receiver = Some(receiver)
-    }
-
-    pub fn get_request_sink_source_request_receiver(
-        &self,
-    ) -> Option<Arc<Mutex<mpsc::Receiver<PendingRequest>>>> {
-        self.request_sink_source_request_receiver.clone()
-    }
-
-    pub fn set_request_sink_source_response_sender(&mut self, sender: mpsc::Sender<Message>) {
-        self.request_sink_source_response_sender = Some(sender)
-    }
-
-    pub fn get_request_sink_source_response_sender(&self) -> Option<mpsc::Sender<Message>> {
-        self.request_sink_source_response_sender.clone()
     }
 }

@@ -11,7 +11,6 @@ pub enum SinkSpec {
         #[serde(default)]
         upsert_key_columns: Vec<String>,
     },
-    Request,
     Parquet(ParquetSinkSpec),
     /// Drop-payload sink: count records, do not retain batches.
     Count,
@@ -65,7 +64,6 @@ impl SinkSpec {
                 SinkConfig::in_memory_grpc(server_addr.clone())
                     .with_upsert_key_columns(upsert_key_columns.clone())
             }
-            SinkSpec::Request => SinkConfig::RequestSinkConfig,
             SinkSpec::Parquet(spec) => SinkConfig::ParquetSinkConfig(spec.to_config()),
             SinkSpec::Count => SinkConfig::CountSinkConfig,
         }

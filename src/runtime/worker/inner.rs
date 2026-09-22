@@ -7,8 +7,6 @@ use std::sync::Arc;
 use kameo::prelude::ActorRef;
 use tokio::runtime::{Builder, Runtime};
 
-use crate::runtime::functions::source::request_source::extract_request_source_config;
-use crate::runtime::functions::source::request_source::RequestSourceProcessor;
 use crate::runtime::health::WorkerHealth;
 use crate::runtime::metrics::MetricsLabels;
 use crate::runtime::observability::snapshot_types::WorkerSnapshot;
@@ -35,8 +33,6 @@ pub(crate) struct WorkerInner {
     pub(crate) tasks_state_polling_handle: Option<tokio::task::JoinHandle<()>>,
     pub(crate) state_maintenance_handle: Option<tokio::task::JoinHandle<()>>,
     pub(crate) fatal_watcher_handle: Option<tokio::task::JoinHandle<()>>,
-    pub(crate) request_source_processor: Option<RequestSourceProcessor>,
-    pub(crate) request_source_processor_runtime: Option<Runtime>,
     pub(crate) source_handles: Arc<SourceHandles>,
 }
 
@@ -53,21 +49,6 @@ impl WorkerInner {
                 .unwrap();
             task_runtimes.insert(vertex_id.clone(), task_runtime);
         }
-
-        let request_source_config =
-            extract_request_source_config(&config.graph, &config.vertex_ids);
-        let request_source_processor_runtime = if request_source_config.is_some() {
-            Some(
-                Builder::new_multi_thread()
-                    .worker_threads(1)
-                    .enable_all()
-                    .thread_name("request-source-processor-runtime")
-                    .build()
-                    .unwrap(),
-            )
-        } else {
-            None
-        };
 
         let worker_state = Arc::new(tokio::sync::Mutex::new(WorkerSnapshot::new(
             config.worker_id.clone(),
@@ -106,8 +87,6 @@ impl WorkerInner {
             tasks_state_polling_handle: None,
             state_maintenance_handle: None,
             fatal_watcher_handle: None,
-            request_source_processor: None,
-            request_source_processor_runtime,
             source_handles: Arc::new(SourceHandles::new()),
         }
     }
@@ -124,9 +103,6 @@ impl WorkerInner {
     pub(crate) fn close_sync_dispose_runtimes(&mut self) {
         let mut runtimes = Vec::new();
         if let Some(runtime) = self.transport_backend_runtime.take() {
-            runtimes.push(runtime);
-        }
-        if let Some(runtime) = self.request_source_processor_runtime.take() {
             runtimes.push(runtime);
         }
         for (_, runtime) in self.task_runtimes.drain() {
@@ -162,7 +138,6 @@ impl WorkerInner {
         if !self.task_actors.is_empty() {
             self.signal_tasks_close().await;
         }
-        self.request_source_processor.take();
         self.task_actors.clear();
 
         let snapshot = self.worker_state.lock().await.clone();
@@ -212,7 +187,6 @@ impl Drop for WorkerInner {
         if let Some(handle) = self.state_maintenance_handle.take() {
             handle.abort();
         }
-        self.request_source_processor.take();
         self.close_sync_dispose_runtimes();
     }
 }

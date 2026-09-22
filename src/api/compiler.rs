@@ -1,15 +1,14 @@
 use std::sync::Arc;
 
 use arrow_integration_test::schema_from_json;
-use crate::api::{LogicalGraph, Planner, PlanningContext};
+use crate::api::{LogicalGraph, Planner, PlanningContext, RequestChain};
 use crate::api::spec::connectors::{SourceSpec, SourceSpecKind};
 use crate::api::spec::event_time::EventTimeSpec;
 use crate::api::spec::operators::{OperatorOverrides, OperatorTuningSpec};
-use crate::api::spec::pipeline::{ConnectorConfigs, ExecutionMode, PipelineSpec};
+use crate::api::spec::pipeline::{ConnectorConfigs, ExecutionMode, PipelineSpec, RequestSpec};
 use crate::runtime::functions::source::datagen_source::DatagenSourceConfig;
 use crate::runtime::functions::source::kafka::KafkaSourceConfig;
 use crate::runtime::functions::source::parquet::ParquetSourceConfig;
-use crate::runtime::functions::source::request_source::RequestSourceConfig;
 use crate::runtime::operators::operator::OperatorConfig;
 use crate::runtime::operators::source::source_operator::SourceConfig;
 
@@ -37,19 +36,6 @@ fn connector_configs_from_spec(spec: &PipelineSpec) -> ConnectorConfigs {
             .sources
             .insert(src.table_name.clone(), (source_config, schema));
     }
-    if let Some(req) = &spec.request_source_sink {
-        let schema_json = req
-            .schema_json
-            .as_ref()
-            .expect("request_source_sink.schema_json must be set");
-        let schema = Arc::new(
-            schema_from_json(schema_json)
-                .expect("failed to parse request_source_sink.schema_json as Arrow integration schema"),
-        );
-        let request_source = RequestSourceConfig::new(req.clone()).set_schema(schema);
-        connector_configs.request_source = Some(SourceConfig::HttpRequestSourceConfig(request_source));
-        connector_configs.request_sink = req.sink.as_ref().map(|s| s.to_sink_config());
-    }
     if let Some(sink) = &spec.sink {
         connector_configs.sink = Some(sink.to_sink_config());
     }
@@ -62,12 +48,6 @@ fn merge_connector_configs(
 ) -> ConnectorConfigs {
     for (table_name, source_cfg) in &overrides.sources {
         base.sources.insert(table_name.clone(), source_cfg.clone());
-    }
-    if let Some(request_source) = &overrides.request_source {
-        base.request_source = Some(request_source.clone());
-    }
-    if let Some(request_sink) = &overrides.request_sink {
-        base.request_sink = Some(request_sink.clone());
     }
     if let Some(sink) = &overrides.sink {
         base.sink = Some(sink.clone());
@@ -82,6 +62,7 @@ fn compile_logical_graph_from_parts(
     operator_overrides: &OperatorOverrides,
     event_time: &EventTimeSpec,
     connector_configs: &ConnectorConfigs,
+    request_spec: Option<&RequestSpec>,
 ) -> CompiledPipeline {
     let df_ctx = datafusion::prelude::SessionContext::new();
     let mut planner = Planner::new(
@@ -129,14 +110,14 @@ fn compile_logical_graph_from_parts(
     streaming.set_event_time(event_time.clone());
 
     let request = if execution_mode == ExecutionMode::Request {
-        if let Some(req_src) = &connector_configs.request_source {
+        if let Some(request_spec) = request_spec {
             Some(
                 streaming
-                    .to_request_mode(req_src.clone(), connector_configs.request_sink.clone())
+                    .to_request_mode(request_spec)
                     .expect("failed to split request graph"),
             )
         } else {
-            println!("Warning: Request mode is without request source - most likely for window operator debug");
+            println!("Warning: Request mode is without a request spec - most likely for window operator debug");
             None
         }
     } else {
@@ -149,11 +130,11 @@ fn compile_logical_graph_from_parts(
     }
 }
 
-/// Streaming write path plus optional request chain (HTTP → WRO → encode).
+/// Streaming write path plus optional request operator chain.
 #[derive(Debug, Clone)]
 pub struct CompiledPipeline {
     pub streaming: LogicalGraph,
-    pub request: Option<LogicalGraph>,
+    pub request: Option<RequestChain>,
 }
 
 pub fn compile_pipeline(spec: &PipelineSpec, connector_overrides: Option<&ConnectorConfigs>) -> CompiledPipeline {
@@ -166,9 +147,8 @@ pub fn compile_pipeline(spec: &PipelineSpec, connector_overrides: Option<&Connec
         merge_connector_configs(spec_connector_configs, overrides)
     } else {
         assert!(
-            !spec_connector_configs.sources.is_empty()
-                || spec_connector_configs.request_source.is_some(),
-            "PipelineSpec must contain source/request-source connectors when compile_pipeline is called without overrides"
+            !spec_connector_configs.sources.is_empty() || spec.request.is_some(),
+            "PipelineSpec must contain source or request config when compile_pipeline is called without overrides"
         );
         spec_connector_configs
     };
@@ -179,6 +159,7 @@ pub fn compile_pipeline(spec: &PipelineSpec, connector_overrides: Option<&Connec
         &spec.operator_overrides,
         &spec.event_time,
         &connector_configs_owned,
+        spec.request.as_ref(),
     );
     let max_p = spec.resolved_max_parallelism();
     assert!(
@@ -188,7 +169,7 @@ pub fn compile_pipeline(spec: &PipelineSpec, connector_overrides: Option<&Connec
     );
     compiled.streaming.set_max_parallelism(max_p);
     if let Some(request) = compiled.request.as_mut() {
-        request.set_max_parallelism(max_p);
+        request.graph.set_max_parallelism(max_p);
     }
     compiled
 }
@@ -207,10 +188,8 @@ mod tests {
     use crate::orchestrator::orchestrator::WorkerNode;
     use crate::orchestrator::task_assignment::TaskWorkerMapping;
     use super::{compile_logical_graph, compile_pipeline};
-    use crate::api::spec::pipeline::{ConnectorConfigs, ExecutionMode, PipelineSpecBuilder, ExecutionProfile};
-    use crate::runtime::functions::source::{RequestSourceConfig, RequestSourceSinkSpec};
+    use crate::api::spec::pipeline::{ConnectorConfigs, ExecutionMode, PipelineSpecBuilder, ExecutionProfile, RequestSpec};
     use crate::runtime::operators::operator::OperatorConfig;
-    use crate::runtime::operators::sink::sink_operator::SinkConfig;
     use crate::runtime::operators::source::source_operator::{SourceConfig, VectorSourceConfig};
     use crate::transport::channel::Channel;
 
@@ -326,16 +305,6 @@ mod tests {
                 schema.clone(),
             ),
         );
-        connectors.request_source = Some(SourceConfig::HttpRequestSourceConfig(
-            RequestSourceConfig::new(RequestSourceSinkSpec {
-                bind_address: "127.0.0.1:0".to_string(),
-                max_pending_requests: 8,
-                request_timeout_ms: 1_000,
-                schema_json: None,
-                sink: None,
-            }),
-        ));
-        connectors.request_sink = Some(SinkConfig::RequestSinkConfig);
 
         let mut spec = PipelineSpecBuilder::new()
             .with_execution_profile(ExecutionProfile::SingleWorker {
@@ -353,25 +322,25 @@ mod tests {
             )
             .build();
         spec.execution_mode = ExecutionMode::Request;
+        spec.request = Some(RequestSpec {
+            max_pending_requests: 8,
+            request_timeout_ms: 1_000,
+        });
 
         let compiled = compile_pipeline(&spec, Some(&connectors));
-        let request = compiled.request.expect("request graph");
+        let request = compiled.request.expect("request chain");
 
         assert!(compiled
             .streaming
             .get_nodes()
             .all(|n| n.parallelism == 2));
-        assert!(request.get_nodes().all(|n| n.parallelism == 1));
-        assert!(request.http_request_source_config().is_some());
+        assert!(request.graph.get_nodes().all(|n| n.parallelism == 1));
+        assert_eq!(request.max_pending_requests, 8);
+        assert!(request.schema.field_with_name("key").is_ok());
         assert!(compiled.streaming.get_nodes().all(|n| {
-            !matches!(
-                n.operator_config,
-                OperatorConfig::SourceConfig(SourceConfig::HttpRequestSourceConfig(_))
-                    | OperatorConfig::SinkConfig(SinkConfig::RequestSinkConfig)
-                    | OperatorConfig::WindowRequestConfig(_)
-            )
+            !matches!(n.operator_config, OperatorConfig::WindowRequestConfig(_))
         }));
-        let owner = request.get_nodes().find_map(|n| match &n.operator_config {
+        let owner = request.graph.get_nodes().find_map(|n| match &n.operator_config {
             OperatorConfig::WindowRequestConfig(cfg) => cfg.state_owner_operator_id.clone(),
             _ => None,
         });

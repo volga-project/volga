@@ -2,18 +2,17 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::fmt;
 use std::time::Duration;
-use arrow::datatypes::Schema as ArrowSchema;
+use arrow::datatypes::{Schema as ArrowSchema, SchemaRef};
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::prelude::EdgeRef;
 use petgraph::Direction;
 use crate::runtime::operators::operator::OperatorConfig;
 use crate::runtime::execution_graph::{ExecutionGraph, ExecutionVertex, ExecutionEdge};
-use crate::runtime::operators::sink::sink_operator::SinkConfig;
-use crate::runtime::operators::source::source_operator::SourceConfig;
 use crate::runtime::operators::window::operator::WindowOutputMode;
 use crate::runtime::operators::window::request::WindowRequestOperatorConfig;
 use crate::runtime::partition::PartitionType;
 use crate::api::spec::event_time::EventTimeSpec;
+use crate::api::spec::pipeline::RequestSpec;
 use crate::runtime::watermark::{TimeHint, WatermarkAssignConfig};
 
 #[derive(Debug, Clone)]
@@ -62,6 +61,15 @@ pub struct LogicalGraph {
     event_time: EventTimeSpec,
     emit_interval: Duration,
     max_parallelism: usize,
+}
+
+/// Operator chain served by one HTTP request. HTTP decode/encode stays outside the graph.
+#[derive(Debug, Clone)]
+pub struct RequestChain {
+    pub graph: LogicalGraph,
+    pub max_pending_requests: usize,
+    pub request_timeout_ms: u64,
+    pub schema: SchemaRef,
 }
 
 impl LogicalGraph {
@@ -200,13 +208,6 @@ impl LogicalGraph {
         self.graph.node_weights()
     }
 
-    pub fn http_request_source_config(&self) -> Option<&crate::runtime::functions::source::RequestSourceConfig> {
-        self.graph.node_weights().find_map(|node| match &node.operator_config {
-            OperatorConfig::SourceConfig(SourceConfig::HttpRequestSourceConfig(config)) => Some(config),
-            _ => None,
-        })
-    }
-
     pub fn get_edges(&self) -> impl Iterator<Item = (NodeIndex, NodeIndex, &LogicalEdge)> {
         self.graph.edge_references().map(|edge| (edge.source(), edge.target(), edge.weight()))
     }
@@ -316,8 +317,7 @@ impl LogicalGraph {
                 }
                 PartitionType::Hash
                 | PartitionType::RoundRobin
-                | PartitionType::Broadcast
-                | PartitionType::RequestRoute => {
+                | PartitionType::Broadcast => {
                     for source_execution_vertex_id in source_execution_vertices {
                         for target_execution_vertex_id in target_execution_vertices {
                             execution_graph.add_edge(ExecutionEdge::new(
@@ -367,9 +367,9 @@ impl LogicalGraph {
 
     /// Split the write path from the read path.
     ///
-    /// `self` keeps the streaming component (WO `StateOnly`, no outgoing). Returns a
-    /// separate request chain (HTTP → … → WRO → followers) with operator parallelism 1.
-    pub fn to_request_mode(&mut self, mut source_config: SourceConfig, sink_config: Option<SinkConfig>) -> Result<LogicalGraph, String> {
+    /// `self` keeps the streaming component (WO `StateOnly`, no outgoing). Returns the
+    /// request operator chain (`keyby → WRO → followers`) at parallelism 1.
+    pub fn to_request_mode(&mut self, request: &RequestSpec) -> Result<RequestChain, String> {
         // Step 1: Find all window operators
         let mut window_nodes = Vec::new();
         
@@ -424,102 +424,56 @@ impl LogicalGraph {
         );
         
         let keyby_config = self.graph[keyby_node].operator_config.clone();
-        
-        // Step 4: Create new nodes: request_source -> keyby -> window_request
-        let parallelism = self.graph[top_window_node].parallelism;
 
         let window_config = match &self.graph[top_window_node].operator_config {
             OperatorConfig::WindowConfig(config) => config.clone(),
             _ => return Err("Expected WindowConfig".to_string()),
         };
-        
-        // set schema for request source, if necessary
-        if let SourceConfig::HttpRequestSourceConfig(ref mut http_req_cfg) = source_config {
-            let window_input_schema = window_config.window_exec.input().schema();
-            http_req_cfg.schema = Some(window_input_schema.clone());
-        }
+        let schema = window_config.window_exec.input().schema();
 
-        let request_source_node = LogicalNode::new(
-            OperatorConfig::SourceConfig(source_config),
-            parallelism,
-            None,
-            None,
-        );
-        let request_source_idx = self.add_node(request_source_node);
-        
-        let keyby_node_new = LogicalNode::new(
-            keyby_config,
-            parallelism,
-            None,
-            None,
-        );
+        let keyby_node_new = LogicalNode::new(keyby_config, 1, None, None);
         let keyby_idx_new = self.add_node(keyby_node_new);
-        
+
         let mut window_request_config =
             WindowRequestOperatorConfig::from_window_operator_config(window_config);
         window_request_config.state_owner_operator_id =
             Some(self.graph[top_window_node].operator_id.clone());
         let window_request_node = LogicalNode::new(
             OperatorConfig::WindowRequestConfig(window_request_config),
-            parallelism,
+            1,
             None,
             None,
         );
         let window_request_idx = self.add_node(window_request_node);
-        
-        // Step 5: Add edges: request_source -> keyby -> window_request
-        self.add_edge(request_source_idx, keyby_idx_new);
+
         self.add_edge(keyby_idx_new, window_request_idx);
-        
-        // Step 6: Remove edge from window operator to its follower
-        // Window node should have exactly one outgoing edge
-        let outgoing: Vec<NodeIndex> = self.graph
+
+        let outgoing: Vec<NodeIndex> = self
+            .graph
             .neighbors_directed(top_window_node, Direction::Outgoing)
             .collect();
-        
+
         assert_eq!(outgoing.len(), 1, "Window operator should have exactly one outgoing edge");
         let target_node = outgoing[0];
-        
-        // Remove edge from window to follower
-        let edge_idx = self.graph.find_edge(top_window_node, target_node).expect("Window operator should have exactly one outgoing edge");
-        self.graph.remove_edge(edge_idx);
-        
-        // Add edge from window_request to follower
-        self.add_edge(window_request_idx, target_node);
-        
 
-        // Step 7: Add request sink node connected to root, if necessary
-        if let Some(sink_config) = sink_config {
-            let request_sink_node = LogicalNode::new(
-                OperatorConfig::SinkConfig(sink_config),
-                parallelism,
-                None,
-                None,
-            );
-            let request_sink_idx = self.add_node(request_sink_node);
-            
-            // Connect root to request sink
-            self.add_edge(root_node, request_sink_idx);
-        }
-
-        Ok(self.split_off_request_component())
-    }
-
-    fn is_http_request_source(node: &LogicalNode) -> bool {
-        matches!(
-            node.operator_config,
-            OperatorConfig::SourceConfig(SourceConfig::HttpRequestSourceConfig(_))
-        )
-    }
-
-    /// Directed closure from the HTTP source, copied at parallelism 1, then removed from `self`.
-    fn split_off_request_component(&mut self) -> LogicalGraph {
-        let start = self
+        let edge_idx = self
             .graph
-            .node_indices()
-            .find(|&idx| Self::is_http_request_source(&self.graph[idx]))
-            .expect("to_request_mode must create an HTTP request source");
+            .find_edge(top_window_node, target_node)
+            .expect("Window operator should have exactly one outgoing edge");
+        self.graph.remove_edge(edge_idx);
+        self.add_edge(window_request_idx, target_node);
 
+        let graph = self.split_off_request_component(keyby_idx_new);
+        Ok(RequestChain {
+            graph,
+            max_pending_requests: request.max_pending_requests,
+            request_timeout_ms: request.request_timeout_ms,
+            schema,
+        })
+    }
+
+    /// Directed closure from `start`, copied at parallelism 1, then removed from `self`.
+    fn split_off_request_component(&mut self, start: NodeIndex) -> LogicalGraph {
         let mut request_idx = HashSet::new();
         let mut stack = vec![start];
         while let Some(idx) = stack.pop() {
@@ -617,7 +571,6 @@ impl LogicalGraph {
                 PartitionType::Hash => "Hash",
                 PartitionType::Broadcast => "Broadcast",
                 PartitionType::RoundRobin => "RoundRobin",
-                PartitionType::RequestRoute => "RequestRoute",
             };
             dot_string.push_str(&format!("  {} -> {} [label=\"{}\"];\n", source_id, target_id, partition_type));
         }
@@ -692,7 +645,6 @@ pub fn determine_partition_type(
     target_parallelism: usize,
 ) -> PartitionType {
     match (source_config, target_config) {
-        (_, OperatorConfig::SinkConfig(SinkConfig::RequestSinkConfig)) => PartitionType::RequestRoute,
         (OperatorConfig::KeyByConfig(_), _) => PartitionType::Hash,
         _ if source_parallelism == target_parallelism => PartitionType::Forward,
         _ => PartitionType::RoundRobin,
