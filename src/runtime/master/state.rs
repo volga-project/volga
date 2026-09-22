@@ -166,8 +166,6 @@ pub(super) struct MasterState {
     lifecycle_events: Mutex<LifecycleJournal>,
     lifecycle_event_tx: broadcast::Sender<LifecycleEventRecord>,
     current_attempt_id: AtomicU64,
-    /// Survives lifecycle restart / configure store replacement in-process.
-    last_allocated_attempt: Mutex<Option<u64>>,
     /// Live attempt (lifecycle supervises; Drain goes through lifecycle intent).
     current_attempt: Mutex<Option<ActorRef<ExecutionAttempt>>>,
     /// Job supervisor actor (`RequestFinish` / attempt loop).
@@ -186,7 +184,6 @@ impl MasterState {
             lifecycle_events: Mutex::new(LifecycleJournal::default()),
             lifecycle_event_tx,
             current_attempt_id: AtomicU64::new(0),
-            last_allocated_attempt: Mutex::new(None),
             current_attempt: Mutex::new(None),
             lifecycle: Mutex::new(None),
         }
@@ -294,22 +291,12 @@ impl MasterState {
     }
 
     /// Persist a never-reused attempt before workers are configured (#156).
-    pub(super) async fn allocate_attempt(&self, observed: Option<u64>) -> Result<u64, String> {
-        let remembered = *self.last_allocated_attempt.lock().await;
-        let observed = match (remembered, observed) {
-            (Some(a), Some(b)) => Some(a.max(b)),
-            (Some(a), None) | (None, Some(a)) => Some(a),
-            (None, None) => None,
-        };
+    pub(super) async fn allocate_attempt(&self) -> Result<u64, String> {
         // kameo flattens `Result` replies: Ok(id) / Err(SendError::HandlerError(err)).
-        let attempt = match self.checkpoints.ask(AllocateAttempt { observed }).await {
-            Ok(attempt) => attempt,
-            Err(error) => {
-                return Err(format!("failed to allocate execution_attempt_id: {error}"))
-            }
-        };
-        *self.last_allocated_attempt.lock().await = Some(attempt);
-        Ok(attempt)
+        match self.checkpoints.ask(AllocateAttempt).await {
+            Ok(attempt) => Ok(attempt),
+            Err(error) => Err(format!("failed to allocate execution_attempt_id: {error}")),
+        }
     }
 
     pub(super) fn current_attempt_id(&self) -> u64 {
