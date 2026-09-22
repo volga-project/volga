@@ -20,13 +20,13 @@ pub(super) async fn processor_loop(
     mailbox: MessageStream,
     mut progress: InputProgress,
     reader_control: DataReaderControl,
-    complete_receiver: &mut mpsc::UnboundedReceiver<u64>,
+    checkpoint_complete_receiver: &mut mpsc::UnboundedReceiver<u64>,
 ) -> Result<()> {
     let mut mailbox = mailbox.peekable();
     let mut metrics_window_start = Instant::now();
 
     while ctx.is_running() {
-        drain_checkpoint_complete(operator, complete_receiver).await;
+        drain_checkpoint_complete(operator, checkpoint_complete_receiver).await;
         let idle_start = Instant::now();
         tokio::select! {
             biased;
