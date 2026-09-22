@@ -12,14 +12,14 @@ use crate::runtime::operators::window::request::{
     WindowRequestOperator, WindowRequestOperatorConfig,
 };
 use crate::runtime::operators::window::store::{
-    collect_due, InMemWindowStore, PartitionKey, StateNamespace, WindowStoreTaskScope,
+    collect_triggers, InMemWindowStore, PartitionKey, StateNamespace, WindowStoreTaskScope,
+};
+use crate::runtime::operators::window::{
+    TASK_METADATA_ROWS_ACCEPTED, TASK_METADATA_ROWS_DROPPED_LATE,
 };
 use crate::test_utils::window::harness::{
     assert_window_values, batch, key, keyed_message, runtime_context, watermark_message,
     window_exec_from_sql, Harness, WoWroHarness,
-};
-use crate::runtime::operators::window::{
-    TASK_METADATA_ROWS_ACCEPTED, TASK_METADATA_ROWS_DROPPED_LATE,
 };
 
 const SQL: &str = r#"SELECT timestamp, value, partition_key, SUM(value) OVER w as sum_val
@@ -163,8 +163,10 @@ async fn state_only_publishes_on_ingest_and_advances_on_watermark() {
     let partition = PartitionKey::new(&h.namespace, &key("A"));
     let meta = h.store.load_key_state(&partition).await.expect("state");
     assert!(meta.evaluation.is_none());
-    let client = h.store.client(WindowStoreTaskScope::for_test(h.namespace.clone()));
-    let due = collect_due(&client, None, Cursor::new(2000, u64::MAX))
+    let client = h
+        .store
+        .client(WindowStoreTaskScope::for_test(h.namespace.clone()));
+    let due = collect_triggers(&client, None, Cursor::new(2000, u64::MAX))
         .await
         .expect("due page");
     assert!(due.is_empty());
@@ -262,10 +264,7 @@ async fn operator_checkpoint_restores_into_fresh_store() {
     let exec = window_exec_from_sql(SQL).await;
     let mut original = Harness::new(WindowOperatorConfig::new(exec.clone())).await;
     original
-        .ingest(
-            batch(vec![1000, 2000], vec![1.0, 2.0], vec!["A", "A"]),
-            "A",
-        )
+        .ingest(batch(vec![1000, 2000], vec![1.0, 2.0], vec!["A", "A"]), "A")
         .await;
     let _ = original.watermark_and_output(2000).await;
     let _ = original.drain_passthrough_watermark().await;
@@ -290,10 +289,7 @@ async fn pending_triggers_survive_checkpoint_restore() {
     let exec = window_exec_from_sql(SQL).await;
     let mut original = Harness::new(WindowOperatorConfig::new(exec.clone())).await;
     original
-        .ingest(
-            batch(vec![1000, 2000], vec![1.0, 2.0], vec!["A", "A"]),
-            "A",
-        )
+        .ingest(batch(vec![1000, 2000], vec![1.0, 2.0], vec!["A", "A"]), "A")
         .await;
 
     let checkpoint = original.op.checkpoint(1).await.expect("checkpoint");

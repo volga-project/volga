@@ -34,9 +34,7 @@ pub(super) async fn insert_key_state(
 }
 
 /// Write versioned raw / tiles / key_state / triggers. One UNLOGGED BATCH
-/// per Scylla partition. No ingest LWT.
-///
-/// Retries a timed-out write at the same Version inside this call.
+/// per Scylla partition. No ingest LWT. Driver retries idempotent statements.
 pub(super) async fn commit_events(
     client: &ScyllaWindowStoreClient,
     partition: &PartitionKey,
@@ -53,38 +51,25 @@ pub(super) async fn commit_events(
     let kg = client.key_group(partition)?;
     client.begin_key(&partition.business_key)?;
     let epoch = client.alloc_epoch(kg);
-    let result =
-        commit_events_at(client, partition, kg, epoch, ts_column_index, events, tiles, meta, triggers)
-            .await;
+    let result = commit_events_at(
+        client,
+        partition,
+        kg,
+        epoch,
+        ts_column_index,
+        events,
+        tiles,
+        meta,
+        triggers,
+    )
+    .await;
+    client.end_key(&partition.business_key);
     match result {
         Ok(()) => {
             client.ack_epoch(kg, epoch);
-            client.end_key(&partition.business_key);
             Ok(())
         }
-        Err(first) => {
-            // Same Version until acked, then fail the task.
-            let retry = commit_events_at(
-                client,
-                partition,
-                kg,
-                epoch,
-                ts_column_index,
-                events,
-                tiles,
-                meta,
-                triggers,
-            )
-            .await;
-            client.end_key(&partition.business_key);
-            match retry {
-                Ok(()) => {
-                    client.ack_epoch(kg, epoch);
-                    Ok(())
-                }
-                Err(_) => Err(first),
-            }
-        }
+        Err(error) => Err(error),
     }
 }
 
