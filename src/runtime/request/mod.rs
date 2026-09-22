@@ -92,18 +92,6 @@ impl RequestExecutor {
             worker.abort();
         }
     }
-}
-
-impl Drop for RequestExecutor {
-    fn drop(&mut self) {
-        if let Some(server) = self.server.take() {
-            server.abort();
-        }
-        if let Some(worker) = self.worker.take() {
-            worker.abort();
-        }
-    }
-}
 
     async fn bind_http(
         &mut self,
@@ -135,6 +123,17 @@ impl Drop for RequestExecutor {
                 .expect("request HTTP server failed");
         }));
         Ok(())
+    }
+}
+
+impl Drop for RequestExecutor {
+    fn drop(&mut self) {
+        if let Some(server) = self.server.take() {
+            server.abort();
+        }
+        if let Some(worker) = self.worker.take() {
+            worker.abort();
+        }
     }
 }
 
