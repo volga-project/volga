@@ -9,7 +9,8 @@ use crate::runtime::master::server::master_service::{
     master_service_server::MasterService, CheckpointPropagationPhase as ProtoPropagationPhase,
     GetLatestCompleteCheckpointRequest, GetLatestCompleteCheckpointResponse,
     GetLatestPipelineSnapshotRequest, GetLatestPipelineSnapshotResponse,
-    GetLifecycleEventsRequest, GetLifecycleEventsResponse, LifecycleEventRecord,
+    GetLifecycleEventsRequest, GetLifecycleEventsResponse, GetRequestConfigRequest,
+    GetRequestConfigResponse, LifecycleEventRecord,
     RegisterWorkerRequest,
     RegisterWorkerResponse, ReportCheckpointPropagationRequest,
     ReportCheckpointPropagationResponse, ReportCheckpointRequest, ReportCheckpointResponse,
@@ -187,6 +188,26 @@ impl MasterService for MasterServiceImpl {
             })
             .collect::<Result<Vec<_>, Status>>()?;
         Ok(Response::new(GetLifecycleEventsResponse { events }))
+    }
+
+    async fn get_request_config(
+        &self,
+        _request: Request<GetRequestConfigRequest>,
+    ) -> Result<Response<GetRequestConfigResponse>, Status> {
+        let Some((pipeline_id, spec)) = self.master.request_config().await else {
+            return Ok(Response::new(GetRequestConfigResponse {
+                ready: false,
+                pipeline_id: String::new(),
+                pipeline_spec: Vec::new(),
+            }));
+        };
+        let pipeline_spec = serde_json::to_vec(&spec)
+            .map_err(|error| Status::internal(format!("serialize pipeline spec: {error}")))?;
+        Ok(Response::new(GetRequestConfigResponse {
+            ready: true,
+            pipeline_id,
+            pipeline_spec,
+        }))
     }
 
     async fn stop_sources(

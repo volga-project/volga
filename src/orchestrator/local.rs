@@ -6,7 +6,9 @@ use anyhow::Result;
 
 use crate::api::PipelineSpec;
 
-use super::orchestrator::{MasterOrchestrator, WorkerNode, WorkerOrchestrator, mock_worker_nodes};
+use super::orchestrator::{
+    mock_worker_nodes, MasterOrchestrator, WorkerNode, WorkerOrchestrator,
+};
 
 #[async_trait]
 pub trait LocalWorkerReplacement: Send + Sync {
@@ -30,17 +32,15 @@ pub struct LocalWorkerOrchestrator {
 
 impl LocalTestOrchestrator {
     pub fn new(num_workers: usize, pipeline_id: String) -> Self {
-        let worker_nodes = mock_worker_nodes(num_workers.max(1));
-        let worker_nodes = worker_nodes
+        let worker_nodes = mock_worker_nodes(num_workers.max(1))
             .into_iter()
             .map(|n| (n.worker_id.clone(), n))
             .collect::<HashMap<_, _>>();
-        let expected_workers = worker_nodes.len();
         Self {
             worker_nodes: Arc::new(Mutex::new(worker_nodes)),
             pipeline_id,
             spec: None,
-            num_expected_workers: expected_workers,
+            num_expected_workers: num_workers.max(1),
             replacement: None,
             replacement_calls: Arc::new(Mutex::new(Vec::new())),
         }

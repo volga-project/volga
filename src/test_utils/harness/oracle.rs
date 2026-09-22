@@ -5,9 +5,7 @@ use anyhow::{anyhow, Result};
 use arrow::array::StringArray;
 
 use super::handles::MasterHandle;
-use crate::runtime::master::{
-    CheckpointPropagationPhase, LifecycleEvent, LifecycleEventRecord,
-};
+use crate::runtime::master::{CheckpointPropagationPhase, LifecycleEvent, LifecycleEventRecord};
 use crate::storage::InMemoryStorageSnapshot;
 
 #[derive(Debug, Clone, Default)]
@@ -267,8 +265,14 @@ impl RecoveryReport {
                     };
                     attempt_entry(&mut by_attempt, *attempt_id).trigger = trigger;
                 }
-                LifecycleEvent::AttemptScheduled { attempt_id, worker_ids }
-                | LifecycleEvent::AttemptRunning { attempt_id, worker_ids } => {
+                LifecycleEvent::AttemptScheduled {
+                    attempt_id,
+                    worker_ids,
+                }
+                | LifecycleEvent::AttemptRunning {
+                    attempt_id,
+                    worker_ids,
+                } => {
                     current = Some(*attempt_id);
                     let entry = attempt_entry(&mut by_attempt, *attempt_id);
                     entry.workers = worker_ids.clone();
@@ -342,9 +346,11 @@ impl RecoveryReport {
                     attempt_id,
                 } => {
                     if let Some(current_attempt) = current {
-                        attempt_entry(&mut by_attempt, current_attempt).events.push(format!(
-                            "checkpoint_started {checkpoint_id} attempt={attempt_id}"
-                        ));
+                        attempt_entry(&mut by_attempt, current_attempt)
+                            .events
+                            .push(format!(
+                                "checkpoint_started {checkpoint_id} attempt={attempt_id}"
+                            ));
                     }
                 }
                 LifecycleEvent::CheckpointPropagation {
@@ -374,9 +380,9 @@ impl RecoveryReport {
                     attempt_id,
                     detail,
                 } => {
-                    attempt_entry(&mut by_attempt, *attempt_id).events.push(format!(
-                        "checkpoint_failed {checkpoint_id} detail={detail}"
-                    ));
+                    attempt_entry(&mut by_attempt, *attempt_id)
+                        .events
+                        .push(format!("checkpoint_failed {checkpoint_id} detail={detail}"));
                 }
             }
         }
@@ -496,11 +502,7 @@ impl RecoveryAttemptReport {
     }
 
     /// Assert exactly `expected` distinct workers have a failure of `kind`.
-    pub fn assert_failure_kind_distinct_workers(
-        &self,
-        kind: &str,
-        expected: usize,
-    ) -> Result<()> {
+    pub fn assert_failure_kind_distinct_workers(&self, kind: &str, expected: usize) -> Result<()> {
         let workers: HashSet<_> = self
             .failures
             .iter()
@@ -580,8 +582,10 @@ fn attempt_entry(
     by_attempt: &mut BTreeMap<u64, RecoveryAttemptReport>,
     attempt_id: u64,
 ) -> &mut RecoveryAttemptReport {
-    by_attempt.entry(attempt_id).or_insert_with(|| RecoveryAttemptReport {
-        attempt_id,
-        ..Default::default()
-    })
+    by_attempt
+        .entry(attempt_id)
+        .or_insert_with(|| RecoveryAttemptReport {
+            attempt_id,
+            ..Default::default()
+        })
 }

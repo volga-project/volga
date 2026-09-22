@@ -67,20 +67,22 @@ impl WorkerInner {
         ));
         state_registry.set_maintenance_enabled(config.state_maintenance_enabled);
 
+        let transport_backend_runtime = Some(
+            Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .thread_name("transport-backend-runtime")
+                .build()
+                .unwrap(),
+        );
+
         Self {
             config,
             health,
             task_actors: HashMap::new(),
             backend_actor: None,
             task_runtimes,
-            transport_backend_runtime: Some(
-                Builder::new_multi_thread()
-                    .worker_threads(1)
-                    .enable_all()
-                    .thread_name("transport-backend-runtime")
-                    .build()
-                    .unwrap(),
-            ),
+            transport_backend_runtime,
             worker_state,
             state_registry,
             running: Arc::new(AtomicBool::new(false)),
@@ -134,7 +136,6 @@ impl WorkerInner {
             }
         }
 
-        // Close: signal after Finished; abort mid-run so dispose cannot hang.
         if !self.task_actors.is_empty() {
             self.signal_tasks_close().await;
         }

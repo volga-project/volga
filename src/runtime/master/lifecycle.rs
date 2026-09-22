@@ -59,7 +59,7 @@ impl MasterLifecycle {
         })
     }
 
-    fn complete_execute(&mut self, result: Result<(), String>) {
+    async fn complete_execute(&mut self, result: Result<(), String>) {
         if let Some(reply) = self.execute_reply.take() {
             reply.send(result);
         }
@@ -254,7 +254,7 @@ impl Message<Start> for MasterLifecycle {
 
         match self.start_attempt(ctx.actor_ref()).await {
             Ok(()) => {}
-            Err(error) => self.complete_execute(Err(error)),
+            Err(error) => self.complete_execute(Err(error)).await,
         }
         delegated
     }
@@ -292,10 +292,10 @@ impl Message<RunComplete> for MasterLifecycle {
             Ok(()) => {
                 // Recover path may have started another attempt (execute_reply still set).
                 if self.current.is_none() {
-                    self.complete_execute(Ok(()));
+                    self.complete_execute(Ok(())).await;
                 }
             }
-            Err(error) => self.complete_execute(Err(error)),
+            Err(error) => self.complete_execute(Err(error)).await,
         }
     }
 }

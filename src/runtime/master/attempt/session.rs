@@ -13,22 +13,22 @@ use crate::runtime::observability::snapshot_types::WorkerSnapshot;
 use super::super::worker_client::{WorkerCallError, WorkerClient};
 
 #[derive(Actor)]
-pub(super) struct WorkerSession {
+pub(crate) struct WorkerSession {
     worker_id: String,
     client: WorkerClient,
 }
 
 impl WorkerSession {
-    pub(super) fn spawn(worker_id: String, client: WorkerClient) -> kameo::actor::ActorRef<Self> {
+    pub(crate) fn spawn(worker_id: String, client: WorkerClient) -> kameo::actor::ActorRef<Self> {
         kameo::spawn(Self { worker_id, client })
     }
 }
 
-pub(super) struct StartHeartbeat {
+pub(crate) struct StartHeartbeat {
     pub failure_tx: mpsc::Sender<FailureEvent>,
 }
 
-pub(super) struct Configure {
+pub(crate) struct Configure {
     pub pipeline_id: String,
     pub spec: PipelineSpec,
     pub vertex_ids: Vec<String>,
@@ -37,14 +37,14 @@ pub(super) struct Configure {
     pub restoring: bool,
 }
 
-pub(super) struct StartWorker;
+pub(crate) struct StartWorker;
 pub(super) struct RunTasks;
 pub(super) struct GetWorkerState;
 pub(super) struct TriggerBarrier(pub u64);
 pub(super) struct StopSources;
 pub(super) struct ResetWorker;
 pub(super) struct CloseTasks;
-pub(super) struct ShutdownWorker;
+pub(crate) struct ShutdownWorker;
 
 impl Message<StartHeartbeat> for WorkerSession {
     type Reply = ();
@@ -192,7 +192,7 @@ impl Message<ShutdownWorker> for WorkerSession {
     }
 }
 
-pub(super) fn map_session_error<M>(
+pub(crate) fn map_session_error<M>(
     error: kameo::error::SendError<M, WorkerCallError>,
 ) -> WorkerCallError {
     match error {

@@ -93,6 +93,9 @@ impl WorkerService for WorkerServiceImpl {
             })?;
         let spec = payload.pipeline_spec.clone();
         spec.validate().map_err(Status::invalid_argument)?;
+        let num_threads_per_task = resolve_num_threads_per_task(&spec).max(1);
+        let master_addr = self.orchestrator.get_master_service_addr().await;
+
         let execution_graph = build_execution_graph(&spec, &payload.task_worker_mapping);
         let execution_graph_signature = execution_graph.signature();
 
@@ -139,18 +142,15 @@ impl WorkerService for WorkerServiceImpl {
             )));
         }
 
-        let num_threads_per_task = resolve_num_threads_per_task(&spec);
-
         let mut worker_config = WorkerConfig::new(
             payload.worker_id,
             PipelineId(payload.pipeline_id),
             execution_graph,
             vertex_ids,
-            num_threads_per_task.max(1),
+            num_threads_per_task,
         );
         worker_config.execution_attempt_id = execution_attempt_id;
         worker_config.task_restore_data = task_restore_data;
-        let master_addr = self.orchestrator.get_master_service_addr().await;
         if !master_addr.is_empty() {
             worker_config.master_addr = Some(master_addr);
         }

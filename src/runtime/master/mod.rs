@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::api::{compile_logical_graph, PipelineSpec};
+use crate::api::{compile_pipeline, PipelineSpec, RequestGraph};
 use crate::orchestrator::orchestrator::MasterOrchestrator;
 use crate::runtime::checkpoint::SerializedCheckpoint;
 use crate::runtime::execution_graph::ExecutionGraph;
@@ -34,18 +34,20 @@ pub struct Master {
 pub struct MasterConfig {
     pub spec: PipelineSpec,
     pub execution_graph: ExecutionGraph,
+    pub request_graph: Option<RequestGraph>,
     pub expected_workers: usize,
 }
 
 impl MasterConfig {
-    /// Compile `spec` to an execution graph and configure the master.
+    /// Compile `spec` to streaming + optional request graphs and configure the master.
     pub fn from_spec(spec: PipelineSpec, expected_workers: usize) -> Self {
         spec.validate()
             .unwrap_or_else(|error| panic!("invalid pipeline spec: {error}"));
-        let execution_graph = compile_logical_graph(&spec, None).to_execution_graph();
+        let compiled = compile_pipeline(&spec, None);
         Self {
             spec,
-            execution_graph,
+            execution_graph: compiled.streaming.to_execution_graph(),
+            request_graph: compiled.request,
             expected_workers,
         }
     }
@@ -60,6 +62,11 @@ impl Master {
 
     pub async fn register_worker(&self, worker_id: String) {
         self.state.register_worker(worker_id).await;
+    }
+
+    /// Spec for a request worker, once the master is configured with a request graph.
+    pub async fn request_config(&self) -> Option<(String, PipelineSpec)> {
+        self.state.request_config().await
     }
 
     pub fn checkpointable_tasks_for_graph(execution_graph: &ExecutionGraph) -> Vec<TaskKey> {

@@ -1,4 +1,4 @@
-//! In-process request chain: one HTTP request runs the whole operator graph in one task.
+//! In-process request graph: one HTTP request runs the whole operator graph in one task.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,6 +22,10 @@ use crate::runtime::operators::operator::{
 use crate::runtime::operators::window::request::WindowRequestOperator;
 use crate::runtime::operators::window::store::{StateNamespace, WindowRequestStore};
 use crate::runtime::runtime_context::RuntimeContext;
+
+mod serve;
+
+pub use serve::serve_from_env;
 
 use petgraph::Direction;
 
@@ -52,7 +56,7 @@ pub struct RequestExecutor {
 pub struct RequestExecutorOptions {
     pub pipeline_id: PipelineId,
     pub wro_store: Option<(Arc<dyn WindowRequestStore>, StateNamespace)>,
-    pub bind_address: String,
+    pub bind_address: Option<String>,
 }
 
 impl RequestExecutor {
@@ -60,6 +64,10 @@ impl RequestExecutor {
         let schema = request.schema.clone();
         let max_pending = request.max_pending_requests.max(1);
         let timeout_ms = request.request_timeout_ms;
+        let bind_address = options
+            .bind_address
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("request bind address is required"))?;
         let operators = build_chain(&request.graph, &options)?;
         let (work_tx, work_rx) = mpsc::channel(max_pending);
         let pipeline_id = options.pipeline_id.clone();
@@ -67,7 +75,7 @@ impl RequestExecutor {
         let worker = tokio::spawn(run_chain(graph_for_ctx, pipeline_id, operators, work_rx));
 
         let mut exec = Self {
-            bind_address: options.bind_address.clone(),
+            bind_address,
             work_tx,
             worker: Some(worker),
             server: None,
@@ -119,6 +127,17 @@ impl RequestExecutor {
                 .expect("request HTTP server failed");
         }));
         Ok(())
+    }
+}
+
+impl Drop for RequestExecutor {
+    fn drop(&mut self) {
+        if let Some(server) = self.server.take() {
+            server.abort();
+        }
+        if let Some(worker) = self.worker.take() {
+            worker.abort();
+        }
     }
 }
 

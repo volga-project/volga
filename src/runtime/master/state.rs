@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use kameo::actor::ActorRef;
 use kameo::spawn;
-use tokio::sync::Mutex;
 use tokio::sync::broadcast;
+use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration, Instant};
 
 use crate::api::PipelineSpec;
@@ -87,10 +87,7 @@ impl WorkerRegistry {
             .iter()
             .filter_map(|(worker_id, record)| {
                 if record.registered && !record.replacing {
-                    record
-                        .discovered
-                        .clone()
-                        .map(|node| (worker_id.clone(), node))
+                    record.discovered.clone().map(|node| (worker_id.clone(), node))
                 } else {
                     None
                 }
@@ -123,7 +120,7 @@ impl WorkerRegistry {
         }
     }
 
-    /// Assign exactly `worker_ids` to `execution_attempt_id` (clears others).
+    /// Assign exactly `worker_ids` to `execution_attempt_id` (clears other streaming workers).
     fn set_execution_attempt(&mut self, execution_attempt_id: u64, worker_ids: &[String]) {
         let selected: HashSet<&str> = worker_ids.iter().map(String::as_str).collect();
         for (worker_id, record) in self.workers.iter_mut() {
@@ -278,6 +275,16 @@ impl MasterState {
             execution_graph: config.execution_graph,
             expected_workers: config.expected_workers,
         })
+    }
+
+    pub(super) async fn request_config(&self) -> Option<(String, PipelineSpec)> {
+        let config = self.config.lock().await;
+        let config = config.as_ref()?;
+        if config.request_graph.is_none() {
+            return None;
+        }
+        let pipeline_id = self.orchestrator.get_pipeline_id().await;
+        Some((pipeline_id, config.spec.clone()))
     }
 
     pub(super) async fn register_worker(&self, worker_id: String) {
@@ -519,9 +526,7 @@ impl MasterState {
         self.lifecycle_events.lock().await.since(sequence)
     }
 
-    pub(super) fn subscribe_lifecycle_events(
-        &self,
-    ) -> broadcast::Receiver<LifecycleEventRecord> {
+    pub(super) fn subscribe_lifecycle_events(&self) -> broadcast::Receiver<LifecycleEventRecord> {
         self.lifecycle_event_tx.subscribe()
     }
 
@@ -563,3 +568,4 @@ impl MasterState {
         self.orchestrator.request_replacement(worker_ids).await
     }
 }
+

@@ -49,6 +49,9 @@ async fn build_worker_bootstrap() -> Result<(String, Arc<dyn WorkerOrchestrator>
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    if env::var("VOLGA_WORKER_ROLE").ok().as_deref() == Some("request") {
+        return volga::runtime::request::serve_from_env().await;
+    }
     let bind_addr =
         env::var("VOLGA_WORKER_BIND_ADDR").expect("VOLGA_WORKER_BIND_ADDR is not set");
     let hold_on_finish = env::var("VOLGA_WORKER_HOLD_ON_FINISH")
