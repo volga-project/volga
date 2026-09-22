@@ -87,19 +87,12 @@ impl CheckpointStore for InMemoryCheckpointStore {
     }
 }
 
-/// `max(observed) + 1`, or `0` if nothing has been allocated. Persists before return.
+/// Next never-reused id: `0` on a fresh job, otherwise last + 1. Persists before return.
 pub async fn allocate_attempt(
     store: &dyn CheckpointStore,
     pipeline_id: &PipelineId,
-    observed: Option<u64>,
 ) -> Result<u64> {
-    let stored = store.load_last_attempt(pipeline_id).await?;
-    let last = match (stored, observed) {
-        (Some(a), Some(b)) => Some(a.max(b)),
-        (Some(a), None) | (None, Some(a)) => Some(a),
-        (None, None) => None,
-    };
-    let next = match last {
+    let next = match store.load_last_attempt(pipeline_id).await? {
         Some(id) => id
             .checked_add(1)
             .ok_or_else(|| anyhow::anyhow!("execution_attempt_id overflow"))?,
@@ -120,28 +113,18 @@ mod tests {
     #[tokio::test]
     async fn first_attempt_is_zero_and_is_persisted() {
         let store = InMemoryCheckpointStore::default();
-        let id = allocate_attempt(&store, &pipeline(), None).await.unwrap();
+        let id = allocate_attempt(&store, &pipeline()).await.unwrap();
         assert_eq!(id, 0);
         assert_eq!(store.load_last_attempt(&pipeline()).await.unwrap(), Some(0));
     }
 
     #[tokio::test]
-    async fn allocate_never_reuses_and_survives_observed_restore() {
+    async fn allocate_never_reuses() {
         let store = InMemoryCheckpointStore::default();
         let p = pipeline();
-        assert_eq!(allocate_attempt(&store, &p, None).await.unwrap(), 0);
-        assert_eq!(allocate_attempt(&store, &p, None).await.unwrap(), 1);
-        // Two recoveries from the same checkpoint both observe attempt 0.
-        // Persisted last (1) wins over observed 0, so we get 2, not 1 again.
-        assert_eq!(allocate_attempt(&store, &p, Some(0)).await.unwrap(), 2);
-        assert_eq!(allocate_attempt(&store, &p, Some(0)).await.unwrap(), 3);
-    }
-
-    #[tokio::test]
-    async fn observed_cut_raises_the_floor_when_store_is_empty() {
-        let store = InMemoryCheckpointStore::default();
-        let p = pipeline();
-        assert_eq!(allocate_attempt(&store, &p, Some(4)).await.unwrap(), 5);
-        assert_eq!(allocate_attempt(&store, &p, Some(4)).await.unwrap(), 6);
+        assert_eq!(allocate_attempt(&store, &p).await.unwrap(), 0);
+        assert_eq!(allocate_attempt(&store, &p).await.unwrap(), 1);
+        assert_eq!(allocate_attempt(&store, &p).await.unwrap(), 2);
+        assert_eq!(allocate_attempt(&store, &p).await.unwrap(), 3);
     }
 }
