@@ -9,8 +9,7 @@ pub(super) const INSERT_KG_BUCKETS: &str = "INSERT INTO window_kg_buckets (names
 pub(super) const INSERT_TILES: &str = "INSERT INTO window_tiles (namespace, key_group, business_key, granularity_ms, bucket_start, tile_start, attempt, epoch, payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
 pub(super) const INSERT_KEY_STATES: &str = "INSERT INTO window_key_states (namespace, key_group, business_key, attempt, epoch, key_state) VALUES (?, ?, ?, ?, ?, ?)";
 pub(super) const INSERT_TRIGGERS: &str = "INSERT INTO window_triggers (namespace, bucket_start, kg_shard, fire_ts, fire_seq, business_key, trigger_kind, window_id, key_group, attempt, epoch) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
-pub(super) const SELECT_KEY_STATE: &str = "SELECT attempt, epoch, key_state FROM window_key_states WHERE namespace = ? AND key_group = ? AND business_key = ? LIMIT 8";
-pub(super) const SELECT_KEY_STATE_AT: &str = "SELECT key_state FROM window_key_states WHERE namespace = ? AND key_group = ? AND business_key = ? AND attempt = ? AND epoch <= ? LIMIT 1";
+pub(super) const SELECT_KEY_STATE: &str = "SELECT attempt, epoch, key_state FROM window_key_states WHERE namespace = ? AND key_group = ? AND business_key = ?";
 pub(super) const SELECT_RAW: &str = "SELECT event_ts, seq_no, attempt, epoch, payload FROM window_raw WHERE namespace = ? AND key_group = ? AND business_key = ? AND bucket_start = ? AND event_ts >= ? AND event_ts <= ?";
 pub(super) const SELECT_TILES: &str = "SELECT tile_start, attempt, epoch, payload FROM window_tiles WHERE namespace = ? AND key_group = ? AND business_key = ? AND granularity_ms = ? AND bucket_start = ? AND tile_start >= ? AND tile_start < ?";
 pub(super) const SELECT_TRIGGERS: &str = "SELECT fire_ts, fire_seq, business_key, trigger_kind, window_id, key_group, attempt, epoch FROM window_triggers WHERE namespace = ? AND bucket_start = ? AND kg_shard = ? AND (fire_ts, fire_seq, business_key, trigger_kind, window_id, attempt, epoch) > (?, ?, ?, ?, ?, ?, ?) AND fire_ts <= ? LIMIT ?";
@@ -22,7 +21,6 @@ pub(super) struct PreparedDml {
     pub(super) insert_key_states: PreparedStatement,
     pub(super) insert_triggers: PreparedStatement,
     pub(super) select_key_state: PreparedStatement,
-    pub(super) select_key_state_at: PreparedStatement,
     pub(super) select_raw: PreparedStatement,
     pub(super) select_tiles: PreparedStatement,
     pub(super) select_triggers: PreparedStatement,
