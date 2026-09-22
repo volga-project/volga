@@ -15,12 +15,14 @@ use crate::runtime::checkpoint::{CompletedCheckpoint, SerializedCheckpoint};
 pub use actor::{
     AbortInFlightCheckpoint, CheckpointCoordinator, ConfigureCheckpoints, InFlightCheckpointId,
     InFlightCheckpointTimedOut, LatestCompleteCheckpoint, LoadCheckpoint, NoteBarrierProgress,
-    ReportCheckpoint, StartCheckpoint,
+    AllocateAttempt, ReportCheckpoint, StartCheckpoint,
 };
 pub use crate::runtime::checkpoint::TaskKey;
 use protocol::CheckpointProtocol;
 pub use restore::RestorePlanner;
-pub use store::{create_checkpoint_store, CheckpointStore, InMemoryCheckpointStore};
+pub use store::{
+    allocate_attempt, create_checkpoint_store, CheckpointStore, InMemoryCheckpointStore,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CheckpointStartError {
@@ -118,6 +120,11 @@ impl Checkpoints {
 
     pub fn latest_complete(&self) -> Option<u64> {
         self.protocol.latest_complete()
+    }
+
+    /// Persist last + 1 (or `0`) before workers are configured.
+    pub async fn allocate_attempt(&self) -> anyhow::Result<u64> {
+        allocate_attempt(self.store()?.as_ref(), self.pipeline_id()?).await
     }
 
     pub fn is_completed(&self, checkpoint_id: u64) -> bool {

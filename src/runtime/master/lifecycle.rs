@@ -32,6 +32,7 @@ pub(super) struct MasterLifecycle {
     pipeline: Option<Arc<PipelineContext>>,
     execute_reply: Option<ReplySender<Result<(), String>>>,
     attempt_id: u64,
+    recoveries: u64,
     restore_checkpoint_id: Option<u64>,
     current: Option<ActorRef<ExecutionAttempt>>,
 }
@@ -54,6 +55,7 @@ impl MasterLifecycle {
             pipeline: None,
             execute_reply: None,
             attempt_id: 0,
+            recoveries: 0,
             restore_checkpoint_id: None,
             current: None,
         })
@@ -178,7 +180,7 @@ impl MasterLifecycle {
                 Ok(())
             }
             Ok(AttemptOutcome::Recover(replace)) => {
-                if self.attempt_id >= runtime_consts().u64(MASTER_RECOVERY_BUDGET) {
+                if self.recoveries >= runtime_consts().u64(MASTER_RECOVERY_BUDGET) {
                     self.state.clear_current_attempt().await;
                     let _ = attempt.stop_gracefully().await;
                     return Err(format!(
@@ -194,9 +196,10 @@ impl MasterLifecycle {
                         replacement_worker_ids,
                     })
                     .await;
+                self.recoveries += 1;
                 println!(
                     "[MASTER] Recovering {}/{} after execution attempt {} replace={:?}",
-                    self.attempt_id + 1,
+                    self.recoveries,
                     runtime_consts().u64(MASTER_RECOVERY_BUDGET),
                     self.attempt_id,
                     replace
@@ -209,8 +212,8 @@ impl MasterLifecycle {
                 self.state.clear_current_attempt().await;
                 let _ = attempt.stop_gracefully().await;
 
-                self.attempt_id += 1;
                 self.restore_checkpoint_id = self.state.latest_complete_checkpoint().await;
+                self.attempt_id = self.state.allocate_attempt().await?;
                 println!(
                     "[MASTER] Starting execution attempt {} restore={:?}",
                     self.attempt_id, self.restore_checkpoint_id
@@ -248,9 +251,16 @@ impl Message<Start> for MasterLifecycle {
         self.intent = PipelineIntent::Run;
         self.pipeline = Some(Arc::new(msg.0));
         self.execute_reply = Some(reply);
-        self.attempt_id = 0;
+        self.recoveries = 0;
         self.restore_checkpoint_id = None;
         self.current = None;
+        match self.state.allocate_attempt().await {
+            Ok(attempt_id) => self.attempt_id = attempt_id,
+            Err(error) => {
+                self.complete_execute(Err(error));
+                return delegated;
+            }
+        }
 
         match self.start_attempt(ctx.actor_ref()).await {
             Ok(()) => {}

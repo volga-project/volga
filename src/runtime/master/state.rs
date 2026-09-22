@@ -26,8 +26,8 @@ use super::attempt::ExecutionAttempt;
 use super::checkpoint::{
     create_checkpoint_store, AbortInFlightCheckpoint, CheckpointAckOutcome, CheckpointCoordinator,
     CheckpointStartError, ConfigureCheckpoints, InFlightCheckpointId, InFlightCheckpointTimedOut,
-    LatestCompleteCheckpoint, LoadCheckpoint, NoteBarrierProgress, ReportCheckpoint,
-    RestorePlanner, StartCheckpoint, TaskKey,
+    AllocateAttempt, LatestCompleteCheckpoint, LoadCheckpoint, NoteBarrierProgress,
+    ReportCheckpoint, RestorePlanner, StartCheckpoint, TaskKey,
 };
 use super::events::{
     CheckpointPropagationPhase, LifecycleEvent, LifecycleEventRecord, LifecycleJournal,
@@ -288,6 +288,15 @@ impl MasterState {
 
     pub(super) fn set_current_attempt_id(&self, attempt_id: u64) {
         self.current_attempt_id.store(attempt_id, Ordering::SeqCst);
+    }
+
+    /// Persist a never-reused attempt before workers are configured (#156).
+    pub(super) async fn allocate_attempt(&self) -> Result<u64, String> {
+        // kameo flattens `Result` replies: Ok(id) / Err(SendError::HandlerError(err)).
+        match self.checkpoints.ask(AllocateAttempt).await {
+            Ok(attempt) => Ok(attempt),
+            Err(error) => Err(format!("failed to allocate execution_attempt_id: {error}")),
+        }
     }
 
     pub(super) fn current_attempt_id(&self) -> u64 {
