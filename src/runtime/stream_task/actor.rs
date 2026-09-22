@@ -46,11 +46,11 @@ impl kameo::message::Message<StreamTaskMessage> for StreamTaskActor {
                 Ok(self.task.get_state().await)
             }
             StreamTaskMessage::TriggerCheckpointBarrier(checkpoint_id) => {
-                self.task.signal_trigger_checkpoint(checkpoint_id);
+                self.task.signal_checkpoint_trigger(checkpoint_id);
                 Ok(self.task.get_state().await)
             }
             StreamTaskMessage::NotifyCheckpointComplete(checkpoint_id) => {
-                self.task.signal_notify_checkpoint_complete(checkpoint_id);
+                self.task.signal_checkpoint_complete(checkpoint_id);
                 Ok(self.task.get_state().await)
             }
         }
