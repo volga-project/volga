@@ -8,7 +8,7 @@ use crate::runtime::operators::operator::{
     operator_config_requires_checkpoint, Output, SourceOperator,
 };
 
-use super::checkpoint::on_checkpoint_barrier;
+use super::checkpoint::{drain_checkpoint_complete, on_checkpoint_barrier};
 use super::ctx::TaskCtx;
 use super::progress::sleep_until_deadline;
 use super::task::StreamTask;
@@ -17,15 +17,17 @@ use super::watermark::WatermarkManager;
 pub(super) async fn source_loop(
     source: &mut dyn SourceOperator,
     mut ctx: TaskCtx<'_>,
-    checkpoint_receiver: &mut mpsc::UnboundedReceiver<u64>,
+    checkpoint_trigger_receiver: &mut mpsc::UnboundedReceiver<u64>,
+    checkpoint_complete_receiver: &mut mpsc::UnboundedReceiver<u64>,
     source_watermark_manager: &mut WatermarkManager,
 ) -> Result<()> {
     let mut metrics_window_start = std::time::Instant::now();
     let checkpointable = operator_config_requires_checkpoint(source.operator_config());
 
     while ctx.is_running() {
+        drain_checkpoint_complete(source, checkpoint_complete_receiver).await;
         if checkpointable {
-            if let Ok(checkpoint_id) = checkpoint_receiver.try_recv() {
+            if let Ok(checkpoint_id) = checkpoint_trigger_receiver.try_recv() {
                 inject_source_barrier(
                     source,
                     &mut ctx,

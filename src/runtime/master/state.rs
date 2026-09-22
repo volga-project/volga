@@ -22,7 +22,7 @@ use crate::runtime::metrics::{
 use crate::runtime::observability::snapshot_types::PipelineSnapshot;
 use crate::runtime::operators::operator::operator_config_requires_checkpoint;
 
-use super::attempt::ExecutionAttempt;
+use super::attempt::{ExecutionAttempt, NotifyCheckpointComplete};
 use super::checkpoint::{
     create_checkpoint_store, AbortInFlightCheckpoint, CheckpointAckOutcome, CheckpointCoordinator,
     CheckpointStartError, ConfigureCheckpoints, InFlightCheckpointId, InFlightCheckpointTimedOut,
@@ -398,15 +398,7 @@ impl MasterState {
         .await;
 
         if let CheckpointAckOutcome::Completed { duration_ms } = outcome {
-            let pipeline_id = self.orchestrator.get_pipeline_id().await;
-            record_pipeline_histogram(
-                METRIC_CHECKPOINT_DURATION_MS,
-                duration_ms as f64,
-                &pipeline_id,
-            );
-            increment_pipeline_counter(METRIC_CHECKPOINT_COMPLETED, 1, &pipeline_id);
-            self.record_lifecycle_event(LifecycleEvent::CheckpointCompleted { checkpoint_id })
-                .await;
+            self.mark_checkpoint_completed(checkpoint_id, duration_ms).await;
         }
         Ok(())
     }
@@ -460,15 +452,7 @@ impl MasterState {
 
         match outcome {
             CheckpointAckOutcome::Completed { duration_ms } => {
-                let pipeline_id = self.orchestrator.get_pipeline_id().await;
-                record_pipeline_histogram(
-                    METRIC_CHECKPOINT_DURATION_MS,
-                    duration_ms as f64,
-                    &pipeline_id,
-                );
-                increment_pipeline_counter(METRIC_CHECKPOINT_COMPLETED, 1, &pipeline_id);
-                self.record_lifecycle_event(LifecycleEvent::CheckpointCompleted { checkpoint_id })
-                    .await;
+                self.mark_checkpoint_completed(checkpoint_id, duration_ms).await;
                 Ok(())
             }
             CheckpointAckOutcome::Pending => Ok(()),
@@ -493,6 +477,21 @@ impl MasterState {
         };
         RestorePlanner::plan(completed, &target_graph)
             .map_err(|error| format!("failed to plan restore: {error}"))
+    }
+
+    async fn mark_checkpoint_completed(&self, checkpoint_id: u64, duration_ms: u64) {
+        let pipeline_id = self.orchestrator.get_pipeline_id().await;
+        record_pipeline_histogram(
+            METRIC_CHECKPOINT_DURATION_MS,
+            duration_ms as f64,
+            &pipeline_id,
+        );
+        increment_pipeline_counter(METRIC_CHECKPOINT_COMPLETED, 1, &pipeline_id);
+        self.record_lifecycle_event(LifecycleEvent::CheckpointCompleted { checkpoint_id })
+            .await;
+        if let Some(attempt) = self.current_attempt().await {
+            let _ = attempt.tell(NotifyCheckpointComplete(checkpoint_id)).await;
+        }
     }
 
     pub(super) async fn latest_complete_checkpoint(&self) -> Option<u64> {

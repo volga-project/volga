@@ -43,6 +43,7 @@ pub struct StreamTask {
     run_signal_sender: Option<oneshot::Sender<()>>,
     close_signal_sender: Option<oneshot::Sender<()>>,
     checkpoint_trigger_sender: Option<mpsc::UnboundedSender<u64>>,
+    checkpoint_complete_sender: Option<mpsc::UnboundedSender<u64>>,
     upstream_watermarks: Arc<Mutex<HashMap<String, u64>>>,
     current_watermark: Arc<AtomicU64>,
     master_addr: Option<String>,
@@ -86,6 +87,7 @@ impl StreamTask {
             run_signal_sender: None,
             close_signal_sender: None,
             checkpoint_trigger_sender: None,
+            checkpoint_complete_sender: None,
             upstream_watermarks: Arc::new(Mutex::new(HashMap::new())),
             current_watermark: Arc::new(AtomicU64::new(0)),
             master_addr,
@@ -135,8 +137,12 @@ impl StreamTask {
         let (close_sender, close_receiver) = oneshot::channel();
         self.close_signal_sender = Some(close_sender);
 
-        let (checkpoint_sender, checkpoint_receiver) = mpsc::unbounded_channel::<u64>();
-        self.checkpoint_trigger_sender = Some(checkpoint_sender);
+        let (checkpoint_trigger_sender, checkpoint_trigger_receiver) =
+            mpsc::unbounded_channel::<u64>();
+        self.checkpoint_trigger_sender = Some(checkpoint_trigger_sender);
+        let (checkpoint_complete_sender, checkpoint_complete_receiver) =
+            mpsc::unbounded_channel::<u64>();
+        self.checkpoint_complete_sender = Some(checkpoint_complete_sender);
 
         let metrics_labels = self.metrics_labels.clone();
         let task_vertex_id = vertex_id.clone();
@@ -160,7 +166,8 @@ impl StreamTask {
             signals: TaskSignals {
                 run_receiver,
                 close_receiver,
-                checkpoint_receiver,
+                checkpoint_trigger_receiver,
+                checkpoint_complete_receiver,
             },
         });
         let run_loop_handle = tokio::spawn(run_loop.map(move |result| {
@@ -211,11 +218,19 @@ impl StreamTask {
         }
     }
 
-    pub fn signal_trigger_checkpoint(&mut self, checkpoint_id: u64) {
+    pub fn signal_checkpoint_trigger(&mut self, checkpoint_id: u64) {
         let sender = self
             .checkpoint_trigger_sender
             .as_ref()
             .expect("checkpoint trigger sender not set");
+        let _ = sender.send(checkpoint_id);
+    }
+
+    pub fn signal_checkpoint_complete(&mut self, checkpoint_id: u64) {
+        let sender = self
+            .checkpoint_complete_sender
+            .as_ref()
+            .expect("checkpoint complete sender not set");
         let _ = sender.send(checkpoint_id);
     }
 

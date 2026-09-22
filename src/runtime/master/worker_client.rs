@@ -16,7 +16,8 @@ use super::heartbeat::WorkerHeartbeatMonitor;
 use super::worker_service::{
     worker_service_client::WorkerServiceClient, CloseWorkerTasksRequest, ConfigureWorkerRequest,
     GetWorkerStateRequest, ResetWorkerRequest, RunWorkerTasksRequest, ShutdownWorkerRequest,
-    StartWorkerRequest, StopSourcesRequest, TaskRestoreData, TriggerCheckpointBarrierRequest,
+    NotifyCheckpointCompleteRequest, StartWorkerRequest, StopSourcesRequest, TaskRestoreData,
+    TriggerCheckpointBarrierRequest,
 };
 
 enum Attempt<T> {
@@ -330,6 +331,25 @@ impl WorkerClient {
                 client
                     .trigger_checkpoint_barrier(tonic::Request::new(
                         TriggerCheckpointBarrierRequest {
+                            checkpoint_id,
+                            execution_attempt_id,
+                        },
+                    ))
+                    .await
+            })
+            .await
+            .map_err(anyhow::Error::new)?
+            .into_inner()
+            .success)
+    }
+
+    pub async fn notify_checkpoint_complete(&self, checkpoint_id: u64) -> anyhow::Result<bool> {
+        let execution_attempt_id = self.execution_attempt_id;
+        Ok(self
+            .rpc("notify_checkpoint_complete", |mut client| async move {
+                client
+                    .notify_checkpoint_complete(tonic::Request::new(
+                        NotifyCheckpointCompleteRequest {
                             checkpoint_id,
                             execution_attempt_id,
                         },

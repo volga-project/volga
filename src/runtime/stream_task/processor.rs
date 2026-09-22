@@ -8,7 +8,8 @@ use crate::runtime::consts::{runtime_consts, WINDOW_INGEST_MAX_RECORDS};
 use crate::runtime::operators::operator::{drain_ready_after, MessageStream, StreamOperator};
 use crate::transport::transport_client::DataReaderControl;
 
-use super::checkpoint::on_checkpoint_barrier;
+use super::checkpoint::{drain_checkpoint_complete, on_checkpoint_barrier};
+use tokio::sync::mpsc;
 use super::ctx::TaskCtx;
 use super::progress::{sleep_until_deadline, InputProgress};
 use super::task::timestamp;
@@ -19,11 +20,13 @@ pub(super) async fn processor_loop(
     mailbox: MessageStream,
     mut progress: InputProgress,
     reader_control: DataReaderControl,
+    checkpoint_complete_receiver: &mut mpsc::UnboundedReceiver<u64>,
 ) -> Result<()> {
     let mut mailbox = mailbox.peekable();
     let mut metrics_window_start = Instant::now();
 
     while ctx.is_running() {
+        drain_checkpoint_complete(operator, checkpoint_complete_receiver).await;
         let idle_start = Instant::now();
         tokio::select! {
             biased;

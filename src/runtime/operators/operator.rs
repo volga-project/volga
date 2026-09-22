@@ -74,6 +74,11 @@ pub trait OperatorTrait: Send + Sync + fmt::Debug {
     async fn restore(&mut self, _restore: SerializedRestore) -> Result<()> {
         Ok(())
     }
+
+    /// After a checkpoint completes globally. Default no-op. Delivery is #300.
+    async fn notify_checkpoint_complete(&mut self, _checkpoint_id: u64) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Processor / sink: the task owns the mailbox and dispatches events.
@@ -218,6 +223,13 @@ impl OperatorTrait for Operator {
         match self {
             Operator::Source(op) => op.restore(restore).await,
             Operator::Stream(op) => op.restore(restore).await,
+        }
+    }
+
+    async fn notify_checkpoint_complete(&mut self, checkpoint_id: u64) -> Result<()> {
+        match self {
+            Operator::Source(op) => op.notify_checkpoint_complete(checkpoint_id).await,
+            Operator::Stream(op) => op.notify_checkpoint_complete(checkpoint_id).await,
         }
     }
 }
