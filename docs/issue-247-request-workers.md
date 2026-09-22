@@ -4,9 +4,9 @@ Follow this file. Stacked PRs on `feat/issue-247-request-workers` in `/Users/ano
 
 Related: [#247](https://github.com/volga-project/volga/issues/247), [#301](https://github.com/volga-project/volga/issues/301), [#291](https://github.com/volga-project/volga/issues/291). [#117](https://github.com/volga-project/volga/issues/117) is closed as irrelevant.
 
-## Can 0–4 land before Scylla?
+## Can 1–4 land before Scylla?
 
-**Yes.** PR0–PR4 are engine / worker / metrics / deploy plumbing. They do not need a working `WindowRequestStore`.
+**Yes.** PR1–PR4 are engine / worker / metrics / deploy plumbing. They do not need a working `WindowRequestStore`.
 
 **PR5 waits on Scylla (#291).** That is the first time a request worker in another process can read a published cut. Until then:
 
@@ -105,7 +105,6 @@ Replica count lives on the launch spec / CRD (`spec.requestWorkers.replicas`, do
 Merge order. Each PR is reviewable alone. PR1 and PR2 should follow each other quickly because PR1 removes the mixed graph that today’s request runtime tests depend on.
 
 ```
-PR0  #301 checkpoints in request mode          → merge now
 PR1  compile: two graphs + in-process executor
 PR2  request worker type + master two pools
 PR3  request metrics
@@ -113,19 +112,7 @@ PR4  kube / docker HTTP endpoint
 PR5  cluster e2e                               → after #291
 ```
 
----
-
-### PR0 — Checkpoints in request mode (#301)
-
-Land immediately. Independent of worker types. Base PR1+ on this.
-
-**Bug:** `expected_aligns` is `all_tasks()` (`master/state.rs`). Barriers only enter checkpointable sources. HTTP source / WRO / request sink are not checkpointable, and `to_request_mode` makes them a disjoint component, so every non-zero interval times out and the master recover-loops. Hidden today because `CheckpointSpec::default()` has `interval_ms: 0`.
-
-**Fix:** `expected_aligns` = tasks reachable from checkpointable sources (or: streaming / checkpointable component only). After two graphs this is “the streaming graph.”
-
-**Test:** request-mode pipeline with non-zero `interval_ms` completes checkpoints and keeps serving. Nothing covers that combination now.
-
-Do not wait for the rest of this stack.
+[#301](https://github.com/volga-project/volga/issues/301) does not need its own PR. The hang was the read path sitting in `expected_aligns`. PR1 takes those vertices off the streaming graph, so `all_tasks()` is the align set again.
 
 ---
 
@@ -181,7 +168,7 @@ Local harness:
 
 Cleanup in this PR (leftovers of the mixed worker that are not already gone in PR1):
 
-- Request vertices in `configure_channels` / checkpoint acks / aligns (aligns already fixed in PR0)
+- Request vertices in `configure_channels` / checkpoint acks
 
 **Not in this PR:** kube Service / second STS (PR4), serving e2e against Scylla (PR5).
 
@@ -219,7 +206,7 @@ Smoke: request STS comes up, port binds, master sees N request workers Ready. Do
 
 - Request-mode cluster (local / docker / kube) with streaming replicas + request replicas.
 - Recovery: request kill does not bump streaming attempt; streaming kill does not take down HTTP.
-- Checkpoint: request-mode + non-zero interval completes (PR0) **and** publishes a cut the request worker can read (needs #291 + #300).
+- Checkpoint: request-mode + non-zero interval publishes a cut the request worker can read (needs #291 + #300).
 - This is the process-boundary proof. Layer C in the store plan stays collocated WO/WRO against remote Scylla until this lands; do not describe Layer C as independent serving.
 
 ## Leftover mixed-architecture code (checklist)
