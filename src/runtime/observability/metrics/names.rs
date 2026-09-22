@@ -61,6 +61,16 @@ pub const METRIC_CHECKPOINT_DURATION_MS: &str = "volga_checkpoint_duration_ms";
 pub const METRIC_CHECKPOINT_COMPLETED: &str = "volga_checkpoint_completed";
 pub const METRIC_CHECKPOINT_FAILED: &str = "volga_checkpoint_failed";
 
+/// HTTP request-worker handler metrics (not stream-task).
+pub const METRIC_REQUEST_IN_FLIGHT: &str = "volga_request_in_flight";
+pub const METRIC_REQUEST_ACCEPTED: &str = "volga_request_accepted";
+pub const METRIC_REQUEST_COMPLETED: &str = "volga_request_completed";
+pub const METRIC_REQUEST_TIMEOUT: &str = "volga_request_timeout";
+pub const METRIC_REQUEST_REJECTED_429: &str = "volga_request_rejected_429";
+pub const METRIC_REQUEST_FAILED: &str = "volga_request_failed";
+pub const METRIC_REQUEST_HANDLER_MS: &str = "volga_request_handler_ms";
+pub const METRIC_REQUEST_SEMAPHORE_UTILIZATION: &str = "volga_request_semaphore_utilization";
+
 // Worker-derived (poll-time) metrics
 pub const METRIC_WORKER_BACKPRESSURE_MAX: &str = "volga_worker_backpressure_max";
 pub const METRIC_WORKER_RSS_BYTES: &str = "volga_worker_rss_bytes";

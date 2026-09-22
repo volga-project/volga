@@ -27,10 +27,12 @@ pub async fn serve_from_env() -> Result<()> {
                 let request = compile_pipeline(&spec, None).request.ok_or_else(|| {
                     anyhow::anyhow!("pipeline has no request graph")
                 })?;
+                let worker_id = env::var("VOLGA_WORKER_ID").unwrap_or_else(|_| "request".to_string());
                 let executor = RequestExecutor::start(
                     request,
                     RequestExecutorOptions {
                         pipeline_id: PipelineId(pipeline_id),
+                        worker_id,
                         wro_store: None,
                         bind_address: Some(bind_address.clone()),
                     },

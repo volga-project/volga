@@ -11,8 +11,9 @@ pub use collect::{
     collect_stream_task_metrics, collect_task_metric_values, get_stream_task_metrics, TaskMetricValues,
 };
 pub use helpers::{
-    increment_pipeline_counter, increment_task_counter, record_pipeline_histogram,
-    record_task_histogram, set_task_gauge,
+    increment_pipeline_counter, increment_task_counter, increment_worker_counter,
+    record_pipeline_histogram, record_task_histogram, record_worker_histogram, set_task_gauge,
+    set_worker_gauge,
 };
 pub use histogram::HistogramMetrics;
 pub use names::*;
