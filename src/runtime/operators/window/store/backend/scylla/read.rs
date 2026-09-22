@@ -29,37 +29,22 @@ pub(super) async fn load_key_state(
     let kg = client.key_group(partition)?;
     let session = client.inner.session();
     let prepared = client.inner.prepared().await?;
-    let ns = client.scope.namespace.bytes.clone();
-    let key = partition.business_key.clone();
-    let result = session
-        .execute_unpaged(&prepared.select_key_state, (ns.clone(), kg, key.clone()))
-        .await?;
-    let rows = result.into_rows_result()?;
-    let mut n = 0usize;
-    let mut visible: Option<Vec<u8>> = None;
-    for row in rows.rows::<(i64, i64, Vec<u8>)>()? {
-        let (attempt, epoch, payload) = row?;
-        n += 1;
-        if visible.is_none() && client.overlay_visible(kg, attempt, epoch) {
-            visible = Some(payload);
-        }
-    }
-    if let Some(payload) = visible {
-        return decode_val(&payload);
-    }
-    if n == 0 {
-        return Ok(KeyState::default());
-    }
-    let me = client.my_attempt() as i64;
     let result = session
         .execute_unpaged(
-            &prepared.select_key_state_at,
-            (ns, kg, key, me, i64::MAX),
+            &prepared.select_key_state,
+            (
+                client.scope.namespace.bytes.clone(),
+                kg,
+                partition.business_key.clone(),
+            ),
         )
         .await?;
-    let rows = result.into_rows_result()?;
-    if let Some(row) = rows.rows::<(Vec<u8>,)>()?.next() {
-        return decode_val(&row?.0);
+    // Clustering is (attempt DESC, epoch DESC); first visible row wins.
+    for row in result.into_rows_result()?.rows::<(i64, i64, Vec<u8>)>()? {
+        let (attempt, epoch, payload) = row?;
+        if client.overlay_visible(kg, attempt, epoch) {
+            return decode_val(&payload);
+        }
     }
     Ok(KeyState::default())
 }
