@@ -220,7 +220,8 @@ fn describe_unhealthy_pod(pod: &Value) -> String {
             return format!("phase={phase} reason={reason}");
         }
     }
-    if let Some(statuses) = json_get_path(pod, &["status", "containerStatuses"]).and_then(|v| v.as_array())
+    if let Some(statuses) =
+        json_get_path(pod, &["status", "containerStatuses"]).and_then(|v| v.as_array())
     {
         for status in statuses {
             if let Some(terminated) = json_get_path(status, &["state", "terminated"]) {
@@ -241,7 +242,10 @@ fn describe_unhealthy_pod(pod: &Value) -> String {
                     .unwrap_or("Waiting");
                 if matches!(
                     reason,
-                    "CrashLoopBackOff" | "ImagePullBackOff" | "ErrImagePull" | "CreateContainerError"
+                    "CrashLoopBackOff"
+                        | "ImagePullBackOff"
+                        | "ErrImagePull"
+                        | "CreateContainerError"
                 ) {
                     return format!("container waiting reason={reason}");
                 }
@@ -489,7 +493,11 @@ impl KubeMasterOrchestrator {
             Ok(crd) => {
                 let annotation = json_get_path(
                     &crd,
-                    &["metadata", "annotations", KUBE_WORKER_HEALTH_POLL_ANNOTATION],
+                    &[
+                        "metadata",
+                        "annotations",
+                        KUBE_WORKER_HEALTH_POLL_ANNOTATION,
+                    ],
                 )
                 .and_then(|v| v.as_str());
                 match annotation.and_then(parse_boolish) {
@@ -662,36 +670,13 @@ impl MasterOrchestrator for KubeMasterOrchestrator {
                 &[("labelSelector", self.worker_label_selector.as_str())],
             )
             .await?;
-        let request_pods = if self.request_worker_label_selector.is_empty() {
-            None
-        } else {
-            Some(
-                self.api
-                    .get_json(
-                        &list_path,
-                        &[("labelSelector", self.request_worker_label_selector.as_str())],
-                    )
-                    .await?,
-            )
-        };
 
         let mut deleted = 0usize;
-        let mut items: Vec<&Value> = Vec::new();
-        if let Some(arr) = pods.get("items").and_then(|v| v.as_array()) {
-            items.extend(arr);
-        }
-        if let Some(request_pods) = &request_pods {
-            if let Some(arr) = request_pods.get("items").and_then(|v| v.as_array()) {
-                items.extend(arr);
-            }
-        }
-        for item in items {
-            let worker_id =
-                json_get_path(item, &["metadata", "labels", &self.worker_id_label_key])
-                    .and_then(|v| v.as_str())
-                    .or_else(|| {
-                        json_get_path(item, &["metadata", "name"]).and_then(|v| v.as_str())
-                    });
+        let items = pods.get("items").and_then(|v| v.as_array());
+        for item in items.into_iter().flatten() {
+            let worker_id = json_get_path(item, &["metadata", "labels", &self.worker_id_label_key])
+                .and_then(|v| v.as_str())
+                .or_else(|| json_get_path(item, &["metadata", "name"]).and_then(|v| v.as_str()));
             let pod_name = json_get_path(item, &["metadata", "name"]).and_then(|v| v.as_str());
             if let (Some(worker_id), Some(pod_name)) = (worker_id, pod_name) {
                 if target.contains(worker_id) {
