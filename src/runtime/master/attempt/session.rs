@@ -41,6 +41,7 @@ pub(super) struct StartWorker;
 pub(super) struct RunTasks;
 pub(super) struct GetWorkerState;
 pub(super) struct TriggerBarrier(pub u64);
+pub(super) struct NotifyCheckpointComplete(pub u64);
 pub(super) struct StopSources;
 pub(super) struct ResetWorker;
 pub(super) struct CloseTasks;
@@ -127,6 +128,21 @@ impl Message<TriggerBarrier> for WorkerSession {
     ) -> Self::Reply {
         self.client
             .trigger_checkpoint_barrier(msg.0)
+            .await
+            .map_err(|error| error.to_string())
+    }
+}
+
+impl Message<NotifyCheckpointComplete> for WorkerSession {
+    type Reply = Result<bool, String>;
+
+    async fn handle(
+        &mut self,
+        msg: NotifyCheckpointComplete,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.client
+            .notify_checkpoint_complete(msg.0)
             .await
             .map_err(|error| error.to_string())
     }

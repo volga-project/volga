@@ -257,6 +257,16 @@ impl ExecutionAttempt {
         });
     }
 
+    pub(super) async fn on_notify_checkpoint_complete(&mut self, checkpoint_id: u64) {
+        if self.run.is_none() {
+            return;
+        }
+        let sessions = self.session_list();
+        tokio::spawn(async move {
+            notify_checkpoint_complete(sessions, checkpoint_id).await;
+        });
+    }
+
     pub(super) async fn on_checkpoint_barriers_done(&mut self, msg: CheckpointBarriersDone) {
         if self.run.is_none() {
             return;
@@ -414,6 +424,28 @@ async fn wait_for_status(
             }
         }
         sleep(STATUS_POLL).await;
+    }
+}
+
+/// Fan out completion notifies. Errors are logged; they do not fail the checkpoint.
+async fn notify_checkpoint_complete(
+    sessions: Vec<(String, ActorRef<WorkerSession>)>,
+    checkpoint_id: u64,
+) {
+    let futures = sessions.into_iter().map(|(worker_id, session)| async move {
+        let result = session.ask(super::session::NotifyCheckpointComplete(checkpoint_id)).await;
+        (worker_id, result)
+    });
+    for (worker_id, result) in futures::future::join_all(futures).await {
+        match result {
+            Ok(true) => {}
+            Ok(false) => println!(
+                "[MASTER] notify_checkpoint_complete {checkpoint_id} rejected by {worker_id}"
+            ),
+            Err(error) => println!(
+                "[MASTER] notify_checkpoint_complete {checkpoint_id} failed on {worker_id}: {error:?}"
+            ),
+        }
     }
 }
 

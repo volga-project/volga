@@ -106,6 +106,9 @@ pub(super) struct CheckpointBarriersDone {
     pub(super) checkpoint_id: u64,
     pub(super) error: Option<String>,
 }
+
+/// After global complete; at-most-once, must not fail the checkpoint.
+pub(super) struct NotifyCheckpointComplete(pub u64);
 pub(super) struct PollResult(pub(super) execute::StatePoll);
 
 impl ExecutionAttempt {
@@ -321,6 +324,18 @@ impl Message<FailureMsg> for ExecutionAttempt {
         ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         self.on_failure(msg.0, ctx.actor_ref()).await;
+    }
+}
+
+impl Message<NotifyCheckpointComplete> for ExecutionAttempt {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        msg: NotifyCheckpointComplete,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.on_notify_checkpoint_complete(msg.0).await;
     }
 }
 
