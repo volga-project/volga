@@ -57,7 +57,7 @@ async fn connect_scylla(config: &ScyllaConfig) -> Result<Arc<Session>> {
         builder = builder.known_node(node);
     }
     if let Some(dc) = &config.datacenter {
-        builder = builder.known_node(dc);
+        builder = builder.prefer_datacenter(dc.clone());
     }
     let session = builder.build().await?;
     let ks = KEYSPACE_CQL.replace("{keyspace}", &config.keyspace);

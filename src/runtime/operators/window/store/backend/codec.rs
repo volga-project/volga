@@ -21,14 +21,6 @@ pub fn decode_batch(bytes: &[u8]) -> Result<RecordBatch> {
         .ok_or_else(|| anyhow!("empty Arrow IPC payload"))
 }
 
-pub fn encode_batches(batches: &[RecordBatch]) -> Result<Vec<Vec<u8>>> {
-    batches.iter().map(encode_batch).collect()
-}
-
-pub fn decode_batches(bytes: &[Vec<u8>]) -> Result<Vec<RecordBatch>> {
-    bytes.iter().map(|b| decode_batch(b)).collect()
-}
-
 pub fn encode_val<T: serde::Serialize>(value: &T) -> Result<Vec<u8>> {
     Ok(bincode::serialize(value)?)
 }

@@ -16,12 +16,10 @@ use crate::runtime::state::{OperatorStore, StateRegistry, StateSessionHandle};
 use super::WindowData;
 
 mod codec;
-mod due;
 mod inmem;
 mod scylla;
 mod version;
 
-pub use due::collect_triggers;
 pub use inmem::{InMemWindowStore, InMemWindowStoreClient};
 pub use scylla::{ScyllaWindowStore, ScyllaWindowStoreClient};
 pub use version::{Attempt, CutHistory, Version};

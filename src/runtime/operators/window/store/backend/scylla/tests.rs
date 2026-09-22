@@ -12,7 +12,7 @@ use crate::runtime::operators::window::model::{
     WindowTiles, WindowTrigger, WindowTriggerKind,
 };
 use crate::runtime::operators::window::store::backend::{
-    collect_triggers, Version, WindowBackendSnapshot, WindowOperatorStore, WindowStoreTaskScope,
+    Version, WindowBackendSnapshot, WindowOperatorStore, WindowStoreTaskScope,
 };
 use crate::runtime::operators::window::store::data::cursors_from_batch;
 use crate::test_utils::window_aggs as test_utils;
@@ -118,6 +118,7 @@ async fn scylla_commit_roundtrip() {
         (TimeGranularity::Seconds(1), 1_000, 1),
         (TimeGranularity::Seconds(1), 2_000, 2),
         (TimeGranularity::Seconds(1), 3_000, 3),
+        (TimeGranularity::Seconds(1), 70_000, 5),
         (TimeGranularity::Minutes(1), 1_000, 4),
     ]);
     let trigger = WindowTrigger {
@@ -129,7 +130,17 @@ async fn scylla_commit_roundtrip() {
         .commit_events(
             &partition,
             0,
-            &batch(&[(30, 3), (10, 1), (20, 2), (20, 1), (40, 4), (50, 5)]),
+            &batch(&[
+                (30, 3),
+                (10, 1),
+                (20, 2),
+                (20, 1),
+                (40, 4),
+                (50, 5),
+                (50_000, 0),
+                (60_000, 0),
+                (60_000, 1),
+            ]),
             &stored_tiles,
             &meta,
             &[trigger.clone()],
@@ -148,7 +159,8 @@ async fn scylla_commit_roundtrip() {
         .await
         .unwrap()
         .is_empty());
-    assert!(collect_triggers(&client, None, Cursor::new(500, u64::MAX))
+    assert!(client
+        .load_triggers(None, Cursor::new(500, u64::MAX))
         .await
         .unwrap()
         .is_empty());
@@ -189,7 +201,42 @@ async fn scylla_commit_roundtrip() {
         ]
     );
     assert_eq!(
-        collect_triggers(&client, None, Cursor::new(2_000, u64::MAX))
+        raw_cursors(
+            &client
+                .load_raw(&partition, &[raw_run((50_000, 0), (60_000, 2))])
+                .await
+                .unwrap()
+        ),
+        vec![
+            Cursor::new(50_000, 0),
+            Cursor::new(60_000, 0),
+            Cursor::new(60_000, 1),
+        ]
+    );
+    assert_eq!(
+        tile_keys(
+            &client
+                .load_tiles(
+                    &partition,
+                    &[TileRun {
+                        granularity: TimeGranularity::Seconds(1),
+                        start_ts: 1_000,
+                        end_ts_exclusive: 120_000,
+                    }],
+                )
+                .await
+                .unwrap()
+        ),
+        vec![
+            (TimeGranularity::Seconds(1), 1_000),
+            (TimeGranularity::Seconds(1), 2_000),
+            (TimeGranularity::Seconds(1), 3_000),
+            (TimeGranularity::Seconds(1), 70_000),
+        ]
+    );
+    assert_eq!(
+        client
+            .load_triggers(None, Cursor::new(2_000, u64::MAX))
             .await
             .unwrap(),
         vec![trigger]
@@ -226,7 +273,8 @@ async fn scylla_overlay_hides_other_attempt() {
 
     assert_eq!(writer.load_key_state(&partition).await.unwrap().next_seq, 2);
     assert_eq!(
-        collect_triggers(&writer, None, Cursor::new(2_000, u64::MAX))
+        writer
+            .load_triggers(None, Cursor::new(2_000, u64::MAX))
             .await
             .unwrap(),
         vec![trigger]
@@ -252,7 +300,8 @@ async fn scylla_overlay_hides_other_attempt() {
         .await
         .unwrap()
         .is_empty());
-    assert!(collect_triggers(&other, None, Cursor::new(2_000, u64::MAX))
+    assert!(other
+        .load_triggers(None, Cursor::new(2_000, u64::MAX))
         .await
         .unwrap()
         .is_empty());

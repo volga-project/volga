@@ -27,18 +27,29 @@ fn partitions(
     max_parallelism: usize,
 ) -> Vec<(i64, i32)> {
     let shards = shards(range, max_parallelism);
-    let start = align_down(after.map(|c| c.ts).unwrap_or(0), TRIGGER_BUCKET_MS);
-    let end = align_down(through.ts, TRIGGER_BUCKET_MS);
-    if shards.is_empty() || start > end {
+    if shards.is_empty() {
+        return Vec::new();
+    }
+    // Do not walk from unix 0 or to i64::MAX. First tick uses `through`'s
+    // bucket; close (through == MAX) stays on the frontier bucket.
+    let start = match after {
+        Some(c) => align_down(c.ts, TRIGGER_BUCKET_MS),
+        None if through.ts == i64::MAX => return Vec::new(),
+        None => align_down(through.ts, TRIGGER_BUCKET_MS),
+    };
+    let end = if through.ts == i64::MAX {
+        start
+    } else {
+        align_down(through.ts, TRIGGER_BUCKET_MS)
+    };
+    if start > end {
         return Vec::new();
     }
     let mut out = Vec::new();
-    let mut bucket = start;
-    while bucket <= end {
+    for bucket in super::schema::time_buckets(start, end, TRIGGER_BUCKET_MS) {
         for &shard in &shards {
             out.push((bucket, shard));
         }
-        bucket += TRIGGER_BUCKET_MS;
     }
     out
 }
@@ -154,10 +165,27 @@ mod partition_tests {
     use super::*;
 
     #[test]
-    fn partitions_cover_time_buckets() {
+    fn first_tick_starts_at_through_bucket() {
         let range = KeyGroupRange::full(1);
         let through = Cursor::new(TRIGGER_BUCKET_MS + 1, 0);
         let parts = partitions(None, through, range, 1);
+        assert_eq!(parts, vec![(TRIGGER_BUCKET_MS, 0)]);
+    }
+
+    #[test]
+    fn frontier_walks_only_covered_buckets() {
+        let range = KeyGroupRange::full(1);
+        let after = Some(Cursor::new(0, u64::MAX));
+        let through = Cursor::new(TRIGGER_BUCKET_MS + 1, 0);
+        let parts = partitions(after, through, range, 1);
         assert_eq!(parts, vec![(0, 0), (TRIGGER_BUCKET_MS, 0)]);
+    }
+
+    #[test]
+    fn close_watermark_stays_on_frontier_bucket() {
+        let range = KeyGroupRange::full(1);
+        let after = Some(Cursor::new(5_000, u64::MAX));
+        let parts = partitions(after, Cursor::new(i64::MAX, u64::MAX), range, 1);
+        assert_eq!(parts, vec![(0, 0)]);
     }
 }
