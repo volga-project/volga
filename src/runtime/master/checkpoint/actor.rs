@@ -52,6 +52,11 @@ pub struct InFlightCheckpointTimedOut(pub Duration);
 
 pub struct LatestCompleteCheckpoint;
 
+/// Allocate the next never-reused attempt and persist it before configure.
+pub struct AllocateAttempt {
+    pub observed: Option<u64>,
+}
+
 pub struct LoadCheckpoint(pub u64);
 
 impl Message<ConfigureCheckpoints> for CheckpointCoordinator {
@@ -173,5 +178,17 @@ impl Message<LoadCheckpoint> for CheckpointCoordinator {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         self.inner.load(msg.0).await
+    }
+}
+
+impl Message<AllocateAttempt> for CheckpointCoordinator {
+    type Reply = Result<u64>;
+
+    async fn handle(
+        &mut self,
+        msg: AllocateAttempt,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.inner.allocate_attempt(msg.observed).await
     }
 }

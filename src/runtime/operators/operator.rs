@@ -75,8 +75,8 @@ pub trait OperatorTrait: Send + Sync + fmt::Debug {
         Ok(())
     }
 
-    /// Invoked after a checkpoint completes globally. Default no-op; WO
-    /// publishes the captured cut in request mode. Delivery is #300.
+    /// After a checkpoint completes globally. Default no-op; WO publishes
+    /// the captured cut in request mode.
     async fn notify_checkpoint_complete(&mut self, _checkpoint_id: u64) -> Result<()> {
         Ok(())
     }

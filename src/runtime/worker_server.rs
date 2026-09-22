@@ -23,8 +23,8 @@ use crate::runtime::consts::{
 use crate::runtime::health::WorkerFatalReason;
 use crate::runtime::operators::operator::operator_config_requires_checkpoint;
 use crate::runtime::worker::{
-    Close, CloseTasks, Configure, GetIdentity, GetState, ReportFatal, Reset, RunTasks, Shutdown,
-    Start, StopSources, TriggerBarrier, Worker, WorkerConfig,
+    Close, CloseTasks, Configure, GetIdentity, GetState, NotifyCheckpointComplete, ReportFatal,
+    Reset, RunTasks, Shutdown, Start, StopSources, TriggerBarrier, Worker, WorkerConfig,
 };
 use crate::runtime::worker_config_utils::{
     build_execution_graph, resolve_num_threads_per_task, WorkerInitPayload,
@@ -38,7 +38,8 @@ use worker_service::{
     ConfigureWorkerRequest, ConfigureWorkerResponse, GetWorkerStateRequest, GetWorkerStateResponse,
     MasterHeartbeatMessage, ResetWorkerRequest, ResetWorkerResponse, RunWorkerTasksRequest,
     RunWorkerTasksResponse, ShutdownWorkerRequest, ShutdownWorkerResponse, StartWorkerRequest,
-    StartWorkerResponse, StopSourcesRequest, StopSourcesResponse, TriggerCheckpointBarrierRequest,
+    NotifyCheckpointCompleteRequest, NotifyCheckpointCompleteResponse, StartWorkerResponse,
+    StopSourcesRequest, StopSourcesResponse, TriggerCheckpointBarrierRequest,
     TriggerCheckpointBarrierResponse, WorkerFatalReason as WorkerFatalReasonProto,
     WorkerHeartbeatMessage,
 };
@@ -300,6 +301,29 @@ impl WorkerService for WorkerServiceImpl {
                 String::new()
             } else {
                 "worker rejected checkpoint barrier trigger".to_string()
+            },
+        }))
+    }
+
+    async fn notify_checkpoint_complete(
+        &self,
+        request: Request<NotifyCheckpointCompleteRequest>,
+    ) -> Result<Response<NotifyCheckpointCompleteResponse>, Status> {
+        let req = request.into_inner();
+        let notified = self
+            .worker
+            .ask(NotifyCheckpointComplete {
+                checkpoint_id: req.checkpoint_id,
+                execution_attempt_id: req.execution_attempt_id,
+            })
+            .await
+            .map_err(Self::map_handler_err)?;
+        Ok(Response::new(NotifyCheckpointCompleteResponse {
+            success: notified,
+            error_message: if notified {
+                String::new()
+            } else {
+                "worker rejected checkpoint complete notify".to_string()
             },
         }))
     }

@@ -22,12 +22,12 @@ use crate::runtime::metrics::{
 use crate::runtime::observability::snapshot_types::PipelineSnapshot;
 use crate::runtime::operators::operator::operator_config_requires_checkpoint;
 
-use super::attempt::ExecutionAttempt;
+use super::attempt::{ExecutionAttempt, NotifyCheckpointComplete};
 use super::checkpoint::{
     create_checkpoint_store, AbortInFlightCheckpoint, CheckpointAckOutcome, CheckpointCoordinator,
     CheckpointStartError, ConfigureCheckpoints, InFlightCheckpointId, InFlightCheckpointTimedOut,
-    LatestCompleteCheckpoint, LoadCheckpoint, NoteBarrierProgress, ReportCheckpoint,
-    RestorePlanner, StartCheckpoint, TaskKey,
+    AllocateAttempt, LatestCompleteCheckpoint, LoadCheckpoint, NoteBarrierProgress,
+    ReportCheckpoint, RestorePlanner, StartCheckpoint, TaskKey,
 };
 use super::events::{
     CheckpointPropagationPhase, LifecycleEvent, LifecycleEventRecord, LifecycleJournal,
@@ -166,6 +166,8 @@ pub(super) struct MasterState {
     lifecycle_events: Mutex<LifecycleJournal>,
     lifecycle_event_tx: broadcast::Sender<LifecycleEventRecord>,
     current_attempt_id: AtomicU64,
+    /// Survives lifecycle restart / configure store replacement in-process.
+    last_allocated_attempt: Mutex<Option<u64>>,
     /// Live attempt (lifecycle supervises; Drain goes through lifecycle intent).
     current_attempt: Mutex<Option<ActorRef<ExecutionAttempt>>>,
     /// Job supervisor actor (`RequestFinish` / attempt loop).
@@ -184,6 +186,7 @@ impl MasterState {
             lifecycle_events: Mutex::new(LifecycleJournal::default()),
             lifecycle_event_tx,
             current_attempt_id: AtomicU64::new(0),
+            last_allocated_attempt: Mutex::new(None),
             current_attempt: Mutex::new(None),
             lifecycle: Mutex::new(None),
         }
@@ -290,6 +293,25 @@ impl MasterState {
         self.current_attempt_id.store(attempt_id, Ordering::SeqCst);
     }
 
+    /// Persist a never-reused attempt before workers are configured (#156).
+    pub(super) async fn allocate_attempt(&self, observed: Option<u64>) -> Result<u64, String> {
+        let remembered = *self.last_allocated_attempt.lock().await;
+        let observed = match (remembered, observed) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (Some(a), None) | (None, Some(a)) => Some(a),
+            (None, None) => None,
+        };
+        // kameo flattens `Result` replies: Ok(id) / Err(SendError::HandlerError(err)).
+        let attempt = match self.checkpoints.ask(AllocateAttempt { observed }).await {
+            Ok(attempt) => attempt,
+            Err(error) => {
+                return Err(format!("failed to allocate execution_attempt_id: {error}"))
+            }
+        };
+        *self.last_allocated_attempt.lock().await = Some(attempt);
+        Ok(attempt)
+    }
+
     pub(super) fn current_attempt_id(&self) -> u64 {
         self.current_attempt_id.load(Ordering::SeqCst)
     }
@@ -389,15 +411,7 @@ impl MasterState {
         .await;
 
         if let CheckpointAckOutcome::Completed { duration_ms } = outcome {
-            let pipeline_id = self.orchestrator.get_pipeline_id().await;
-            record_pipeline_histogram(
-                METRIC_CHECKPOINT_DURATION_MS,
-                duration_ms as f64,
-                &pipeline_id,
-            );
-            increment_pipeline_counter(METRIC_CHECKPOINT_COMPLETED, 1, &pipeline_id);
-            self.record_lifecycle_event(LifecycleEvent::CheckpointCompleted { checkpoint_id })
-                .await;
+            self.mark_checkpoint_completed(checkpoint_id, duration_ms).await;
         }
         Ok(())
     }
@@ -451,15 +465,7 @@ impl MasterState {
 
         match outcome {
             CheckpointAckOutcome::Completed { duration_ms } => {
-                let pipeline_id = self.orchestrator.get_pipeline_id().await;
-                record_pipeline_histogram(
-                    METRIC_CHECKPOINT_DURATION_MS,
-                    duration_ms as f64,
-                    &pipeline_id,
-                );
-                increment_pipeline_counter(METRIC_CHECKPOINT_COMPLETED, 1, &pipeline_id);
-                self.record_lifecycle_event(LifecycleEvent::CheckpointCompleted { checkpoint_id })
-                    .await;
+                self.mark_checkpoint_completed(checkpoint_id, duration_ms).await;
                 Ok(())
             }
             CheckpointAckOutcome::Pending => Ok(()),
@@ -484,6 +490,21 @@ impl MasterState {
         };
         RestorePlanner::plan(completed, &target_graph)
             .map_err(|error| format!("failed to plan restore: {error}"))
+    }
+
+    async fn mark_checkpoint_completed(&self, checkpoint_id: u64, duration_ms: u64) {
+        let pipeline_id = self.orchestrator.get_pipeline_id().await;
+        record_pipeline_histogram(
+            METRIC_CHECKPOINT_DURATION_MS,
+            duration_ms as f64,
+            &pipeline_id,
+        );
+        increment_pipeline_counter(METRIC_CHECKPOINT_COMPLETED, 1, &pipeline_id);
+        self.record_lifecycle_event(LifecycleEvent::CheckpointCompleted { checkpoint_id })
+            .await;
+        if let Some(attempt) = self.current_attempt().await {
+            let _ = attempt.tell(NotifyCheckpointComplete(checkpoint_id)).await;
+        }
     }
 
     pub(super) async fn latest_complete_checkpoint(&self) -> Option<u64> {

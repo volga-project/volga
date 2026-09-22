@@ -51,6 +51,12 @@ pub struct TriggerBarrier {
     pub execution_attempt_id: u64,
 }
 
+#[derive(Debug)]
+pub struct NotifyCheckpointComplete {
+    pub checkpoint_id: u64,
+    pub execution_attempt_id: u64,
+}
+
 /// Close nested runtimes and return to an empty shell (same ActorRef).
 #[derive(Debug)]
 pub struct Reset;
