@@ -6,7 +6,7 @@ use crate::runtime::operators::window::model::{Cursor, RawRun, TileRun};
 use crate::runtime::operators::window::operator::{WindowOperatorConfig, WindowOutputMode};
 use crate::runtime::operators::window::spec::WindowSpec;
 use crate::runtime::operators::window::store::{
-    collect_triggers, PartitionKey, WindowStoreTaskScope,
+    PartitionKey, WindowOperatorStore, WindowStoreTaskScope,
 };
 use crate::runtime::operators::window::{TileConfig, TimeGranularity};
 use crate::test_utils::window::harness::{
@@ -25,7 +25,8 @@ async fn due_trigger_count(h: &Harness, through: i64) -> usize {
     let client = h
         .store
         .client(WindowStoreTaskScope::for_test(h.namespace.clone()));
-    collect_triggers(&client, None, Cursor::new(through, u64::MAX))
+    client
+        .load_triggers(None, Cursor::new(through, u64::MAX))
         .await
         .expect("due page")
         .len()

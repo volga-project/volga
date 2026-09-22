@@ -12,7 +12,7 @@ use crate::runtime::operators::window::store::backend::codec::{decode_batch, dec
 
 use crate::runtime::operators::window::store::backend::{Attempt, Version};
 
-use super::schema::{align_down, RAW_BUCKET_MS};
+use super::schema::{last_included_ts, time_buckets, RAW_BUCKET_MS};
 use super::store::ScyllaWindowStoreClient;
 
 fn row_version(attempt: i64, epoch: i64) -> Version {
@@ -59,9 +59,7 @@ pub(super) async fn load_raw(
     let prepared = client.inner.prepared().await?;
     let mut pages = Vec::new();
     for run in runs {
-        let mut bucket = align_down(run.from.ts, RAW_BUCKET_MS);
-        let end_bucket = align_down(run.to.ts.saturating_sub(1).max(run.from.ts), RAW_BUCKET_MS);
-        while bucket <= end_bucket {
+        for bucket in time_buckets(run.from.ts, last_included_ts(run.to), RAW_BUCKET_MS) {
             let session = Arc::clone(&session);
             let select_raw = prepared.select_raw.clone();
             let ns = client.scope.namespace.bytes.clone();
@@ -74,7 +72,6 @@ pub(super) async fn load_raw(
                     .await?;
                 Ok::<_, anyhow::Error>((from, to, result))
             });
-            bucket += RAW_BUCKET_MS;
         }
     }
     let mut by_cursor: BTreeMap<Cursor, (Version, RecordBatch)> = BTreeMap::new();
@@ -109,26 +106,30 @@ pub(super) async fn load_tiles(
     let kg = client.key_group(partition)?;
     let session = client.inner.session();
     let prepared = client.inner.prepared().await?;
-    let pages = runs.iter().map(|run| {
+    let mut pages = Vec::new();
+    for run in runs {
         let gran = run.granularity.to_millis();
         let granularity = run.granularity;
-        let bucket = align_down(run.start_ts, RAW_BUCKET_MS);
         let start_ts = run.start_ts;
         let end_ts = run.end_ts_exclusive;
-        let session = Arc::clone(&session);
-        let select_tiles = prepared.select_tiles.clone();
-        let ns = client.scope.namespace.bytes.clone();
-        let key = partition.business_key.clone();
-        async move {
-            let result = session
-                .execute_unpaged(
-                    &select_tiles,
-                    (ns, kg, key, gran, bucket, start_ts, end_ts),
-                )
-                .await?;
-            Ok::<_, anyhow::Error>((granularity, result))
+        let last = if end_ts > start_ts {
+            end_ts.saturating_sub(1)
+        } else {
+            start_ts.saturating_sub(1)
+        };
+        for bucket in time_buckets(start_ts, last, RAW_BUCKET_MS) {
+            let session = Arc::clone(&session);
+            let select_tiles = prepared.select_tiles.clone();
+            let ns = client.scope.namespace.bytes.clone();
+            let key = partition.business_key.clone();
+            pages.push(async move {
+                let result = session
+                    .execute_unpaged(&select_tiles, (ns, kg, key, gran, bucket, start_ts, end_ts))
+                    .await?;
+                Ok::<_, anyhow::Error>((granularity, result))
+            });
         }
-    });
+    }
     let mut out = TileMap::new();
     for (granularity, result) in try_join_all(pages).await? {
         let rows = result.into_rows_result()?;
@@ -144,7 +145,8 @@ pub(super) async fn load_tiles(
             }
         }
         for (tile_start, (_, payload)) in best {
-            let tiles: crate::runtime::operators::window::model::WindowTiles = decode_val(&payload)?;
+            let tiles: crate::runtime::operators::window::model::WindowTiles =
+                decode_val(&payload)?;
             out.insert((granularity, tile_start), tiles);
         }
     }

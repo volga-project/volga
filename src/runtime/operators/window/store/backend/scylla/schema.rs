@@ -70,3 +70,71 @@ pub fn align_down(ts: i64, width: i64) -> i64 {
 pub fn kg_shard(key_group: usize, max_parallelism: usize) -> i32 {
     ((key_group * TRIGGER_SHARD_COUNT) / max_parallelism.max(1)) as i32
 }
+
+/// Inclusive timestamp range → bucket starts, step `width` (60s for raw/tiles/triggers).
+pub fn time_buckets(from_ts: i64, last_included_ts: i64, width: i64) -> Vec<i64> {
+    if width <= 0 || last_included_ts < from_ts {
+        return Vec::new();
+    }
+    let mut bucket = align_down(from_ts, width);
+    let end = align_down(last_included_ts, width);
+    if bucket > end {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    while bucket <= end {
+        out.push(bucket);
+        let Some(next) = bucket.checked_add(width) else {
+            break;
+        };
+        bucket = next;
+    }
+    out
+}
+
+/// Last event timestamp included by exclusive cursor `to`.
+pub fn last_included_ts(to: crate::runtime::operators::window::model::Cursor) -> i64 {
+    if to.seq_no > 0 {
+        to.ts
+    } else {
+        to.ts.saturating_sub(1)
+    }
+}
+
+#[cfg(test)]
+mod bucket_tests {
+    use super::*;
+    use crate::runtime::operators::window::model::Cursor;
+
+    #[test]
+    fn raw_boundary_with_seq_includes_that_bucket() {
+        let to = Cursor::new(60_000, 2);
+        assert_eq!(
+            time_buckets(50_000, last_included_ts(to), RAW_BUCKET_MS),
+            vec![0, 60_000]
+        );
+    }
+
+    #[test]
+    fn after_timestamp_excludes_boundary_bucket() {
+        let to = Cursor::after_timestamp(60_000);
+        assert_eq!(to, Cursor::new(60_001, 0));
+        assert_eq!(
+            time_buckets(50_000, last_included_ts(to), RAW_BUCKET_MS),
+            vec![0, 60_000]
+        );
+        let to = Cursor::new(60_000, 0);
+        assert_eq!(
+            time_buckets(50_000, last_included_ts(to), RAW_BUCKET_MS),
+            vec![0]
+        );
+    }
+
+    #[test]
+    fn tile_run_crosses_minute() {
+        assert_eq!(
+            time_buckets(1_000, 120_000 - 1, RAW_BUCKET_MS),
+            vec![0, 60_000]
+        );
+    }
+}
