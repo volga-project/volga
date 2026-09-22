@@ -8,17 +8,16 @@ use arrow::datatypes::{DataType, Field, Schema};
 use serde::{Deserialize, Serialize};
 
 use crate::common::Key;
+use crate::runtime::observability::snapshot_types::TaskOperatorMetrics;
 use crate::runtime::operators::window::config::WindowConfig;
 use crate::runtime::operators::window::metrics::collect_window_operator_snapshot;
 use crate::runtime::operators::window::model::{WindowId, WindowTrigger, WindowTriggerKind};
 use crate::runtime::operators::window::store::data::cursors_from_batch;
 use crate::runtime::operators::window::store::{
-    PartitionKey, StateNamespace, WindowBackendSnapshot, WindowOperatorStore,
-    WindowStoreTaskScope,
+    PartitionKey, StateNamespace, WindowBackendSnapshot, WindowOperatorStore, WindowStoreTaskScope,
 };
 use crate::runtime::operators::window::tile::{apply_batch_to_tiles, plan_update_runs_for_batch};
 use crate::runtime::operators::window::SEQ_NO_COLUMN_NAME;
-use crate::runtime::observability::snapshot_types::TaskOperatorMetrics;
 use crate::runtime::operators::OperatorKind;
 use crate::runtime::state::OperatorTaskState;
 use crate::runtime::VertexId;
@@ -205,22 +204,11 @@ impl WindowOperatorState {
         let partition = self.partition(key);
         let watermark_frontier = self.watermark_frontier();
 
-        let mut key_state = self
-            .store
-            .load_key_state(&partition)
-            .await
-            .expect("key state");
         let (accepted, dropped) =
             drop_late_entries(&batch, self.ts_column_index, watermark_frontier);
         if accepted.num_rows() == 0 {
             return dropped;
         }
-
-        let start_seq = key_state.next_seq;
-        let with_seq = append_seq_no_column(&accepted, start_seq);
-        key_state.next_seq = start_seq
-            .checked_add(accepted.num_rows() as u64)
-            .expect("per-key sequence exhausted");
 
         let mut tile_runs = Vec::new();
         let mut tiling_windows = Vec::new();
@@ -228,18 +216,25 @@ impl WindowOperatorState {
             let Some(cfg) = window.tiling.clone() else {
                 continue;
             };
-            for run in plan_update_runs_for_batch(&cfg, &with_seq, self.ts_column_index) {
+            for run in plan_update_runs_for_batch(&cfg, &accepted, self.ts_column_index) {
                 tile_runs.push(run);
             }
             tiling_windows.push((*window_id, cfg, Arc::clone(&window.window_expr)));
         }
         tile_runs.sort_by_key(|run| (run.granularity, run.start_ts, run.end_ts_exclusive));
         tile_runs.dedup();
-        let mut updated_tiles = self
-            .store
-            .load_tiles(&partition, &tile_runs)
-            .await
-            .expect("load tiles");
+
+        let (mut key_state, mut updated_tiles) = tokio::try_join!(
+            self.store.load_key_state(&partition),
+            self.store.load_tiles(&partition, &tile_runs),
+        )
+        .expect("key state and tiles");
+
+        let start_seq = key_state.next_seq;
+        let with_seq = append_seq_no_column(&accepted, start_seq);
+        key_state.next_seq = start_seq
+            .checked_add(accepted.num_rows() as u64)
+            .expect("per-key sequence exhausted");
         for run in &tile_runs {
             updated_tiles
                 .entry((run.granularity, run.start_ts))
@@ -304,10 +299,9 @@ impl OperatorTaskState for WindowOperatorState {
     }
 
     async fn task_operator_metrics(&self) -> Option<TaskOperatorMetrics> {
-        Some(TaskOperatorMetrics::Window(collect_window_operator_snapshot(
-            self.task_id(),
-            self.store.metrics_labels(),
-        )))
+        Some(TaskOperatorMetrics::Window(
+            collect_window_operator_snapshot(self.task_id(), self.store.metrics_labels()),
+        ))
     }
 }
 

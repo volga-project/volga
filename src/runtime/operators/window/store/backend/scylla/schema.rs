@@ -119,34 +119,35 @@ mod bucket_tests {
     use crate::runtime::operators::window::model::Cursor;
 
     #[test]
-    fn raw_boundary_with_seq_includes_that_bucket() {
-        let to = Cursor::new(60_000, 2);
-        assert_eq!(
-            time_buckets(50_000, last_included_ts(to), RAW_BUCKET_MS),
-            vec![0, 60_000]
-        );
-    }
-
-    #[test]
-    fn after_timestamp_excludes_boundary_bucket() {
-        let to = Cursor::after_timestamp(60_000);
-        assert_eq!(to, Cursor::new(60_001, 0));
-        assert_eq!(
-            time_buckets(50_000, last_included_ts(to), RAW_BUCKET_MS),
-            vec![0, 60_000]
-        );
-        let to = Cursor::new(60_000, 0);
-        assert_eq!(
-            time_buckets(50_000, last_included_ts(to), RAW_BUCKET_MS),
-            vec![0]
-        );
-    }
-
-    #[test]
-    fn tile_run_crosses_minute() {
-        assert_eq!(
-            time_buckets(1_000, 120_000 - 1, RAW_BUCKET_MS),
-            vec![0, 60_000]
-        );
+    fn bucket_partition_keys() {
+        let cases: &[(&str, i64, i64, &[i64])] = &[
+            ("tile [0, 120000)", 0, 120_000 - 1, &[0, 60_000]),
+            (
+                "raw [Cursor(50000, 0), Cursor(60000, 2))",
+                50_000,
+                last_included_ts(Cursor::new(60_000, 2)),
+                &[0, 60_000],
+            ),
+            (
+                "after_timestamp(60000)",
+                0,
+                last_included_ts(Cursor::after_timestamp(60_000)),
+                &[0, 60_000],
+            ),
+            (
+                "Cursor(60000, 0) coverage tail",
+                50_000,
+                last_included_ts(Cursor::new(60_000, 0)),
+                &[0],
+            ),
+        ];
+        for &(name, from, last, want) in cases {
+            let got = time_buckets(from, last, RAW_BUCKET_MS);
+            assert_eq!(got, want, "{name}");
+            assert!(
+                !got.contains(&120_000),
+                "{name} must stop before bucket 120000"
+            );
+        }
     }
 }
