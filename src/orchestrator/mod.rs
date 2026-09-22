@@ -4,4 +4,4 @@ pub mod docker;
 pub mod kube;
 pub mod task_assignment;
 
-pub use orchestrator::{MasterOrchestrator, WorkerNode, WorkerOrchestrator, WorkerRole};
+pub use orchestrator::{MasterOrchestrator, WorkerNode, WorkerOrchestrator};

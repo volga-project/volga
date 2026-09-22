@@ -1,5 +1,4 @@
 use crate::api::{compile_logical_graph, PipelineSpec};
-use crate::orchestrator::orchestrator::WorkerRole;
 use crate::orchestrator::task_assignment::TaskWorkerMapping;
 use crate::runtime::execution_graph::ExecutionGraph;
 use serde::{Deserialize, Serialize};
@@ -11,10 +10,6 @@ pub struct WorkerInitPayload {
     pub pipeline_spec: PipelineSpec,
     pub vertex_ids: Vec<String>,
     pub task_worker_mapping: TaskWorkerMapping,
-    #[serde(default)]
-    pub role: WorkerRole,
-    #[serde(default)]
-    pub request_bind_address: Option<String>,
 }
 
 pub fn build_execution_graph(

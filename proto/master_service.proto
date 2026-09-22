@@ -11,7 +11,9 @@ service MasterService {
   rpc GetLatestPipelineSnapshot(GetLatestPipelineSnapshotRequest) returns (GetLatestPipelineSnapshotResponse);
   rpc GetLifecycleEvents(GetLifecycleEventsRequest) returns (GetLifecycleEventsResponse);
   // Ask running workers to stop sources (harness-driven pipeline finish).
-  rpc StopSources(StopSourcesRequest) returns (StopSourcesResponse);
+    rpc StopSources(StopSourcesRequest) returns (StopSourcesResponse);
+  // Request worker pulls the pipeline spec and starts HTTP itself.
+  rpc GetRequestConfig(GetRequestConfigRequest) returns (GetRequestConfigResponse);
 }
 
 message RegisterWorkerRequest {
@@ -94,5 +96,14 @@ message StopSourcesRequest {
 message StopSourcesResponse {
   bool success = 1;
   string error_message = 2;
+}
+
+message GetRequestConfigRequest {
+}
+
+message GetRequestConfigResponse {
+  bool ready = 1;
+  string pipeline_id = 2;
+  bytes pipeline_spec = 3;
 }
 

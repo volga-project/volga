@@ -16,7 +16,6 @@ use super::attempt::{
     ScheduleError,
 };
 use super::events::LifecycleEvent;
-use super::request_pool;
 use super::state::{MasterState, PipelineContext};
 use crate::runtime::consts::{runtime_consts, MASTER_RECOVERY_BUDGET};
 
@@ -61,21 +60,12 @@ impl MasterLifecycle {
     }
 
     async fn complete_execute(&mut self, result: Result<(), String>) {
-        self.state.clear_running_pipeline().await;
         if let Some(reply) = self.execute_reply.take() {
             reply.send(result);
         }
         self.pipeline = None;
         self.current = None;
         self.intent = PipelineIntent::Run;
-    }
-
-    async fn start_request_workers(&mut self) -> Result<(), String> {
-        let pipeline = self
-            .pipeline
-            .clone()
-            .ok_or_else(|| "lifecycle has no pipeline".to_string())?;
-        request_pool::start_request_workers(&self.state, pipeline).await
     }
 
     async fn try_drain(&self) {
@@ -262,10 +252,6 @@ impl Message<Start> for MasterLifecycle {
         self.restore_checkpoint_id = None;
         self.current = None;
 
-        if let Err(error) = self.start_request_workers().await {
-            self.complete_execute(Err(error)).await;
-            return delegated;
-        }
         match self.start_attempt(ctx.actor_ref()).await {
             Ok(()) => {}
             Err(error) => self.complete_execute(Err(error)).await,

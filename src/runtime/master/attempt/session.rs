@@ -6,7 +6,6 @@ use tokio::sync::mpsc;
 
 use crate::api::PipelineSpec;
 use crate::common::failure::FailureEvent;
-use crate::orchestrator::orchestrator::WorkerRole;
 use crate::orchestrator::task_assignment::TaskWorkerMapping;
 use crate::runtime::checkpoint::{SerializedRestore, TaskKey};
 use crate::runtime::observability::snapshot_types::WorkerSnapshot;
@@ -36,8 +35,6 @@ pub(crate) struct Configure {
     pub mapping: TaskWorkerMapping,
     pub task_restore_data: Vec<(TaskKey, SerializedRestore)>,
     pub restoring: bool,
-    pub role: WorkerRole,
-    pub request_bind_address: Option<String>,
 }
 
 pub(crate) struct StartWorker;
@@ -79,8 +76,6 @@ impl Message<Configure> for WorkerSession {
                 msg.mapping,
                 msg.task_restore_data,
                 msg.restoring,
-                msg.role,
-                msg.request_bind_address,
             )
             .await
     }

@@ -384,13 +384,6 @@ impl RecoveryReport {
                         .events
                         .push(format!("checkpoint_failed {checkpoint_id} detail={detail}"));
                 }
-                LifecycleEvent::RequestWorkersStarted { worker_ids } => {
-                    if let Some(attempt_id) = current {
-                        attempt_entry(&mut by_attempt, attempt_id)
-                            .events
-                            .push(format!("request_workers_started {worker_ids:?}"));
-                    }
-                }
             }
         }
 

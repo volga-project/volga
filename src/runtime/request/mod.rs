@@ -1,4 +1,4 @@
-//! In-process request chain: one HTTP request runs the whole operator graph in one task.
+//! In-process request graph: one HTTP request runs the whole operator graph in one task.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,6 +22,10 @@ use crate::runtime::operators::operator::{
 use crate::runtime::operators::window::request::WindowRequestOperator;
 use crate::runtime::operators::window::store::{StateNamespace, WindowRequestStore};
 use crate::runtime::runtime_context::RuntimeContext;
+
+mod serve;
+
+pub use serve::serve_from_env;
 
 use petgraph::Direction;
 
