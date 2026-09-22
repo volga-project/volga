@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use kameo::actor::ActorRef;
 use kameo::spawn;
-use tokio::sync::Mutex;
 use tokio::sync::broadcast;
+use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration, Instant};
 
 use crate::api::{PipelineSpec, RequestGraph};
@@ -51,6 +51,9 @@ struct WorkerRecord {
     replacing: bool,
     /// Execution attempt this worker is assigned to while running; cleared on recover/finish.
     execution_attempt_id: Option<u64>,
+    /// Bumped on every register. A new process reuses the worker id.
+    request_epoch: u64,
+    request_started_epoch: u64,
 }
 
 #[derive(Default)]
@@ -70,6 +73,7 @@ impl WorkerRegistry {
         let record = self.workers.entry(worker_id).or_default();
         record.registered = true;
         record.replacing = false;
+        record.request_epoch = record.request_epoch.wrapping_add(1);
     }
 
     fn reconcile_readiness(
@@ -90,9 +94,10 @@ impl WorkerRegistry {
             .iter()
             .filter_map(|(worker_id, record)| {
                 if record.registered && !record.replacing {
-                    record.discovered.clone().and_then(|node| {
-                        (node.role == role).then(|| (worker_id.clone(), node))
-                    })
+                    record
+                        .discovered
+                        .clone()
+                        .and_then(|node| (node.role == role).then(|| (worker_id.clone(), node)))
                 } else {
                     None
                 }
@@ -133,7 +138,11 @@ impl WorkerRegistry {
     fn set_execution_attempt(&mut self, execution_attempt_id: u64, worker_ids: &[String]) {
         let selected: HashSet<&str> = worker_ids.iter().map(String::as_str).collect();
         for (worker_id, record) in self.workers.iter_mut() {
-            if record.discovered.as_ref().is_some_and(|node| node.is_request()) {
+            if record
+                .discovered
+                .as_ref()
+                .is_some_and(|node| node.is_request())
+            {
                 continue;
             }
             record.execution_attempt_id = if selected.contains(worker_id.as_str()) {
@@ -146,7 +155,11 @@ impl WorkerRegistry {
 
     fn clear_execution_attempt(&mut self) {
         for record in self.workers.values_mut() {
-            if record.discovered.as_ref().is_some_and(|node| node.is_request()) {
+            if record
+                .discovered
+                .as_ref()
+                .is_some_and(|node| node.is_request())
+            {
                 continue;
             }
             record.execution_attempt_id = None;
@@ -182,6 +195,10 @@ pub(super) struct MasterState {
     current_attempt: Mutex<Option<ActorRef<ExecutionAttempt>>>,
     /// Job supervisor actor (`RequestFinish` / attempt loop).
     lifecycle: Mutex<Option<ActorRef<MasterLifecycle>>>,
+    /// Set while a pipeline is running so a later request-worker register can be configured.
+    running_pipeline: Mutex<Option<Arc<PipelineContext>>>,
+    /// Serializes configure/start so one process is not configured twice.
+    request_configure: Mutex<()>,
 }
 
 impl MasterState {
@@ -198,6 +215,8 @@ impl MasterState {
             current_attempt_id: AtomicU64::new(0),
             current_attempt: Mutex::new(None),
             lifecycle: Mutex::new(None),
+            running_pipeline: Mutex::new(None),
+            request_configure: Mutex::new(()),
         }
     }
 
@@ -296,8 +315,47 @@ impl MasterState {
 
     pub(super) async fn register_worker(&self, worker_id: String) {
         self.workers.lock().await.register(worker_id.clone());
-        self.record_lifecycle_event(LifecycleEvent::WorkerRegistered { worker_id })
-            .await;
+        self.record_lifecycle_event(LifecycleEvent::WorkerRegistered {
+            worker_id: worker_id.clone(),
+        })
+        .await;
+        super::request_pool::configure_registered(self, &worker_id).await;
+    }
+
+    pub(super) async fn set_running_pipeline(&self, pipeline: Arc<PipelineContext>) {
+        *self.running_pipeline.lock().await = Some(pipeline);
+    }
+
+    pub(super) async fn clear_running_pipeline(&self) {
+        *self.running_pipeline.lock().await = None;
+    }
+
+    pub(super) async fn running_pipeline(&self) -> Option<Arc<PipelineContext>> {
+        self.running_pipeline.lock().await.clone()
+    }
+
+    pub(super) fn request_configure_lock(&self) -> &Mutex<()> {
+        &self.request_configure
+    }
+
+    /// `(epoch, already configured for that epoch)`.
+    pub(super) async fn request_start_status(&self, worker_id: &str) -> (u64, bool) {
+        let workers = self.workers.lock().await;
+        let Some(record) = workers.workers.get(worker_id) else {
+            return (0, false);
+        };
+        let started =
+            record.request_epoch > 0 && record.request_epoch == record.request_started_epoch;
+        (record.request_epoch, started)
+    }
+
+    pub(super) async fn mark_request_started(&self, worker_id: &str, epoch: u64) {
+        let mut workers = self.workers.lock().await;
+        if let Some(record) = workers.workers.get_mut(worker_id) {
+            if record.request_epoch == epoch {
+                record.request_started_epoch = epoch;
+            }
+        }
     }
 
     pub(super) fn set_current_attempt_id(&self, attempt_id: u64) {
@@ -533,9 +591,7 @@ impl MasterState {
         self.lifecycle_events.lock().await.since(sequence)
     }
 
-    pub(super) fn subscribe_lifecycle_events(
-        &self,
-    ) -> broadcast::Receiver<LifecycleEventRecord> {
+    pub(super) fn subscribe_lifecycle_events(&self) -> broadcast::Receiver<LifecycleEventRecord> {
         self.lifecycle_event_tx.subscribe()
     }
 
@@ -545,10 +601,7 @@ impl MasterState {
         timeout: Duration,
         role: WorkerRole,
     ) -> Result<HashMap<String, WorkerNode>, WorkerReadinessError> {
-        println!(
-            "[MASTER] Waiting for {} ready {:?} workers",
-            expected, role
-        );
+        println!("[MASTER] Waiting for {} ready {:?} workers", expected, role);
         let start = Instant::now();
         loop {
             let discovered = self.orchestrator.get_worker_nodes().await;
@@ -589,12 +642,7 @@ mod tests {
     #[test]
     fn readiness_splits_streaming_and_request_pools() {
         let mut registry = WorkerRegistry::default();
-        let streaming = WorkerNode::new(
-            "worker-1".to_string(),
-            "127.0.0.1".to_string(),
-            1,
-            2,
-        );
+        let streaming = WorkerNode::new("worker-1".to_string(), "127.0.0.1".to_string(), 1, 2);
         let request = WorkerNode::request(
             "request-worker-1".to_string(),
             "127.0.0.1".to_string(),

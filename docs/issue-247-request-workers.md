@@ -86,9 +86,9 @@ Request workers **do** talk to the master. They are part of the job. They do **n
 | Checkpoint / barrier | yes | **never** |
 | Streaming `recover()` | reset + new attempt | **leave running** |
 | Request pod death | unchanged | kube/local replaces pod; new process registers + configure; streaming attempt unchanged |
-| Pipeline stop / delete | close | close HTTP, unregister |
+| Pipeline stop / delete | close | process exits with the pod; master does not shut it down |
 
-**No generation / configure epoch.** A request worker is configured once per process lifetime. Replacement is a new process. Streaming recovery must not `ResetWorker` the request pool. Spec changes are a job replace (new pods), not a live reconfigure. The earlier “generation for which configure is live” idea was for reused streaming `require_attempt` RPCs; request workers should not share that protocol.
+**No configure epoch on the RPC.** A request worker is configured once per process. A new process registers again and is configured again. The master does not heartbeat it or delete it. Streaming recovery must not `ResetWorker` it. Spec changes are a job replace (new pods), not a live reconfigure. The earlier “generation for which configure is live” idea was for reused streaming `require_attempt` RPCs; request workers should not share that protocol.
 
 Master still needs a **replica count from the orchestrator** (same place as today’s `get_num_expected_workers`), so it can wait until HTTP replicas are Ready before the job is serving. That number is **not** engine parallelism and does **not** belong on `PipelineSpec`.
 
@@ -152,7 +152,6 @@ Worker:
 - Same binary, role from env / orchestrator (`streaming` | `request`). Not “scan vertices for HTTP.”
 - Request worker hosts `RequestExecutor` + HTTP. No `StreamTaskActor`, no transport backend, no `execution_attempt_id`, no `require_attempt`.
 - Bind address from env (pod IP + port), not a spec literal broadcast to every replica.
-- On close: stop HTTP (today’s `stop_request_source_processor_if_needed`, actually called).
 - Configure payload: request chain, `pipeline_id`, store session, listen addr.
 
 Master / orchestrator:
@@ -160,7 +159,7 @@ Master / orchestrator:
 - `WorkerNode` class. Two discovery lists. `get_num_expected_streaming_workers` + `get_num_expected_request_workers` from the orchestrator (local harness: two counts on `PipelineLaunchSpec`).
 - Streaming `schedule` / `recover` iterate streaming sessions only. `sessions.drain()` must not include request workers.
 - Request path: wait until N request workers Ready → configure each with the **full** chain → start HTTP. No mapping, no slots, no assignment strategy.
-- Request worker crash: replace that process, re-register, configure; **do not** bump the streaming attempt.
+- Request worker: configured once per process. A restarted process registers again and is configured again. The master does not heartbeat it, delete its pod, or shut it down. Streaming recovery does not touch it.
 
 Local harness:
 

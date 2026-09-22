@@ -13,7 +13,9 @@ use super::Worker;
 
 impl Worker {
     pub(crate) fn configure(&mut self, config: WorkerConfig) {
-        if self.is_running() {
+        if config.is_request() {
+            self.inner.take();
+        } else if self.is_running() {
             panic!("Cannot configure worker while it is running");
         }
         assert_eq!(
@@ -227,7 +229,8 @@ impl WorkerInner {
             .await
             .map_err(|error| error.to_string())?;
         self.request_executor = Some(executor);
-        self.running.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.running
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
 

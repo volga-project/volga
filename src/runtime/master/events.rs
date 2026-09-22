@@ -70,9 +70,6 @@ pub enum LifecycleEvent {
     RequestWorkersStarted {
         worker_ids: Vec<String>,
     },
-    RequestWorkerReplaced {
-        worker_id: String,
-    },
     PipelineFinished,
     PipelineFailed {
         detail: String,
