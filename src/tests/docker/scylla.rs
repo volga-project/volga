@@ -516,6 +516,15 @@ async fn window_scylla_store_request_publish_heal_and_take() {
     );
 }
 
+fn cut_allows(snapshot: &WindowBackendSnapshot, attempt: u64, epoch: u64) -> bool {
+    match snapshot {
+        WindowBackendSnapshot::Versioned { cuts, .. } => cuts
+            .iter()
+            .any(|cut| cut.allows(Version { attempt, epoch })),
+        WindowBackendSnapshot::InMemory { .. } => panic!("expected Versioned snapshot"),
+    }
+}
+
 async fn query<R>(
     store: &ScyllaWindowStore,
     cql: &str,
@@ -739,6 +748,157 @@ async fn window_scylla_store_maintain_gc() {
             fire_at: Cursor::new(180_000, 1),
             partition: partition.clone(),
             kind: WindowTriggerKind::RowEmit,
-        }]
+        }],
+    );
+}
+
+async fn stored_versions(
+    store: &ScyllaWindowStore,
+    ns: &[u8],
+    key: &[u8],
+) -> (Vec<(i64, i64)>, Vec<(i64, i64, i64)>) {
+    let ks = store.keyspace();
+    let key_states = query::<(i64, i64)>(
+        store,
+        &format!(
+            "SELECT attempt, epoch FROM {ks}.window_key_states WHERE namespace = ? AND key_group = ? AND business_key = ?"
+        ),
+        (ns.to_vec(), 0_i32, key.to_vec()),
+    )
+    .await;
+    let raw = query::<(i64, i64, i64)>(
+        store,
+        &format!(
+            "SELECT event_ts, attempt, epoch FROM {ks}.window_raw WHERE namespace = ? AND key_group = ? AND business_key = ? AND bucket_start = ?"
+        ),
+        (ns.to_vec(), 0_i32, key.to_vec(), 0_i64),
+    )
+    .await;
+    (sorted(key_states), sorted(raw))
+}
+
+/// Attempt 1 writes again after attempt 2 has restored the cut. The new row
+/// stays in Scylla. The restored reader keeps the checkpointed prefix.
+#[tokio::test]
+#[ignore]
+async fn window_scylla_store_restored_reader_hides_zombie_write() {
+    let store = connect("volga_zombie").await;
+    let ns = StateNamespace::new(b"op");
+    let partition = partition(&ns);
+    let writer = store.client(scope(&ns, 1));
+    writer
+        .commit_events(
+            &partition,
+            0,
+            &batch(&[(1_000, 1)]),
+            &TileMap::new(),
+            &KeyState {
+                next_seq: 2,
+                ..Default::default()
+            },
+            &[],
+        )
+        .await
+        .unwrap();
+    let snap = writer.checkpoint().await.unwrap();
+    assert!(cut_allows(&snap, 1, 0));
+    assert!(!cut_allows(&snap, 1, 1));
+
+    let reader = store.client(scope(&ns, 2));
+    reader.restore(&snap).await.unwrap();
+    assert_eq!(reader.load_key_state(&partition).await.unwrap().next_seq, 2);
+
+    writer
+        .commit_events(
+            &partition,
+            0,
+            &batch(&[(2_000, 2)]),
+            &TileMap::new(),
+            &KeyState {
+                next_seq: 9,
+                ..Default::default()
+            },
+            &[],
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(writer.load_key_state(&partition).await.unwrap().next_seq, 9);
+    assert_eq!(reader.load_key_state(&partition).await.unwrap().next_seq, 2);
+    assert_eq!(
+        raw_cursors(
+            &reader
+                .load_raw(&partition, &[raw_run((0, 0), (3_000, 0))])
+                .await
+                .unwrap()
+        ),
+        vec![Cursor::new(1_000, 1)]
+    );
+    assert_eq!(
+        stored_versions(&store, ns.bytes.as_slice(), &partition.business_key).await,
+        (vec![(1, 0), (1, 1)], vec![(1_000, 1, 0), (2_000, 1, 1)])
+    );
+}
+
+/// Two snapshots exist. Restore uses the earlier one, and the later rows remain stored.
+#[tokio::test]
+#[ignore]
+async fn window_scylla_store_restore_uses_earlier_cut() {
+    let store = connect("volga_cut").await;
+    let ns = StateNamespace::new(b"op");
+    let partition = partition(&ns);
+    let writer = store.client(scope(&ns, 1));
+    writer
+        .commit_events(
+            &partition,
+            0,
+            &batch(&[(1_000, 1)]),
+            &TileMap::new(),
+            &KeyState {
+                next_seq: 2,
+                ..Default::default()
+            },
+            &[],
+        )
+        .await
+        .unwrap();
+    let earlier = writer.checkpoint().await.unwrap();
+    writer
+        .commit_events(
+            &partition,
+            0,
+            &batch(&[(2_000, 2)]),
+            &TileMap::new(),
+            &KeyState {
+                next_seq: 9,
+                ..Default::default()
+            },
+            &[],
+        )
+        .await
+        .unwrap();
+    let later = writer.checkpoint().await.unwrap();
+    assert!(cut_allows(&earlier, 1, 0));
+    assert!(!cut_allows(&earlier, 1, 1));
+    assert!(cut_allows(&later, 1, 1));
+
+    let successor = store.client(scope(&ns, 2));
+    successor.restore(&earlier).await.unwrap();
+    assert_eq!(
+        successor.load_key_state(&partition).await.unwrap().next_seq,
+        2
+    );
+    assert_eq!(
+        raw_cursors(
+            &successor
+                .load_raw(&partition, &[raw_run((0, 0), (3_000, 0))])
+                .await
+                .unwrap()
+        ),
+        vec![Cursor::new(1_000, 1)]
+    );
+    assert_eq!(
+        stored_versions(&store, ns.bytes.as_slice(), &partition.business_key).await,
+        (vec![(1, 0), (1, 1)], vec![(1_000, 1, 0), (2_000, 1, 1)])
     );
 }
