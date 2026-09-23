@@ -1,7 +1,6 @@
 //! Maintain / GC: raw minute deletes, tile and trigger range deletes, three-slot versions.
 //!
-//! Slot 1 is `my_attempt` (streaming) or `window_kg_meta.cur_attempt` (request).
-//! Slots 2–3 are `cut` and `prev_cut`.
+//! Slot 1 is `my_attempt`. Slots 2–3 are the published cut and the previous cut.
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
@@ -14,7 +13,6 @@ use crate::runtime::operators::window::store::backend::version::{Attempt, CutHis
 use crate::runtime::state::OperatorTaskState;
 
 use super::cql::{unlogged_batch, PreparedGc};
-use super::meta;
 use super::schema::{align_down, fully_owned_trigger_shards, RAW_BUCKET_MS};
 use super::store::ScyllaWindowStoreClient;
 
@@ -47,21 +45,12 @@ struct Retention {
     prev_cut: CutHistory,
 }
 
-async fn retention_for(client: &ScyllaWindowStoreClient, kg: i32) -> Result<Retention> {
-    if client.scope.request_mode {
-        if let Some(cuts) = meta::load_cuts(client, kg).await? {
-            return Ok(Retention {
-                attempt: cuts.cur_attempt,
-                cut: cuts.cut,
-                prev_cut: cuts.prev_cut,
-            });
-        }
-    }
-    Ok(Retention {
+fn retention_for(client: &ScyllaWindowStoreClient, kg: i32) -> Retention {
+    Retention {
         attempt: client.my_attempt(),
         cut: client.cp_cut_for(kg),
         prev_cut: client.prev_cut_for(kg),
-    })
+    }
 }
 
 pub(super) async fn maintain(
@@ -97,13 +86,10 @@ pub(super) async fn maintain(
     let mut expired = Vec::new();
     let mut live: HashMap<(i32, Vec<u8>), Vec<i64>> = HashMap::new();
     let mut keys: BTreeSet<(i32, Vec<u8>)> = BTreeSet::new();
-    let mut seen_kg: HashMap<i32, bool> = HashMap::new();
     for (kg, result) in try_join_all(scans).await? {
         let rows = result.into_rows_result()?;
-        let mut any = false;
         for row in rows.rows::<(i64, Vec<u8>)>()? {
             let (bucket_start, business_key) = row?;
-            any = true;
             keys.insert((kg, business_key.clone()));
             if bucket_start < floor_bucket {
                 expired.push((kg, business_key, bucket_start));
@@ -113,7 +99,6 @@ pub(super) async fn maintain(
                     .push(bucket_start);
             }
         }
-        seen_kg.insert(kg, any);
     }
 
     let mut expired_futs = Vec::new();
@@ -132,7 +117,7 @@ pub(super) async fn maintain(
         let gc = gc.clone();
         let ns = ns.bytes.clone();
         let granularities = granularities.clone();
-        let slots = retention_for(client, kg).await?;
+        let slots = retention_for(client, kg);
         tile_futs.push(async move {
             gc_tiles(session, gc, ns, kg, key, granularities, floor, slots).await
         });
@@ -144,7 +129,7 @@ pub(super) async fn maintain(
         let session = Arc::clone(&session);
         let gc = gc.clone();
         let ns = ns.bytes.clone();
-        let slots = retention_for(client, kg).await?;
+        let slots = retention_for(client, kg);
         version_futs
             .push(async move { gc_versions(session, gc, ns, kg, key, buckets, slots).await });
     }
@@ -163,17 +148,6 @@ pub(super) async fn maintain(
         });
     }
     try_join_all(trigger_futs).await?;
-
-    if client.scope.request_mode {
-        for (kg, had_rows) in seen_kg {
-            if had_rows {
-                continue;
-            }
-            session
-                .execute_unpaged(&gc.delete_meta, (ns.bytes.clone(), kg))
-                .await?;
-        }
-    }
     Ok(())
 }
 

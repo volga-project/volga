@@ -18,12 +18,11 @@ use crate::runtime::operators::window::store::backend::{
 use crate::runtime::state::{OperatorStore, OperatorTaskState, StateSessionHandle};
 
 use super::cql::{
-    configure_lwt, prepare_stmts, PreparedDml, PreparedGc, DELETE_KEY_STATE_VERSION,
-    DELETE_KG_BUCKETS, DELETE_META, DELETE_RAW, DELETE_RAW_VERSION, DELETE_TILES,
-    DELETE_TILE_VERSION, DELETE_TRIGGERS, INSERT_KEY_STATES, INSERT_KG_BUCKETS, INSERT_META,
-    INSERT_RAW, INSERT_TILES, INSERT_TRIGGERS, PUBLISH_META, SELECT_KEY_STATE,
-    SELECT_KEY_STATE_VERSIONS, SELECT_KG_BUCKETS, SELECT_META, SELECT_RAW, SELECT_RAW_VERSIONS,
-    SELECT_TILES, SELECT_TILE_VERSIONS, SELECT_TRIGGERS, TAKE_ATTEMPT,
+    prepare_stmts, PreparedDml, PreparedGc, DELETE_KEY_STATE_VERSION, DELETE_KG_BUCKETS,
+    DELETE_RAW, DELETE_RAW_VERSION, DELETE_TILES, DELETE_TILE_VERSION, DELETE_TRIGGERS,
+    INSERT_KEY_STATES, INSERT_KG_BUCKETS, INSERT_RAW, INSERT_TILES, INSERT_TRIGGERS,
+    SELECT_KEY_STATE, SELECT_KEY_STATE_VERSIONS, SELECT_KG_BUCKETS, SELECT_RAW,
+    SELECT_RAW_VERSIONS, SELECT_TILES, SELECT_TILE_VERSIONS, SELECT_TRIGGERS,
 };
 use super::schema::TABLES;
 use super::{checkpoint, maintain, read, triggers, write};
@@ -99,10 +98,6 @@ impl ScyllaWindowStore {
                     select_raw,
                     select_tiles,
                     select_triggers,
-                    select_meta,
-                    mut insert_meta,
-                    mut publish_meta,
-                    mut take_attempt,
                 ] = prepare_stmts(
                     session.as_ref(),
                     [
@@ -115,16 +110,9 @@ impl ScyllaWindowStore {
                         SELECT_RAW,
                         SELECT_TILES,
                         SELECT_TRIGGERS,
-                        SELECT_META,
-                        INSERT_META,
-                        PUBLISH_META,
-                        TAKE_ATTEMPT,
                     ],
                 )
                 .await?;
-                configure_lwt(&mut insert_meta);
-                configure_lwt(&mut publish_meta);
-                configure_lwt(&mut take_attempt);
                 Ok::<_, anyhow::Error>(PreparedDml {
                     insert_raw,
                     insert_kg_buckets,
@@ -135,10 +123,6 @@ impl ScyllaWindowStore {
                     select_raw,
                     select_tiles,
                     select_triggers,
-                    select_meta,
-                    insert_meta,
-                    publish_meta,
-                    take_attempt,
                 })
             })
             .await
@@ -162,7 +146,6 @@ impl ScyllaWindowStore {
                     delete_raw_version,
                     delete_tile_version,
                     delete_triggers,
-                    delete_meta,
                 ] = prepare_stmts(
                     session.as_ref(),
                     [
@@ -177,7 +160,6 @@ impl ScyllaWindowStore {
                         DELETE_RAW_VERSION,
                         DELETE_TILE_VERSION,
                         DELETE_TRIGGERS,
-                        DELETE_META,
                     ],
                 )
                 .await?;
@@ -193,7 +175,6 @@ impl ScyllaWindowStore {
                     delete_raw_version,
                     delete_tile_version,
                     delete_triggers,
-                    delete_meta,
                 })
             })
             .await

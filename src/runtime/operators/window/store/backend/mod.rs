@@ -39,7 +39,7 @@ pub struct WindowStoreTaskScope {
     pub key_group_range: KeyGroupRange,
     pub writer_id: WriterId,
     pub attempt: Attempt,
-    /// When true, restore/complete write `window_kg_meta` (request mode).
+    /// Set when this task serves requests. Streaming checkpoint ignores it.
     pub request_mode: bool,
 }
 
