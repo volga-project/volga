@@ -14,7 +14,7 @@ use crate::runtime::operators::window::store::backend::codec::{encode_batch, enc
 use crate::runtime::operators::window::store::data::cursors_from_batch;
 
 use super::cql::unlogged_batch;
-use super::schema::{align_down, kg_shard, RAW_BUCKET_MS, TRIGGER_BUCKET_MS};
+use super::schema::{align_down, kg_shard, RAW_BUCKET_MS};
 use super::store::ScyllaWindowStoreClient;
 
 pub(super) async fn insert_key_state(
@@ -137,17 +137,15 @@ async fn commit_events_at(
         });
     }
 
-    let mut tiles_by_part: BTreeMap<(i64, i64), Vec<(i64, Vec<u8>)>> = BTreeMap::new();
+    let mut tiles_by_gran: BTreeMap<i64, Vec<(i64, Vec<u8>)>> = BTreeMap::new();
     for ((granularity, tile_start), value) in tiles {
-        let gran = granularity.to_millis();
-        let bucket = align_down(*tile_start, RAW_BUCKET_MS);
-        tiles_by_part
-            .entry((gran, bucket))
+        tiles_by_gran
+            .entry(granularity.to_millis())
             .or_default()
             .push((*tile_start, encode_val(value)?));
     }
     let mut tile_futs = Vec::new();
-    for ((gran, bucket), part) in tiles_by_part {
+    for (gran, part) in tiles_by_gran {
         let mut values = Vec::with_capacity(part.len());
         for (tile_start, payload) in part {
             values.push((
@@ -155,7 +153,6 @@ async fn commit_events_at(
                 kg,
                 key.clone(),
                 gran,
-                bucket,
                 tile_start,
                 attempt,
                 epoch,
@@ -178,15 +175,14 @@ async fn commit_events_at(
         meta,
     );
 
-    let mut triggers_by_part: BTreeMap<(i64, i32), Vec<(i64, u64, i8, i64)>> = BTreeMap::new();
+    let mut triggers_by_shard: BTreeMap<i32, Vec<(i64, u64, i8, i64)>> = BTreeMap::new();
     for trigger in triggers {
-        let bucket = align_down(trigger.fire_at.ts, TRIGGER_BUCKET_MS);
         let shard = kg_shard(kg as usize, client.scope.max_parallelism);
         let (kind, window_id) = match trigger.kind {
             WindowTriggerKind::RowEmit => (0i8, 0i64),
             WindowTriggerKind::WindowEnd { window_id } => (1i8, window_id as i64),
         };
-        triggers_by_part.entry((bucket, shard)).or_default().push((
+        triggers_by_shard.entry(shard).or_default().push((
             trigger.fire_at.ts,
             trigger.fire_at.seq_no,
             kind,
@@ -194,12 +190,11 @@ async fn commit_events_at(
         ));
     }
     let mut trigger_futs = Vec::new();
-    for ((bucket, shard), part) in triggers_by_part {
+    for (shard, part) in triggers_by_shard {
         let mut values = Vec::with_capacity(part.len());
         for (ts, seq, kind, window_id) in part {
             values.push((
                 ns.clone(),
-                bucket,
                 shard,
                 ts,
                 seq as i64,
