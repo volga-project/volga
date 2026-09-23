@@ -308,8 +308,15 @@ impl ScyllaWindowStoreClient {
         let mut cp = self.cp_cut.lock().expect("cp_cut");
         let mut prev = self.prev_cut.lock().expect("prev_cut");
         for (kg, cut) in cuts {
-            if let Some(old) = cp.insert(kg, cut) {
-                prev.insert(kg, old);
+            match cp.get(&kg) {
+                Some(old) if old == &cut => {}
+                Some(_) => {
+                    let old = cp.insert(kg, cut).expect("published cut");
+                    prev.insert(kg, old);
+                }
+                None => {
+                    cp.insert(kg, cut);
+                }
             }
         }
     }
