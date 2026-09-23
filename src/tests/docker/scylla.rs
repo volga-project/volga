@@ -71,6 +71,11 @@ fn scope(ns: &StateNamespace, attempt: u64) -> WindowStoreTaskScope {
     scope
 }
 
+fn free_port() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+    listener.local_addr().expect("ephemeral port").port()
+}
+
 fn contact() -> String {
     if let Ok(cp) = std::env::var("VOLGA_SCYLLA_CONTACT") {
         return cp;
@@ -79,13 +84,15 @@ fn contact() -> String {
     SHARED
         .get_or_init(|| {
             let docker = Box::leak(Box::new(clients::Cli::default()));
+            let port = free_port();
             // One shard stays under the default fs.aio-max-nr (65536). Seastar
             // asks for ~50k slots per shard and refuses to boot past that.
             // Supervisord forwards Scylla's stdout onto the container's stderr.
+            // The driver dials broadcast_rpc_address:native_transport_port, so
+            // both must be the host port, not the container IP.
             let image = GenericImage::new("scylladb/scylla", "5.4").with_wait_for(
                 WaitFor::message_on_stderr("Starting listening for CQL clients"),
             );
-            // Publish only 9042. Publishing every EXPOSE port collides on the host.
             let container = docker.run(
                 RunnableImage::from((
                     image,
@@ -96,14 +103,16 @@ fn contact() -> String {
                         "1G".to_string(),
                         "--overprovisioned".to_string(),
                         "1".to_string(),
+                        "--broadcast-rpc-address".to_string(),
+                        "127.0.0.1".to_string(),
+                        "--native-transport-port".to_string(),
+                        port.to_string(),
                     ],
                 ))
-                .with_mapped_port((0, 9042)),
+                .with_mapped_port((port, port)),
             );
-            let port = container.get_host_port_ipv4(9042);
-            let contact = format!("127.0.0.1:{port}");
             std::mem::forget(container);
-            contact
+            format!("127.0.0.1:{port}")
         })
         .clone()
 }
