@@ -19,10 +19,10 @@ use crate::runtime::state::{OperatorStore, OperatorTaskState, StateSessionHandle
 
 use super::cql::{
     prepare_stmts, PreparedDml, PreparedGc, DELETE_KEY_STATE_VERSION, DELETE_KG_BUCKETS,
-    DELETE_RAW, DELETE_RAW_VERSION, DELETE_TILES, DELETE_TILE_VERSION, DELETE_TRIGGERS,
-    INSERT_KEY_STATES, INSERT_KG_BUCKETS, INSERT_RAW, INSERT_TILES, INSERT_TRIGGERS,
-    SELECT_KEY_STATE, SELECT_KEY_STATE_VERSIONS, SELECT_KG_BUCKETS, SELECT_RAW,
-    SELECT_RAW_VERSIONS, SELECT_TILES, SELECT_TILE_VERSIONS, SELECT_TRIGGERS,
+    DELETE_RAW, DELETE_TILES, DELETE_TILE_VERSION, DELETE_TRIGGERS, INSERT_KEY_STATES,
+    INSERT_KG_BUCKETS, INSERT_RAW, INSERT_TILES, INSERT_TRIGGERS, SELECT_KEY_STATE,
+    SELECT_KEY_STATE_VERSIONS, SELECT_KG_BUCKETS, SELECT_RAW, SELECT_TILES, SELECT_TILE_VERSIONS,
+    SELECT_TRIGGERS,
 };
 use super::schema::TABLES;
 use super::{checkpoint, maintain, read, triggers, write};
@@ -137,13 +137,11 @@ impl ScyllaWindowStore {
                 let [
                     select_kg_buckets,
                     select_key_state_versions,
-                    select_raw_versions,
                     select_tile_versions,
                     delete_raw,
                     delete_tiles,
                     delete_kg_buckets,
                     delete_key_state_version,
-                    delete_raw_version,
                     delete_tile_version,
                     delete_triggers,
                 ] = prepare_stmts(
@@ -151,13 +149,11 @@ impl ScyllaWindowStore {
                     [
                         SELECT_KG_BUCKETS,
                         SELECT_KEY_STATE_VERSIONS,
-                        SELECT_RAW_VERSIONS,
                         SELECT_TILE_VERSIONS,
                         DELETE_RAW,
                         DELETE_TILES,
                         DELETE_KG_BUCKETS,
                         DELETE_KEY_STATE_VERSION,
-                        DELETE_RAW_VERSION,
                         DELETE_TILE_VERSION,
                         DELETE_TRIGGERS,
                     ],
@@ -166,13 +162,11 @@ impl ScyllaWindowStore {
                 Ok::<_, anyhow::Error>(PreparedGc {
                     select_kg_buckets,
                     select_key_state_versions,
-                    select_raw_versions,
                     select_tile_versions,
                     delete_raw,
                     delete_tiles,
                     delete_kg_buckets,
                     delete_key_state_version,
-                    delete_raw_version,
                     delete_tile_version,
                     delete_triggers,
                 })

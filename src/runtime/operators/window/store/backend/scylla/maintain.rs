@@ -1,6 +1,8 @@
 //! Maintain / GC: raw minute deletes, tile and trigger range deletes, three-slot versions.
 //!
 //! Slot 1 is `my_attempt`. Slots 2–3 are the published cut and the previous cut.
+//! Live raw minutes are not version-scanned: a cursor is written once, and the
+//! minute partition delete removes every version when the minute expires.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
@@ -98,16 +100,14 @@ pub(super) async fn maintain(
         }
     });
 
-    let mut by_key: BTreeMap<(i32, Vec<u8>), (Vec<i64>, Vec<i64>)> = BTreeMap::new();
+    let mut by_key: BTreeMap<(i32, Vec<u8>), Vec<i64>> = BTreeMap::new();
     for (kg, result) in try_join_all(scans).await? {
         let rows = result.into_rows_result()?;
         for row in rows.rows::<(i64, Vec<u8>)>()? {
             let (bucket_start, business_key) = row?;
-            let (expired, live) = by_key.entry((kg, business_key)).or_default();
+            let expired = by_key.entry((kg, business_key)).or_default();
             if bucket_start < floor_bucket {
                 expired.push(bucket_start);
-            } else {
-                live.push(bucket_start);
             }
         }
     }
@@ -120,7 +120,7 @@ pub(super) async fn maintain(
     }
 
     let mut key_futs = Vec::new();
-    for ((kg, key), (expired, live)) in by_key {
+    for ((kg, key), expired) in by_key {
         let session = Arc::clone(&session);
         let gc = gc.clone();
         let ns = ns.bytes.clone();
@@ -137,7 +137,6 @@ pub(super) async fn maintain(
                 kg,
                 key,
                 expired,
-                live,
                 granularities,
                 floor,
                 slots,
@@ -145,7 +144,6 @@ pub(super) async fn maintain(
             .await
         });
     }
-    try_join_all(key_futs).await?;
 
     let mut trigger_futs = Vec::new();
     for shard in fully_owned_trigger_shards(range, wo.scope().max_parallelism) {
@@ -159,7 +157,7 @@ pub(super) async fn maintain(
             Ok::<_, anyhow::Error>(())
         });
     }
-    try_join_all(trigger_futs).await?;
+    tokio::try_join!(try_join_all(key_futs), try_join_all(trigger_futs))?;
     Ok(())
 }
 
@@ -178,117 +176,123 @@ async fn gc_key(
     kg: i32,
     key: Vec<u8>,
     expired: Vec<i64>,
-    live: Vec<i64>,
     granularities: Vec<i64>,
     floor: i64,
     slots: Retention,
 ) -> Result<()> {
-    for bucket in expired {
-        drop_expired_bucket(
+    let raw_futs = expired.iter().copied().map(|bucket| {
+        let session = Arc::clone(&session);
+        let stmt = gc.delete_raw.clone();
+        let ns = ns.clone();
+        let key = key.clone();
+        async move {
+            session
+                .execute_unpaged(&stmt, (ns, kg, key, bucket))
+                .await?;
+            Ok::<_, anyhow::Error>(())
+        }
+    });
+    let tile_futs = granularities.iter().copied().map(|gran| {
+        gc_tile_gran(
             Arc::clone(&session),
             gc.clone(),
             ns.clone(),
             kg,
             key.clone(),
-            bucket,
+            gran,
+            floor,
+            slots.clone(),
         )
-        .await?;
-    }
-    gc_tiles(
+    });
+    let key_state = trim_key_state(
         Arc::clone(&session),
         gc.clone(),
         ns.clone(),
         kg,
         key.clone(),
-        granularities,
-        floor,
-        &slots,
-    )
-    .await?;
-    gc_versions(session, gc, ns, kg, key, live, &slots).await
-}
+        slots.clone(),
+    );
+    tokio::try_join!(try_join_all(raw_futs), try_join_all(tile_futs), key_state)?;
 
-async fn drop_expired_bucket(
-    session: Arc<Session>,
-    gc: PreparedGc,
-    ns: Vec<u8>,
-    kg: i32,
-    key: Vec<u8>,
-    bucket: i64,
-) -> Result<()> {
-    session
-        .execute_unpaged(&gc.delete_raw, (ns.clone(), kg, key.clone(), bucket))
-        .await?;
-    session
-        .execute_unpaged(&gc.delete_kg_buckets, (ns, kg, bucket, key))
-        .await?;
+    // The index row is what the next pass scans. Drop it only after the trim
+    // succeeds, and only after the raw partition delete.
+    let index_futs = expired.into_iter().map(|bucket| {
+        let session = Arc::clone(&session);
+        let stmt = gc.delete_kg_buckets.clone();
+        let ns = ns.clone();
+        let key = key.clone();
+        async move {
+            session
+                .execute_unpaged(&stmt, (ns, kg, bucket, key))
+                .await?;
+            Ok::<_, anyhow::Error>(())
+        }
+    });
+    try_join_all(index_futs).await?;
     Ok(())
 }
 
-async fn gc_tiles(
+async fn gc_tile_gran(
     session: Arc<Session>,
     gc: PreparedGc,
     ns: Vec<u8>,
     kg: i32,
     key: Vec<u8>,
-    granularities: Vec<i64>,
+    gran: i64,
     floor: i64,
-    slots: &Retention,
+    slots: Retention,
 ) -> Result<()> {
-    for gran in granularities {
-        session
-            .execute_unpaged(
-                &gc.delete_tiles,
-                (
-                    ns.clone(),
-                    kg,
-                    key.clone(),
-                    gran,
-                    tile_keep_from(floor, gran),
-                ),
-            )
-            .await?;
-        let tiles = session
-            .execute_unpaged(
-                &gc.select_tile_versions,
-                (ns.clone(), kg, key.clone(), gran),
-            )
-            .await?;
-        let mut by_cell: HashMap<i64, Vec<Version>> = HashMap::new();
-        for row in tiles.into_rows_result()?.rows::<(i64, i64, i64)>()? {
-            let (tile_start, attempt, epoch) = row?;
-            by_cell.entry(tile_start).or_default().push(Version {
-                attempt: attempt as Attempt,
-                epoch: epoch as u64,
-            });
-        }
-        let mut tile_deletes = Vec::new();
-        for (tile_start, cell) in by_cell {
-            for v in versions_outside_slots(&cell, slots) {
-                tile_deletes.push((
-                    ns.clone(),
-                    kg,
-                    key.clone(),
-                    gran,
-                    tile_start,
-                    v.attempt as i64,
-                    v.epoch as i64,
-                ));
-            }
-        }
-        unlogged_batch(&session, &gc.delete_tile_version, tile_deletes).await?;
+    session
+        .execute_unpaged(
+            &gc.delete_tiles,
+            (
+                ns.clone(),
+                kg,
+                key.clone(),
+                gran,
+                tile_keep_from(floor, gran),
+            ),
+        )
+        .await?;
+    let tiles = session
+        .execute_unpaged(
+            &gc.select_tile_versions,
+            (ns.clone(), kg, key.clone(), gran),
+        )
+        .await?;
+    let mut by_cell: HashMap<i64, Vec<Version>> = HashMap::new();
+    for row in tiles.into_rows_result()?.rows::<(i64, i64, i64)>()? {
+        let (tile_start, attempt, epoch) = row?;
+        by_cell.entry(tile_start).or_default().push(Version {
+            attempt: attempt as Attempt,
+            epoch: epoch as u64,
+        });
     }
+    let mut tile_deletes = Vec::new();
+    for (tile_start, cell) in by_cell {
+        for v in versions_outside_slots(&cell, &slots) {
+            tile_deletes.push((
+                ns.clone(),
+                kg,
+                key.clone(),
+                gran,
+                tile_start,
+                v.attempt as i64,
+                v.epoch as i64,
+            ));
+        }
+    }
+    unlogged_batch(&session, &gc.delete_tile_version, tile_deletes).await?;
     Ok(())
 }
 
-async fn gc_versions(
+async fn trim_key_state(
     session: Arc<Session>,
     gc: PreparedGc,
     ns: Vec<u8>,
     kg: i32,
     key: Vec<u8>,
-    buckets: Vec<i64>,
-    slots: &Retention,
+    slots: Retention,
 ) -> Result<()> {
     let key_rows = session
         .execute_unpaged(&gc.select_key_state_versions, (ns.clone(), kg, key.clone()))
@@ -302,7 +306,7 @@ async fn gc_versions(
         });
     }
     let mut deletes = Vec::new();
-    for v in versions_outside_slots(&versions, slots) {
+    for v in versions_outside_slots(&versions, &slots) {
         deletes.push((
             ns.clone(),
             kg,
@@ -312,42 +316,6 @@ async fn gc_versions(
         ));
     }
     unlogged_batch(&session, &gc.delete_key_state_version, deletes).await?;
-
-    for bucket in buckets {
-        let raw = session
-            .execute_unpaged(
-                &gc.select_raw_versions,
-                (ns.clone(), kg, key.clone(), bucket),
-            )
-            .await?;
-        let mut by_cell: HashMap<(i64, i64), Vec<Version>> = HashMap::new();
-        for row in raw.into_rows_result()?.rows::<(i64, i64, i64, i64)>()? {
-            let (event_ts, seq_no, attempt, epoch) = row?;
-            by_cell
-                .entry((event_ts, seq_no))
-                .or_default()
-                .push(Version {
-                    attempt: attempt as Attempt,
-                    epoch: epoch as u64,
-                });
-        }
-        let mut raw_deletes = Vec::new();
-        for ((event_ts, seq_no), cell) in by_cell {
-            for v in versions_outside_slots(&cell, slots) {
-                raw_deletes.push((
-                    ns.clone(),
-                    kg,
-                    key.clone(),
-                    bucket,
-                    event_ts,
-                    seq_no,
-                    v.attempt as i64,
-                    v.epoch as i64,
-                ));
-            }
-        }
-        unlogged_batch(&session, &gc.delete_raw_version, raw_deletes).await?;
-    }
     Ok(())
 }
 

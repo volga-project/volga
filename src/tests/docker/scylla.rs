@@ -451,8 +451,8 @@ fn sorted<T: Ord>(mut rows: Vec<T>) -> Vec<T> {
 }
 
 /// One maintain tick against Scylla: drop an expired minute, range-delete a
-/// tile that ends at the floor, trim every cell to the three version slots,
-/// and delete triggers at or below the committed watermark.
+/// tile that ends at the floor, trim tile and key-state versions to three
+/// slots, and delete triggers at or below the committed watermark.
 #[tokio::test]
 #[ignore]
 async fn window_scylla_store_maintain_gc() {
@@ -461,7 +461,6 @@ async fn window_scylla_store_maintain_gc() {
     let partition = partition(&ns);
     let writer = store.client(scope(&ns, 1));
     let live = (120_000_i64, 1_u64);
-    let kept = vec![(1_i64, 2_i64), (1, 4), (1, 10)];
 
     for epoch in 0_u64..=10 {
         let mut cursors = vec![live];
@@ -580,8 +579,8 @@ async fn window_scylla_store_maintain_gc() {
             )
             .await,
         ),
-        kept,
-        "live raw cell keeps this attempt, the cut, and the previous cut"
+        (0_i64..=10).map(|epoch| (1, epoch)).collect::<Vec<_>>(),
+        "a live minute keeps every cursor version"
     );
     assert_eq!(
         sorted(
