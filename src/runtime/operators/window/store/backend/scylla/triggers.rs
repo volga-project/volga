@@ -87,7 +87,7 @@ pub(super) async fn load_triggers(
         let ns = ns.clone();
         async move {
             let result = session
-                .execute_unpaged(&select, (ns, shard, seek.0, seek.1, through.ts))
+                .execute_unpaged(&select, (ns, shard, seek.0, seek.1, through.ts, i64::MAX))
                 .await?;
             Ok::<_, anyhow::Error>(result)
         }
