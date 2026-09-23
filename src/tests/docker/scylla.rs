@@ -18,7 +18,8 @@ use crate::runtime::operators::window::store::backend::{
 use crate::runtime::operators::window::store::data::cursors_from_batch;
 use crate::test_utils::window_aggs as test_utils;
 use arrow::array::RecordBatch;
-use testcontainers::{clients, GenericImage};
+use testcontainers::core::WaitFor;
+use testcontainers::{clients, GenericImage, RunnableImage};
 
 fn partition(ns: &StateNamespace) -> PartitionKey {
     PartitionKey {
@@ -78,7 +79,24 @@ fn contact() -> String {
     SHARED
         .get_or_init(|| {
             let docker = Box::leak(Box::new(clients::Cli::default()));
-            let container = docker.run(GenericImage::new("scylladb/scylla", "5.4"));
+            // One shard stays under the default fs.aio-max-nr (65536). Seastar
+            // asks for ~50k slots per shard and refuses to boot past that.
+            let image = GenericImage::new("scylladb/scylla", "5.4")
+                .with_exposed_port(9042)
+                .with_wait_for(WaitFor::message_on_stdout(
+                    "Starting listening for CQL clients",
+                ));
+            let container = docker.run(RunnableImage::from((
+                image,
+                vec![
+                    "--smp".to_string(),
+                    "1".to_string(),
+                    "--memory".to_string(),
+                    "1G".to_string(),
+                    "--overprovisioned".to_string(),
+                    "1".to_string(),
+                ],
+            )));
             let port = container.get_host_port_ipv4(9042);
             let contact = format!("127.0.0.1:{port}");
             std::mem::forget(container);
