@@ -81,8 +81,9 @@ fn contact() -> String {
             let docker = Box::leak(Box::new(clients::Cli::default()));
             // One shard stays under the default fs.aio-max-nr (65536). Seastar
             // asks for ~50k slots per shard and refuses to boot past that.
+            // Supervisord forwards Scylla's stdout onto the container's stderr.
             let image = GenericImage::new("scylladb/scylla", "5.4").with_wait_for(
-                WaitFor::message_on_stdout("Starting listening for CQL clients"),
+                WaitFor::message_on_stderr("Starting listening for CQL clients"),
             );
             // Publish only 9042. Publishing every EXPOSE port collides on the host.
             let container = docker.run(
