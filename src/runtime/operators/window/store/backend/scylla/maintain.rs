@@ -214,8 +214,9 @@ async fn gc_key(
     );
     tokio::try_join!(try_join_all(raw_futs), try_join_all(tile_futs), key_state)?;
 
-    // The index row is what the next pass scans. Drop it only after the trim
-    // succeeds, and only after the raw partition delete.
+    // Index row last, after the raw delete, tile GC, and key-state trim.
+    // A failure before those two leaves the key for the next tick.
+    // The raw delete is idempotent.
     let index_futs = expired.into_iter().map(|bucket| {
         let session = Arc::clone(&session);
         let stmt = gc.delete_kg_buckets.clone();
