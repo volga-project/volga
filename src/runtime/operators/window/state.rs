@@ -44,6 +44,9 @@ pub struct WindowOperatorState {
     state_only: bool,
     /// Cuts captured at each barrier, published on completion (#300).
     pending_checkpoints: Mutex<HashMap<u64, WindowStateSnapshot>>,
+    /// Docker maintain has no `WindowExpr`. Empty means read `window_configs`.
+    #[cfg(test)]
+    tile_granularities_ms: Vec<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,6 +80,8 @@ impl WindowOperatorState {
             committed_wm: AtomicI64::new(WATERMARK_UNSET),
             state_only: false,
             pending_checkpoints: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            tile_granularities_ms: Vec::new(),
         }
     }
 
@@ -148,6 +153,10 @@ impl WindowOperatorState {
     }
 
     pub fn tile_granularity_ms(&self) -> Vec<i64> {
+        #[cfg(test)]
+        if !self.tile_granularities_ms.is_empty() {
+            return self.tile_granularities_ms.clone();
+        }
         let mut seen = std::collections::BTreeSet::new();
         for window in self.window_configs.values() {
             if let Some(tiling) = &window.tiling {
@@ -162,6 +171,12 @@ impl WindowOperatorState {
     #[cfg(test)]
     pub fn seed_committed_watermark(&self, watermark: i64) {
         self.committed_wm.store(watermark, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub fn with_tile_granularities(mut self, granularities_ms: Vec<i64>) -> Self {
+        self.tile_granularities_ms = granularities_ms;
+        self
     }
 
     pub fn partition(&self, key: &Key) -> PartitionKey {
