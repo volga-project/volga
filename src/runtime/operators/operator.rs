@@ -75,8 +75,8 @@ pub trait OperatorTrait: Send + Sync + fmt::Debug {
         Ok(())
     }
 
-    /// After a checkpoint completes globally. Default no-op; WO publishes
-    /// the captured cut in request mode.
+    /// After a checkpoint completes globally. Default no-op. The window
+    /// operator installs the barrier snapshot it captured.
     async fn notify_checkpoint_complete(&mut self, _checkpoint_id: u64) -> Result<()> {
         Ok(())
     }

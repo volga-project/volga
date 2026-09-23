@@ -412,23 +412,6 @@ impl WindowOperatorStore for ScyllaWindowStoreClient {
         checkpoint::restore(self, snapshot).await
     }
 
-    async fn prepare_attempt(
-        &self,
-        restored: &WindowBackendSnapshot,
-        committed_wm: Option<i64>,
-        retention_floor: Option<i64>,
-        restored_checkpoint_id: Option<u64>,
-    ) -> Result<()> {
-        checkpoint::prepare_attempt(
-            self,
-            restored,
-            committed_wm,
-            retention_floor,
-            restored_checkpoint_id,
-        )
-        .await
-    }
-
     async fn on_checkpoint_complete(
         &self,
         checkpoint_id: u64,

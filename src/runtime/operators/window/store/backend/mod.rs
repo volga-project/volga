@@ -39,8 +39,6 @@ pub struct WindowStoreTaskScope {
     pub key_group_range: KeyGroupRange,
     pub writer_id: WriterId,
     pub attempt: Attempt,
-    /// Set when this task serves requests. Streaming checkpoint ignores it.
-    pub request_mode: bool,
 }
 
 impl WindowStoreTaskScope {
@@ -51,7 +49,6 @@ impl WindowStoreTaskScope {
             key_group_range: KeyGroupRange::full(1),
             writer_id: WriterId(Vec::new()),
             attempt: 1,
-            request_mode: false,
         }
     }
 }
@@ -141,23 +138,7 @@ pub trait WindowOperatorStore: OperatorStore {
     /// Complete all pending writes before capturing the returned snapshot.
     async fn checkpoint(&self) -> Result<WindowBackendSnapshot>;
     async fn restore(&self, snapshot: &WindowBackendSnapshot) -> Result<()>;
-    /// Request mode: take `cur_attempt` / heal published cut. No-op for InMem.
-    async fn prepare_attempt(
-        &self,
-        restored: &WindowBackendSnapshot,
-        committed_wm: Option<i64>,
-        retention_floor: Option<i64>,
-        restored_checkpoint_id: Option<u64>,
-    ) -> Result<()> {
-        let _ = (
-            restored,
-            committed_wm,
-            retention_floor,
-            restored_checkpoint_id,
-        );
-        Ok(())
-    }
-    /// Request mode: publish the cut of a globally completed checkpoint.
+    /// Install the barrier snapshot once the checkpoint has committed globally.
     async fn on_checkpoint_complete(
         &self,
         checkpoint_id: u64,

@@ -378,7 +378,6 @@ impl OperatorTrait for WindowOperator {
                 key_group_range,
                 writer_id: WriterId(context.vertex_id().as_bytes().to_vec()),
                 attempt,
-                request_mode: context.request_store().is_some(),
             };
             let store = open_window_operator_store(registry, backend, &scope)?;
             let task_id = context.vertex_id_arc();

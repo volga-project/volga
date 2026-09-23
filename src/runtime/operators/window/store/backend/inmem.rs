@@ -1430,7 +1430,6 @@ mod tests {
                 ),
                 writer_id: WriterId(format!("task-{task_index}").into_bytes()),
                 attempt: 1,
-                request_mode: false,
             })
         };
         let c0 = bind(0);
@@ -1522,7 +1521,6 @@ mod tests {
                 key_group_range: KeyGroupRange::for_subtask(0, parallelism, max_parallelism),
                 writer_id: WriterId(b"task-0".to_vec()),
                 attempt: 1,
-                request_mode: false,
             },
         );
         task0
@@ -1567,7 +1565,6 @@ mod tests {
                 ),
                 writer_id: WriterId(format!("task-{task_index}").into_bytes()),
                 attempt: 1,
-                request_mode: false,
             })
         };
         let c0 = bind(0);
@@ -1613,7 +1610,6 @@ mod tests {
             key_group_range: KeyGroupRange::for_subtask(0, parallelism, max_parallelism),
             writer_id: WriterId(b"task-0".to_vec()),
             attempt: 1,
-            request_mode: false,
         });
         let part1 = partition_for_group(&ns, 2, max_parallelism, b"k1");
         let error = c0.load_key_state(&part1).await.unwrap_err();
