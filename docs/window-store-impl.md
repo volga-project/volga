@@ -69,9 +69,9 @@ next checkpoint.
 | C2 | `ReadOptions { Committed, Fresh }` on `load_window_data`; return `committed_wm` + `checkpoint_id` alongside the data | `store/backend/mod.rs`, InMem, Scylla |
 | C3 | Coverage guard: refuse a request whose `lo < retention_floor`. Replaces the `// No lateness filter. Answer from whatever state the backend still retains.` comment | `window/request.rs` |
 | C4 | Request-mode admission on `ts > retention_floor` instead of `ts > watermark`, for `StateOnly` operators only | `window/state.rs`, `window/operator.rs` |
-| C5 | Gate every delete (data buckets and consumed due rows) on the **committed** watermark in **both** modes, never the live one. Streaming sources it locally from its last completed checkpoint; request publishes the same value for readers. Live-watermark GC deletes below what a restore will re-fire against | `window/state.rs`, backend `maintain` |
+| C5 | Gate every delete on the **committed** watermark in **both** modes, never the live one. Raw minutes and tiles use the data floor (`committed_wm − window − lateness`). Triggers drop at `fire_at.ts <= committed_wm`. Streaming sources the watermark locally from its last completed checkpoint; request publishes the same value for readers | `window/state.rs`, backend `maintain` |
 | C8 | Reader staleness check: re-read the metadata row on requests that outlive a threshold and fail on `pinned_id < row.prev_checkpoint_id`. Exact, and independent of wall clock — publication cadence is not the configured interval. A request deadline is operational hygiene, not the mechanism | request path |
-| C9 | `load_key_state`: when every returned row is filtered out, the per-attempt fallback is **mandatory**. "All filtered" is the expected shape with unswept zombie rows, so returning `KeyState::default()` resets `next_seq` and loses `evaluation.through` | backend read path |
+| C9 | `load_key_state` is one unpaged read of the key partition. The first visible row wins. A `LIMIT` can stop on unswept zombie versions and return `KeyState::default()`, which resets `next_seq` and loses `evaluation.through` | backend read path |
 | C6 | Fresh mode: head-scoped read as specified | InMem + Scylla read paths |
 | C7 | Deduplicate **after** version filtering, not before | `window/store/data.rs` |
 
@@ -99,18 +99,19 @@ Each row is a rewrite of an open PR, not a new PR on top.
 
 | | PR | What changes |
 |---|---|---|
-| S1 | [#287](https://github.com/volga-project/volga/pull/287) write path | Add `attempt` to the clustering key of all four data tables, version clustering `DESC`. Per-group atomic `next_epoch` from 0. Acked-prefix low-water tracking. Per-key in-flight rule (no read or second commit for a key with a commit in flight). Drop `window_head` and any ingest LWT. |
+| S1 | [#287](https://github.com/volga-project/volga/pull/287) write path | Add `attempt` to the clustering key, version clustering `DESC`. Per-group atomic `next_epoch` from 0. Acked-prefix low-water tracking. Per-key in-flight rule. Drop `window_head` and any ingest LWT. Raw stays a 60-second partition plus `window_kg_buckets`. Tiles drop the minute column: one partition per key per granularity, one `tile_start` range per run. `window_triggers` is `(namespace, kg_shard)` with one unpaged `(fire_ts, fire_seq)` range per touched shard and no paging. `key_state` is one unpaged read. Overlap that read with the tile loads. |
 | S2 | [#288](https://github.com/volga-project/volga/pull/288) checkpoint/restore | `Versioned { attempt, cuts }` replaces `Versioned { version }`; delete `window_recovery_bases`. Restore takes the master attempt, asserts dominance, `next_epoch = 0`. **Delete** steal, promote, `serving_publish`, catch-up freeze. Add `window_kg_meta` with **two** statements: publish (`prev_cut = row.cut`, `prev_checkpoint_id = row.checkpoint_id`, `IF cur_attempt <= me AND checkpoint_id = observed`) and take-attempt (`SET cur_attempt = me IF cur_attempt <= me`). Triggers: checkpoint completion publishes; open publishes the restored cut if the row is behind it, else takes the attempt only, and must finish before ingest starts or `Fresh` keeps seeing the dead attempt. Do not publish with an unchanged cut — that sets `prev_cut = cut` and collapses the two GC retention slots. Open does not create the row on a fresh job. |
-| S3 | [#289](https://github.com/volga-project/volga/pull/289) maintain/GC | Per-cell version retention, three slots (`cur_attempt`, `cut`, `prev_cut`). Gate every delete on the committed floor, both modes. No wall-clock grace anywhere. |
+| S3 | [#289](https://github.com/volga-project/volga/pull/289) maintain/GC | Per-cell version retention, three slots (`cur_attempt`, `cut`, `prev_cut`). Raw: partition-delete minutes below the data floor via `window_kg_buckets`. Tiles: one range delete per key per granularity for tiles that end at or below the floor, then the version trim. Triggers: one `fire_ts <= committed_wm` range delete per shard the task fully owns. In-memory triggers use that same watermark. No wall-clock grace. |
 | S4 | [#290](https://github.com/volga-project/volga/pull/290) request store | Read `window_kg_meta` per request (not cached in v1) instead of a pin; `ReadOptions`; coverage guard; staleness re-read (C8); the store is **given** a session rather than calling `connect()` itself, so it fails at configure instead of on the first HTTP request. Collocated, that session is the worker's `StateSessionHandle`; standalone it is the request worker's own — the signature says "a session" and does not name either. The request store takes **no** key-group range and no lifecycle methods; its whole input is namespace, `max_parallelism`, session, read policy. |
 | S5 | [#292](https://github.com/volga-project/volga/pull/292) retry profile | Mostly stands. LWT now appears only on `window_kg_meta` writes. Keep: timeout fails the task, no epoch bump, no republish. |
 | S6 | [#293](https://github.com/volga-project/volga/pull/293) kube schema | Drop `serving_publish` from `ScyllaConfig` — there is no cadence. Rest stands. |
-| S7 | [#296](https://github.com/volga-project/volga/pull/296) due paging | Independent of the protocol change; `load_triggers` uses the same filter. Land it on its own schedule. |
+| S7 | [#296](https://github.com/volga-project/volga/pull/296) due paging | Merged, then removed from the store. The operator still calls `load_triggers(after, through)`. The Scylla read is one unpaged range per shard, not a page loop. |
 
 ### Deferred, tracked, not in this pass
 
-- Skinny unversioned due-bucket index to replace the 1:1 `window_due` shadow,
-  and consumed-due GC, which needs that index to find partitions.
+- Skinny unversioned trigger index to replace the 1:1 `window_triggers` rows.
+  Consumed-trigger GC does not wait on it: it is the per-shard `fire_ts` range
+  delete in S3.
 - Cut-history retirement / forced version compaction. v1 caps the list and
   fails loudly.
 - `RestorePlanner` range intersection for rescale ([#121](https://github.com/volga-project/volga/issues/121)); v1 is same assignment.

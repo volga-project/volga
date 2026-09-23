@@ -417,8 +417,8 @@ ever checkpointed keeps its prefix.
 ### Commit atomicity
 
 One logical `commit_events` touches several partitions — `window_raw` per
-bucket, `window_tiles` per granularity × bucket, `window_key_states`,
-`window_kg_buckets`, the due index. Cross-partition batches are forbidden, so
+minute, `window_tiles` per granularity, `window_key_states`,
+`window_kg_buckets`, `window_triggers`. Cross-partition batches are forbidden, so
 there is no CQL-level atomicity and a crash can tear a commit.
 
 The version restores it:
@@ -749,8 +749,8 @@ follow from the floor rather than from a mode flag:
 
 - **Admission.** Streaming drops rows at or behind the task watermark, because
   the emit path has already fired for that time. A `StateOnly` operator has no
-  emit path, so the only reason to drop a row is that its bucket may already
-  be gone. Admit on `ts > retention_floor` instead of `ts > watermark`. Late
+  emit path, so the only reason to drop a row is that its raw minute may
+  already be gone. Admit on `ts > retention_floor` instead of `ts > watermark`. Late
   events therefore update state and become visible at the next checkpoint.
 - **Retention.** Unchanged in shape, but derived from the committed watermark
   (above). Watermarks are still required in request mode for exactly this
@@ -884,11 +884,14 @@ filter is a visibility test on one `LOCAL_QUORUM` read, and restore copies
 nothing. Version clustering is **descending** (`attempt DESC, epoch DESC`) so
 the newest version of a cell sorts first and readers stop early.
 
-**GC default: skinny index plus per-key data PK. Do not cluster
-`business_key` under `(namespace, key_group, bucket)` on the data tables** —
-`load_raw` is per key and a key group is unbounded, so that clustering would
-put every key in the group+bucket into one partition. That layout cannot list
-expired buckets, so `commit_events` also writes one payload-free index.
+**GC default: per-key data partitions, and a minute split only on raw.**
+Do not cluster `business_key` under `(namespace, key_group)` on the data
+tables — a key group is unbounded. Raw is the one table where a 60-second
+partition caps a hot key over a long window. Scylla does not make that split.
+Tiles are one cell per `tile_start`, and triggers are one due row, so a
+minute column there only forces the read to name every minute. `commit_events`
+writes a payload-free index of the raw minutes, because a raw partition
+delete cannot discover its keys any other way.
 
 ```sql
 -- Skinny GC index: no payloads, no versions.
@@ -923,13 +926,12 @@ CREATE TABLE window_tiles (
     key_group      int,
     business_key   blob,
     granularity_ms bigint,
-    bucket_start   bigint,
     tile_start     bigint,
     attempt        bigint,
     epoch          bigint,
     payload        blob,
     PRIMARY KEY (
-        (namespace, key_group, business_key, granularity_ms, bucket_start),
+        (namespace, key_group, business_key, granularity_ms),
         tile_start, attempt, epoch
     )
 ) WITH CLUSTERING ORDER BY (tile_start ASC, attempt DESC, epoch DESC);
@@ -944,9 +946,8 @@ CREATE TABLE window_key_states (
     PRIMARY KEY ((namespace, key_group, business_key), attempt, epoch)
 ) WITH CLUSTERING ORDER BY (attempt DESC, epoch DESC);
 
-CREATE TABLE window_due (
+CREATE TABLE window_triggers (
     namespace    blob,
-    bucket_start bigint,
     kg_shard     int,
     fire_ts      bigint,
     fire_seq     bigint,
@@ -957,7 +958,7 @@ CREATE TABLE window_due (
     attempt      bigint,
     epoch        bigint,
     PRIMARY KEY (
-        (namespace, bucket_start, kg_shard),
+        (namespace, kg_shard),
         fire_ts, fire_seq, business_key, trigger_kind, window_id,
         attempt, epoch
     )
@@ -970,20 +971,23 @@ CREATE TABLE window_due (
 - There is no `window_recovery_bases`, no `window_kg_lease`, and no per-key
   pin table. The WO cut lives in memory, restored from the blob; the reader's
   cut lives in `window_kg_meta`.
-- `window_kg_buckets`: `commit_events` upserts `business_key` unversioned.
-  `maintain` scans `bucket_start < floor_bucket` per owned group, then deletes
-  that key's raw partition for the bucket, every tile partition for the same
-  key+bucket, and the index row. `floor_bucket` is the first bucket still
-  overlapping the floor; only whole buckets below it are dropped.
-- `window_raw`: **one CQL row per event**, clustered by event time. Do not
-  pack a batch into one blob.
-- `window_tiles` / `window_key_states`: versioned, and they accumulate one row
-  per write until GC collapses them — see *Per-cell version retention*, which
-  is not optional.
-- `window_due`: immutable due work, versioned like raw, locality
-  `(namespace, bucket_start, kg_shard)` where
-  `kg_shard = key_group * SHARD_COUNT / max_parallelism` and `SHARD_COUNT` is
-  a store constant (e.g. 32 or 64), not `p`. WRO does not read it.
+- `window_kg_buckets`: `commit_events` upserts `business_key` unversioned, one
+  row per key per raw minute. `maintain` scans `bucket_start < floor_bucket`
+  per owned group, then deletes that key's raw partition and the index row.
+  `floor_bucket` is the minute containing the data floor; only whole minutes
+  below it are dropped.
+- `window_raw`: **one CQL row per event**, clustered by event time, partitioned
+  by the 60-second `bucket_start`. Do not pack a batch into one blob. `load_raw`
+  issues one query per minute in the run.
+- `window_tiles`: one partition per key per granularity, clustered by
+  `tile_start`. No minute column. A read is
+  `tile_start >= ? AND tile_start < ?`. Versioned, and cells accumulate until
+  the three-slot trim — see *Per-cell version retention*.
+- `window_key_states`: one partition per key, no time column. Same version trim.
+- `window_triggers`: one due row per fire, versioned like raw. Partition
+  `(namespace, kg_shard)` where
+  `kg_shard = key_group * 32 / max_parallelism`. No minute column. WRO does
+  not read it.
 
 ---
 
@@ -994,10 +998,13 @@ For one key (streaming and request ingest are the same path):
 1. Derive `key_group` from the key hash and the client's `max_p`.
 2. Load writer `KeyState` (WO filter).
 3. Allocate `epoch = next_epoch[g]++`.
-4. UNLOGGED BATCH per touched partition — changed raw, tiles, `KeyState`, due
-   rows, all at `(my_attempt, epoch)`; upsert `window_kg_buckets`
-   unversioned. Issue the per-partition batches concurrently. Never a logged
-   batch, never across partitions.
+4. UNLOGGED BATCH per touched partition — raw per minute, tiles per
+   granularity, `KeyState`, triggers, all at `(my_attempt, epoch)`; upsert
+   `window_kg_buckets` unversioned for each raw minute. Issue the
+   per-partition batches concurrently. The `key_state` read and the tile
+   reads overlap; the commit waits for both. Never a logged batch, never
+   across partitions. Do not retry `commit_events`: a second call allocates
+   a new epoch, and triggers are not collapsed by version.
 5. Register `epoch` as in flight; retire on ack. A timeout keeps it in flight
    and blocks the cut.
 
@@ -1013,59 +1020,36 @@ visible(row) ⇔ row.attempt == my_attempt OR cp_cut[g].allows(row.version)
 ```
 
 **`key_state`** is the hot path, once per key per batch. Clustering is
-`(attempt DESC, epoch DESC)` and per-cell retention bounds the partition, so
-**one** bounded read resolves it:
+`(attempt DESC, epoch DESC)`. One unpaged read of the partition, no `LIMIT`:
 
 ```cql
 SELECT attempt, epoch, key_state FROM window_key_states
  WHERE namespace = ? AND key_group = ? AND business_key = ?
- LIMIT 8
 ```
 
-Keep the first row that passes the filter. Do **not** walk one query per
-candidate attempt up front: that is `1 + |history|` round trips on an idle
-key whose last writer sits at the bottom of a long history.
-
-**If every returned row is filtered out, the fallback is mandatory**: double
-the `LIMIT` to a cap, and if the rows are still all filtered, issue one
-restricted query per history entry, newest attempt first, until a row is
-found or the history is exhausted.
-
-```cql
-SELECT key_state FROM window_key_states
- WHERE namespace = ? AND key_group = ? AND business_key = ?
-   AND attempt = ? AND epoch <= ?
- LIMIT 1
-```
-
-"All rows filtered" is **not** evidence that the key has no state. It is the
-expected shape when a zombie rewrote the key many times after the checkpoint
-and GC has not swept the partition yet: the newest versions are all above
-their attempt's cut entry, and the committed row sits below them. Treating
-that as `KeyState::default()` resets `next_seq` and drops
-`evaluation.through`, which produces duplicate emits and colliding raw
-cursors — a silent correctness failure, not a slow path. Only an exhausted
-history may conclude the key is absent. Never `SELECT *` unbounded.
+Keep the first row that passes the filter. A zombie can stack versions above
+the committed row; stopping early and returning `KeyState::default()` resets
+`next_seq` and drops `evaluation.through`. The key is absent only when every
+returned row was filtered out. Do not walk one query per history entry.
 
 **Raw and tiles.** Slice time in CQL, filter versions client-side, keep the
-first (newest) visible row per cell, then deduplicate raw by `Cursor`. Read
-amplification is proportional to retained versions per cell, which is why
+first (newest) visible row per cell, then deduplicate raw by `Cursor`. Raw
+is one query per 60-second bucket in the run. Tiles are one query per run.
+Read amplification is proportional to retained versions per cell, which is why
 per-cell retention is correctness-adjacent rather than a background nicety.
 
-**Due work** is one CQL hop with the same filter. Mid-shard seek uses the last
-**raw** clustering tuple, even if filtered out:
+**Triggers** are one unpaged query per shard this task's key groups map to,
+with the same visibility filter:
 
-```text
-WHERE namespace = ? AND bucket_start = ? AND kg_shard = ?
-  AND (fire_ts, fire_seq, business_key, trigger_kind, window_id, attempt, epoch)
-      > (?, ?, ?, ?, ?, ?, ?)
+```cql
+WHERE namespace = ? AND kg_shard = ?
+  AND (fire_ts, fire_seq) > (?, ?)
   AND fire_ts <= ?
-LIMIT ?
 ```
 
-The client drops key groups outside the bound range. Do not use `OFFSET`,
-native paging state, a second `fire_ts >=` query, a seek on `fire_ts` alone,
-or an unpaged read of the whole range.
+The first watermark has no lower bound. A closing watermark passes
+`fire_ts <= i64::MAX`. The client drops key groups outside the owned range.
+No bucket list, no `LIMIT`, no paging.
 
 ---
 
@@ -1089,22 +1073,19 @@ reads no due work, no WO cache, no master, no checkpoint metadata.
 
 ## Due-work index (decision)
 
-Today only `WindowTriggerKind::RowEmit` exists (`WindowEnd` bails in
-`eval/advance.rs`) and WO records one due row per accepted raw row, so
-`window_due` is a versioned 1:1 shadow of `window_raw`. The costs are real:
-double write volume, an extra round trip per key per batch, a write hotspot on
-a few dozen partitions per bucket, tombstone-heavy paging scans.
+WO records one `window_triggers` row per due fire. That is a 1:1 shadow of
+accepted raw rows, partitioned across 32 `kg_shard` values rather than by
+minute. The minute column was dropped: GC bounds the table with one
+clustering-range delete per shard, and a range delete cannot cross partition
+keys. The 60-second split does not remove the hotspot those 32 partitions
+are. A head read seeks `fire_ts` after the frontier, so it does not overlap
+the deleted prefix.
 
-**v1 keeps it as specified.** It is correct under the version filter, has no
-superseded versions to collapse, and is the contract
-[#296](https://github.com/volga-project/volga/pull/296) already builds on.
+**v1 keeps one row per fire.** It is correct under the version filter.
 
-**Follow-up, tracked separately:** replace it with a skinny unversioned "this
-key has due work in this bucket" index — the same shape as
-`window_kg_buckets`, `O(keys x buckets)` instead of `O(events)`. Due cursors
-are recoverable from the key's raw rows and `evaluation.through`, which
-advance already loads. This changes the `load_triggers` contract and the
-operator's paging, so it is not folded into the protocol change.
+**Follow-up, tracked separately:** a skinny unversioned index, so a hot shard
+is not the due table. That replaces this layout; it is not a reason to put
+the minute column back.
 
 ---
 
@@ -1114,8 +1095,8 @@ Foyer is optional and WO-only, keyed:
 
 ```text
 meta: PartitionKey -> KeyState
-data: (PartitionKey, family, bucket) -> materialized writer-view data
-due:  (namespace, bucket, kg_shard) -> immutable due entries
+data: (PartitionKey, family, raw bucket | tile granularity) -> materialized writer-view data
+due:  (namespace, kg_shard) -> immutable due entries
 ```
 
 Cleared before each execution attempt. WRO bypasses it entirely.
@@ -1167,8 +1148,11 @@ intervals, so the result is a silent undercount. Deriving the floor from the
 committed watermark is exactly what makes it impossible for GC to outrun what
 a restore will need.
 
-This applies to consumed due-row deletes on the same terms: `fire_at.ts <=
-committed floor`, not the live watermark.
+Consumed triggers are a different cut of the same committed watermark:
+`fire_at.ts <= committed_wm`, not the live watermark and not the data floor.
+The floor is for raw and tiles a later window still reads. The emit path
+reloads triggers only after the committed frontier, so a trigger at or behind
+it is not needed again.
 
 Retention is asynchronous and lags the floor; that is fine in both directions
 — the floor is what readers are promised, and GC only ever has less deleted
@@ -1225,17 +1209,23 @@ the two ends. A request deadline is operational hygiene, not the fence.
 
 ### Rest of `maintain`
 
-- drop consumed due rows (`fire_at.ts <= committed floor`) with a `fire_ts`
-  clustering-range delete on shards overlapping the owned range;
+- drop consumed triggers (`fire_at.ts <= committed_wm`) with one
+  `fire_ts <= ?` range delete per shard this task fully owns. A shard is
+  fully owned only when every key group that maps to it is inside the task
+  range; a shared shard is skipped, because the delete cannot name
+  `key_group`. In-memory maintain uses the same watermark bound;
 - scan `window_kg_buckets` for `bucket_start < floor_bucket` per owned group
-  and delete the matching raw/tile partitions and index row;
+  and delete the matching raw partition and index row;
+- for each key in that scan, range-delete tiles that end at or below the
+  floor (`tile_start + granularity <= floor`), then trim tile versions once
+  per key per granularity;
 - drop a `window_kg_meta` row only when the whole group is gone;
 - do **not** GC with a group-wide version high-water mark.
 
 **In-flight requests.** A request pins its cut at start. Deleting a version
-named by a live or previous cut is forbidden by the rule above, and whole
-buckets only go below `floor_bucket`, which a covered request never reads.
-No pin refcount table.
+named by a live or previous cut is forbidden by the rule above. Raw minutes
+and tiles go away only below the data floor, which a covered request never
+reads. No pin refcount table.
 
 TTL/TWCS may expire physical SSTables only when consistent with the published
 floor. InMem applies the same logical rules immediately inside `maintain`.
@@ -1246,8 +1236,8 @@ floor. InMem applies the same logical rules immediately inside `maintain`.
 
 | Operation | Scylla round trips | LWT |
 |---|---|---|
-| Ingest, one key-batch | 1 bounded `key_state` read + 1 read per (granularity, bucket) tile set; writes 1 per touched partition, concurrent | none |
-| WO advance page | 1 due-work read + the per-key reads it already needed | none |
+| Ingest, one key-batch | 1 unpaged `key_state` read, overlapped with 1 tile read per granularity run; writes 1 per touched partition (raw still one per minute), concurrent | none |
+| WO due pass | 1 unpaged trigger read per touched shard + the per-key reads it already needed | none |
 | WRO lookup, `Committed` | 1 metadata read + planned raw/tile reads | none |
 | WRO lookup, `Fresh` | same + 1 bounded raw slice over the head | none |
 | Checkpoint barrier | 0 | none |
@@ -1316,7 +1306,7 @@ Storage per cell after GC: at most three versions. Control-plane blob:
 ## Future next steps
 
 `RestorePlanner` identity mapping on master must grow the range intersection
-described above; Scylla's `maintain` implementation remains TODO.
+described above. Scylla `maintain` is [#289](https://github.com/volga-project/volga/pull/289).
 
 **WRO metadata cache.** Removes one hop from every request. The
 pin-generation re-read already makes it safe rather than unsound — a stale
