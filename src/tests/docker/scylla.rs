@@ -109,7 +109,7 @@ async fn connect(prefix: &str) -> ScyllaWindowStore {
 
 #[tokio::test]
 #[ignore]
-async fn scylla_commit_roundtrip() {
+async fn window_scylla_store_commit_roundtrip() {
     let store = connect("volga_roundtrip").await;
     let ns = StateNamespace::new(b"op");
     let client = store.client(scope(&ns, 1));
@@ -209,7 +209,7 @@ async fn scylla_commit_roundtrip() {
 
 #[tokio::test]
 #[ignore]
-async fn scylla_reads_across_minute_buckets() {
+async fn window_scylla_store_reads_across_minute_buckets() {
     let store = connect("volga_buckets").await;
     let ns = StateNamespace::new(b"op");
     let client = store.client(scope(&ns, 1));
@@ -281,7 +281,7 @@ async fn scylla_reads_across_minute_buckets() {
 
 #[tokio::test]
 #[ignore]
-async fn scylla_overlay_hides_other_attempt() {
+async fn window_scylla_store_overlay_hides_other_attempt() {
     let store = connect("volga_overlay").await;
     let ns = StateNamespace::new(b"op");
     let writer = store.client(scope(&ns, 1));
