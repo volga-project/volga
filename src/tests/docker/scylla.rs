@@ -506,6 +506,27 @@ async fn window_scylla_store_maintain_gc() {
         }
     }
 
+    let expired_only = PartitionKey {
+        namespace: ns.bytes.clone(),
+        business_key: 1u64.to_le_bytes().to_vec(),
+    };
+    for _ in 0..3 {
+        writer
+            .commit_events(
+                &expired_only,
+                0,
+                &batch(&[(1_000, 1)]),
+                &TileMap::new(),
+                &KeyState {
+                    next_seq: 1,
+                    ..Default::default()
+                },
+                &[],
+            )
+            .await
+            .unwrap();
+    }
+
     let task_state = WindowOperatorState::for_test(
         Arc::new(writer.clone()) as Arc<dyn WindowOperatorStore>,
         ns.clone(),
@@ -593,6 +614,20 @@ async fn window_scylla_store_maintain_gc() {
         ),
         vec![(1, 2), (1, 4), (1, 10)],
         "key state keeps the three version slots"
+    );
+    assert_eq!(
+        sorted(
+            query::<(i64, i64)>(
+                &store,
+                &format!(
+                    "SELECT attempt, epoch FROM {ks}.window_key_states WHERE namespace = ? AND key_group = ? AND business_key = ?"
+                ),
+                (ns_bytes.clone(), 0_i32, expired_only.business_key.clone()),
+            )
+            .await,
+        ),
+        vec![(1, 13)],
+        "a key whose minutes all expired still drops versions outside the three slots"
     );
     assert_eq!(
         query::<(i64,)>(

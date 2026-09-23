@@ -285,7 +285,11 @@ async fn state_only_admits_late_rows_above_retention_floor() {
     };
     let mut h = Harness::new(cfg).await;
     h.ingest(
-        batch(vec![1_000, 5_000, 10_000], vec![1.0, 2.0, 3.0], vec!["A", "A", "A"]),
+        batch(
+            vec![1_000, 5_000, 10_000],
+            vec![1.0, 2.0, 3.0],
+            vec!["A", "A", "A"],
+        ),
         "A",
     )
     .await;
@@ -301,10 +305,25 @@ async fn state_only_admits_late_rows_above_retention_floor() {
     .expect("watermark");
     h.complete_checkpoint(1).await;
     // floor = 10000 - 5000 = 5000. Live watermark is 10000.
-    h.ingest(batch(vec![6_000, 4_000], vec![4.0, 5.0], vec!["A", "A"]), "A")
-        .await;
+    // GC keeps ts >= floor, so an event exactly on the floor is admitted.
+    h.ingest(
+        batch(vec![6_000, 4_000], vec![4.0, 5.0], vec!["A", "A"]),
+        "A",
+    )
+    .await;
+    h.ingest(
+        batch(vec![5_000, 4_000], vec![6.0, 7.0], vec!["B", "B"]),
+        "B",
+    )
+    .await;
     let ts = raw_timestamps(&h, "A").await;
-    assert!(ts.contains(&6_000), "late row above floor must be stored, got {ts:?}");
-    assert!(!ts.contains(&4_000), "row at or behind floor must be dropped, got {ts:?}");
+    assert!(
+        ts.contains(&6_000),
+        "late row above floor must be stored, got {ts:?}"
+    );
+    assert!(
+        !ts.contains(&4_000),
+        "row behind floor must be dropped, got {ts:?}"
+    );
+    assert_eq!(raw_timestamps(&h, "B").await, vec![5_000]);
 }
-

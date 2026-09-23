@@ -1,6 +1,6 @@
 use std::any::Any;
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use arrow::array::{RecordBatch, TimestampMillisecondArray, UInt64Array};
@@ -40,7 +40,9 @@ pub struct WindowOperatorState {
     pub watermark_frontier: AtomicI64,
     /// Watermark of the last **completed** checkpoint. GC reads this, never the live frontier.
     committed_wm: AtomicI64,
-    /// `StateOnly` admits on the committed retention floor, not the live watermark.
+    /// Highest checkpoint id applied by `notify_checkpoint_complete`.
+    applied_checkpoint_id: AtomicU64,
+    /// `StateOnly` admits `ts >=` the committed retention floor, not the live watermark.
     state_only: bool,
     /// Cuts captured at each barrier, published on completion (#300).
     pending_checkpoints: Mutex<HashMap<u64, WindowStateSnapshot>>,
@@ -78,6 +80,7 @@ impl WindowOperatorState {
             max_window_length_ms,
             watermark_frontier: AtomicI64::new(WATERMARK_UNSET),
             committed_wm: AtomicI64::new(WATERMARK_UNSET),
+            applied_checkpoint_id: AtomicU64::new(0),
             state_only: false,
             pending_checkpoints: Mutex::new(HashMap::new()),
             #[cfg(test)]
@@ -214,6 +217,12 @@ impl WindowOperatorState {
         self.watermark_frontier
             .store(restored_wm, Ordering::Release);
         self.committed_wm.store(restored_wm, Ordering::Release);
+        if let Some(id) = restore.checkpoint_id {
+            let applied = self.applied_checkpoint_id.load(Ordering::Acquire);
+            if id > applied {
+                self.applied_checkpoint_id.store(id, Ordering::Release);
+            }
+        }
         Ok(())
     }
 
@@ -227,10 +236,22 @@ impl WindowOperatorState {
         let Some(snap) = snap else {
             return Ok(());
         };
-        self.committed_wm.store(
-            snap.watermark_frontier.unwrap_or(WATERMARK_UNSET),
-            Ordering::Release,
-        );
+        // A later checkpoint may share this watermark and still move the cut.
+        // An older id must not rewind either one.
+        let applied = self.applied_checkpoint_id.load(Ordering::Acquire);
+        if checkpoint_id <= applied {
+            self.pending_checkpoints
+                .lock()
+                .expect("pending_checkpoints")
+                .remove(&checkpoint_id);
+            return Ok(());
+        }
+        if let Some(wm) = snap.watermark_frontier {
+            let current = self.committed_wm.load(Ordering::Acquire);
+            if current == WATERMARK_UNSET || wm >= current {
+                self.committed_wm.store(wm, Ordering::Release);
+            }
+        }
         self.store
             .on_checkpoint_complete(
                 checkpoint_id,
@@ -239,6 +260,8 @@ impl WindowOperatorState {
                 self.retention_floor_at(snap.watermark_frontier),
             )
             .await?;
+        self.applied_checkpoint_id
+            .store(checkpoint_id, Ordering::Release);
         self.pending_checkpoints
             .lock()
             .expect("pending_checkpoints")
@@ -262,7 +285,8 @@ impl WindowOperatorState {
             self.watermark_frontier()
         };
 
-        let (accepted, dropped) = drop_late_entries(&batch, self.ts_column_index, cutoff);
+        let (accepted, dropped) =
+            drop_late_entries(&batch, self.ts_column_index, cutoff, self.state_only);
         if accepted.num_rows() == 0 {
             return dropped;
         }
@@ -386,12 +410,13 @@ fn append_seq_no_column(batch: &RecordBatch, start_seq: u64) -> RecordBatch {
     RecordBatch::try_new(schema, columns).expect("append seq")
 }
 
-/// Drop rows at or behind the admission cutoff.
-/// Emit: live watermark. StateOnly: committed retention floor (`None` admits all).
+/// Emit drops `ts <= watermark`. StateOnly drops `ts <` the committed floor
+/// (`None` admits all), matching GC which keeps `ts >= floor`.
 fn drop_late_entries(
     batch: &RecordBatch,
     ts_column_index: usize,
     cutoff: Option<i64>,
+    inclusive: bool,
 ) -> (RecordBatch, usize) {
     let ts = batch
         .column(ts_column_index)
@@ -400,7 +425,14 @@ fn drop_late_entries(
         .expect("ts");
     let mut keep = Vec::new();
     for i in 0..batch.num_rows() {
-        if cutoff.map_or(true, |floor| ts.value(i) > floor) {
+        let admit = cutoff.map_or(true, |floor| {
+            if inclusive {
+                ts.value(i) >= floor
+            } else {
+                ts.value(i) > floor
+            }
+        });
+        if admit {
             keep.push(i as u32);
         }
     }
@@ -414,4 +446,65 @@ fn drop_late_entries(
     let indices = arrow::array::UInt32Array::from(keep);
     let kept = arrow::compute::take_record_batch(batch, &indices).expect("take");
     (kept, dropped)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::runtime::operators::window::model::StateNamespace;
+    use crate::runtime::operators::window::store::backend::InMemWindowStore;
+
+    fn state_at(ns: &StateNamespace, watermark: i64) -> WindowOperatorState {
+        let store = InMemWindowStore::new();
+        let state = WindowOperatorState::for_test(
+            Arc::new(store.client(WindowStoreTaskScope::for_test(ns.clone()))),
+            ns.clone(),
+            Arc::from("notify"),
+            0,
+            Arc::new(BTreeMap::new()),
+            0,
+            0,
+        );
+        state.watermark_frontier.store(watermark, Ordering::Release);
+        state
+    }
+
+    #[tokio::test]
+    async fn older_notify_does_not_rewind_a_newer_checkpoint() {
+        let ns = StateNamespace::new(b"op");
+        let state = state_at(&ns, 5_000);
+        state.checkpoint(1).await.unwrap();
+        state.notify_checkpoint_complete(1).await.unwrap();
+        state.watermark_frontier.store(5_000, Ordering::Release);
+        state.checkpoint(2).await.unwrap();
+        state.notify_checkpoint_complete(2).await.unwrap();
+        assert_eq!(state.committed_watermark(), Some(5_000));
+        assert_eq!(state.applied_checkpoint_id.load(Ordering::Acquire), 2);
+
+        state.watermark_frontier.store(10_000, Ordering::Release);
+        state.checkpoint(3).await.unwrap();
+        state.notify_checkpoint_complete(3).await.unwrap();
+        state.notify_checkpoint_complete(1).await.unwrap();
+        state.notify_checkpoint_complete(2).await.unwrap();
+        assert_eq!(state.committed_watermark(), Some(10_000));
+        assert_eq!(state.applied_checkpoint_id.load(Ordering::Acquire), 3);
+    }
+
+    #[tokio::test]
+    async fn restore_ignores_an_older_notify() {
+        let ns = StateNamespace::new(b"op");
+        let state = state_at(&ns, 10_000);
+        let snap = state.checkpoint(6).await.unwrap();
+        let restored = state_at(&ns, 0);
+        restored.restore(snap).await.unwrap();
+        assert_eq!(restored.committed_watermark(), Some(10_000));
+
+        restored.watermark_frontier.store(1_000, Ordering::Release);
+        restored.checkpoint(5).await.unwrap();
+        restored.notify_checkpoint_complete(5).await.unwrap();
+        assert_eq!(restored.committed_watermark(), Some(10_000));
+        assert_eq!(restored.applied_checkpoint_id.load(Ordering::Acquire), 6);
+    }
 }
