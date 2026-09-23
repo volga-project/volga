@@ -1,17 +1,14 @@
-//! Scylla WO checkpoint / restore. Barrier captures cuts; publication waits
-//! for completion. Request-mode `window_kg_meta` is trigger 1 (complete) and
-//! trigger 2 (heal at open).
+//! Scylla WO checkpoint / restore. The barrier captures cuts. Completion does
+//! not write Scylla; the next attempt restores the snapshot it is given.
 
 use std::collections::HashMap;
 
 use anyhow::Result;
-use futures::future::try_join_all;
 
 use crate::runtime::operators::window::store::backend::{
     CutHistory, WindowBackendSnapshot, WindowStoreTaskScope,
 };
 
-use super::meta::{self, PublishPayload};
 use super::store::ScyllaWindowStoreClient;
 
 pub(super) async fn checkpoint(client: &ScyllaWindowStoreClient) -> Result<WindowBackendSnapshot> {
@@ -75,64 +72,21 @@ pub(super) async fn restore(
 }
 
 pub(super) async fn prepare_attempt(
-    client: &ScyllaWindowStoreClient,
-    restored: &WindowBackendSnapshot,
-    committed_wm: Option<i64>,
-    retention_floor: Option<i64>,
-    restored_checkpoint_id: Option<u64>,
+    _client: &ScyllaWindowStoreClient,
+    _restored: &WindowBackendSnapshot,
+    _committed_wm: Option<i64>,
+    _retention_floor: Option<i64>,
+    _restored_checkpoint_id: Option<u64>,
 ) -> Result<()> {
-    if !client.scope.request_mode {
-        return Ok(());
-    }
-    let WindowBackendSnapshot::Versioned { range, cuts, .. } = restored else {
-        anyhow::bail!("Scylla prepare_attempt requires a Versioned snapshot");
-    };
-    anyhow::ensure!(
-        cuts.len() == range.end.saturating_sub(range.start),
-        "Versioned cuts must be parallel to the bound key-group range"
-    );
-    try_join_all(cuts.iter().enumerate().map(|(offset, cut)| {
-        let kg = (range.start + offset) as i32;
-        meta::heal_or_take(
-            client,
-            kg,
-            cut,
-            committed_wm,
-            retention_floor,
-            restored_checkpoint_id,
-        )
-    }))
-    .await?;
     Ok(())
 }
 
 pub(super) async fn on_checkpoint_complete(
-    client: &ScyllaWindowStoreClient,
-    checkpoint_id: u64,
-    snapshot: &WindowBackendSnapshot,
-    committed_wm: Option<i64>,
-    retention_floor: Option<i64>,
+    _client: &ScyllaWindowStoreClient,
+    _checkpoint_id: u64,
+    _snapshot: &WindowBackendSnapshot,
+    _committed_wm: Option<i64>,
+    _retention_floor: Option<i64>,
 ) -> Result<()> {
-    if !client.scope.request_mode {
-        return Ok(());
-    }
-    let WindowBackendSnapshot::Versioned { range, cuts, .. } = snapshot else {
-        anyhow::bail!("Scylla on_checkpoint_complete requires a Versioned snapshot");
-    };
-    anyhow::ensure!(
-        cuts.len() == range.end.saturating_sub(range.start),
-        "Versioned cuts must be parallel to the bound key-group range"
-    );
-    try_join_all(cuts.iter().enumerate().map(|(offset, cut)| {
-        let kg = (range.start + offset) as i32;
-        let payload = PublishPayload {
-            cut: cut.clone(),
-            committed_wm,
-            retention_floor,
-            checkpoint_id,
-        };
-        async move { meta::publish(client, kg, &payload).await }
-    }))
-    .await?;
     Ok(())
 }
