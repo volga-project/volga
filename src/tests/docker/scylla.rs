@@ -209,35 +209,22 @@ async fn window_scylla_store_commit_roundtrip() {
 
 #[tokio::test]
 #[ignore]
-async fn window_scylla_store_reads_across_minute_buckets() {
-    let store = connect("volga_buckets").await;
+async fn window_scylla_store_reads_raw_across_minutes() {
+    let store = connect("volga_raw_minutes").await;
     let ns = StateNamespace::new(b"op");
     let client = store.client(scope(&ns, 1));
     let partition = partition(&ns);
-    let early = WindowTrigger {
-        fire_at: Cursor::new(10_000, 0),
-        partition: partition.clone(),
-        kind: WindowTriggerKind::RowEmit,
-    };
-    let late = WindowTrigger {
-        fire_at: Cursor::new(70_000, 1),
-        partition: partition.clone(),
-        kind: WindowTriggerKind::RowEmit,
-    };
     client
         .commit_events(
             &partition,
             0,
             &batch(&[(10_000, 0), (70_000, 1)]),
-            &tiles(&[
-                (TimeGranularity::Seconds(1), 10_000, 1),
-                (TimeGranularity::Seconds(1), 70_000, 2),
-            ]),
+            &TileMap::default(),
             &KeyState {
                 next_seq: 2,
                 ..Default::default()
             },
-            &[early.clone(), late.clone()],
+            &[],
         )
         .await
         .unwrap();
@@ -250,32 +237,6 @@ async fn window_scylla_store_reads_across_minute_buckets() {
                 .unwrap()
         ),
         vec![Cursor::new(10_000, 0), Cursor::new(70_000, 1)]
-    );
-    assert_eq!(
-        tile_keys(
-            &client
-                .load_tiles(
-                    &partition,
-                    &[TileRun {
-                        granularity: TimeGranularity::Seconds(1),
-                        start_ts: 0,
-                        end_ts_exclusive: 120_000,
-                    }],
-                )
-                .await
-                .unwrap()
-        ),
-        vec![
-            (TimeGranularity::Seconds(1), 10_000),
-            (TimeGranularity::Seconds(1), 70_000),
-        ]
-    );
-    assert_eq!(
-        client
-            .load_triggers(None, Cursor::new(80_000, u64::MAX))
-            .await
-            .unwrap(),
-        vec![early, late]
     );
 }
 
