@@ -413,8 +413,8 @@ impl OperatorTrait for WindowOperator {
         self.base.operator_config()
     }
 
-    async fn checkpoint(&mut self, _checkpoint_id: u64) -> Result<SerializedCheckpoint> {
-        let snapshot = self.state_ref().checkpoint().await?;
+    async fn checkpoint(&mut self, checkpoint_id: u64) -> Result<SerializedCheckpoint> {
+        let snapshot = self.state_ref().checkpoint(checkpoint_id).await?;
         Ok(SerializedCheckpoint::new(bincode::serialize(&snapshot)?))
     }
 
@@ -423,6 +423,12 @@ impl OperatorTrait for WindowOperator {
         let snapshot: WindowStateSnapshot = bincode::deserialize(&bytes)?;
         self.state_ref().restore(snapshot).await?;
         Ok(())
+    }
+
+    async fn notify_checkpoint_complete(&mut self, checkpoint_id: u64) -> Result<()> {
+        self.state_ref()
+            .notify_checkpoint_complete(checkpoint_id)
+            .await
     }
 }
 

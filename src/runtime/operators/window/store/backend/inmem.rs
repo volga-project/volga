@@ -1400,10 +1400,9 @@ mod tests {
         let store = InMemWindowStore::new();
         let error = client(&store, &StateNamespace::new("test-namespace"))
             .restore(&WindowBackendSnapshot::Versioned {
-                version: StateVersion {
-                    attempt: 1,
-                    epoch: 1,
-                },
+                attempt: 1,
+                range: crate::common::KeyGroupRange::full(1),
+                cuts: Vec::new(),
             })
             .await
             .unwrap_err();
