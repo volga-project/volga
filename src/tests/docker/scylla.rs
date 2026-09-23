@@ -345,7 +345,7 @@ async fn window_scylla_store_overlay_hides_other_attempt() {
 
 #[tokio::test]
 #[ignore]
-async fn scylla_restore_sees_checkpointed_prefix() {
+async fn window_scylla_store_restore_sees_checkpointed_prefix() {
     let store = connect("volga_restore").await;
     let ns = StateNamespace::new(b"op");
     let writer = store.client(scope(&ns, 1));
