@@ -13,14 +13,12 @@ use crate::runtime::operators::window::model::{
     WindowTiles, WindowTrigger, WindowTriggerKind,
 };
 use crate::runtime::operators::window::store::backend::{
-    Version, WindowBackendSnapshot, WindowOperatorStore, WindowStoreTaskScope,
+    ScyllaWindowStore, Version, WindowBackendSnapshot, WindowOperatorStore, WindowStoreTaskScope,
 };
 use crate::runtime::operators::window::store::data::cursors_from_batch;
 use crate::test_utils::window_aggs as test_utils;
 use arrow::array::RecordBatch;
 use testcontainers::{clients, GenericImage};
-
-use super::ScyllaWindowStore;
 
 fn partition(ns: &StateNamespace) -> PartitionKey {
     PartitionKey {
