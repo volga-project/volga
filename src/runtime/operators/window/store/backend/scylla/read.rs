@@ -112,23 +112,16 @@ pub(super) async fn load_tiles(
         let granularity = run.granularity;
         let start_ts = run.start_ts;
         let end_ts = run.end_ts_exclusive;
-        let last = if end_ts > start_ts {
-            end_ts.saturating_sub(1)
-        } else {
-            start_ts.saturating_sub(1)
-        };
-        for bucket in time_buckets(start_ts, last, RAW_BUCKET_MS) {
-            let session = Arc::clone(&session);
-            let select_tiles = prepared.select_tiles.clone();
-            let ns = client.scope.namespace.bytes.clone();
-            let key = partition.business_key.clone();
-            pages.push(async move {
-                let result = session
-                    .execute_unpaged(&select_tiles, (ns, kg, key, gran, bucket, start_ts, end_ts))
-                    .await?;
-                Ok::<_, anyhow::Error>((granularity, result))
-            });
-        }
+        let session = Arc::clone(&session);
+        let select_tiles = prepared.select_tiles.clone();
+        let ns = client.scope.namespace.bytes.clone();
+        let key = partition.business_key.clone();
+        pages.push(async move {
+            let result = session
+                .execute_unpaged(&select_tiles, (ns, kg, key, gran, start_ts, end_ts))
+                .await?;
+            Ok::<_, anyhow::Error>((granularity, result))
+        });
     }
     let mut out = TileMap::new();
     for (granularity, result) in try_join_all(pages).await? {

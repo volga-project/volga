@@ -9,7 +9,7 @@ use crate::runtime::operators::window::model::{
     Cursor, PartitionKey, WindowTrigger, WindowTriggerKind,
 };
 
-use super::schema::{align_down, kg_shard, TRIGGER_BUCKET_MS};
+use super::schema::kg_shard;
 use super::store::ScyllaWindowStoreClient;
 
 fn shards(range: KeyGroupRange, max_parallelism: usize) -> Vec<i32> {
@@ -18,40 +18,6 @@ fn shards(range: KeyGroupRange, max_parallelism: usize) -> Vec<i32> {
         out.insert(kg_shard(kg, max_parallelism));
     }
     out.into_iter().collect()
-}
-
-fn partitions(
-    after: Option<Cursor>,
-    through: Cursor,
-    range: KeyGroupRange,
-    max_parallelism: usize,
-) -> Vec<(i64, i32)> {
-    let shards = shards(range, max_parallelism);
-    if shards.is_empty() {
-        return Vec::new();
-    }
-    // Do not walk from unix 0 or to i64::MAX. First tick uses `through`'s
-    // bucket; close (through == MAX) stays on the frontier bucket.
-    let start = match after {
-        Some(c) => align_down(c.ts, TRIGGER_BUCKET_MS),
-        None if through.ts == i64::MAX => return Vec::new(),
-        None => align_down(through.ts, TRIGGER_BUCKET_MS),
-    };
-    let end = if through.ts == i64::MAX {
-        start
-    } else {
-        align_down(through.ts, TRIGGER_BUCKET_MS)
-    };
-    if start > end {
-        return Vec::new();
-    }
-    let mut out = Vec::new();
-    for bucket in super::schema::time_buckets(start, end, TRIGGER_BUCKET_MS) {
-        for &shard in &shards {
-            out.push((bucket, shard));
-        }
-    }
-    out
 }
 
 fn min_seek(after: Option<Cursor>) -> (i64, i64) {
@@ -107,26 +73,21 @@ pub(super) async fn load_triggers(
     after: Option<Cursor>,
     through: Cursor,
 ) -> Result<Vec<WindowTrigger>> {
-    let parts = partitions(
-        after,
-        through,
-        client.scope.key_group_range,
-        client.scope.max_parallelism,
-    );
-    if parts.is_empty() {
+    let shards = shards(client.scope.key_group_range, client.scope.max_parallelism);
+    if shards.is_empty() {
         return Ok(Vec::new());
     }
     let session = client.inner.session();
     let prepared = client.inner.prepared().await?;
     let ns = client.scope.namespace.bytes.clone();
     let seek = min_seek(after);
-    let futs = parts.into_iter().map(|(bucket, shard)| {
+    let futs = shards.into_iter().map(|shard| {
         let session = Arc::clone(&session);
         let select = prepared.select_triggers.clone();
         let ns = ns.clone();
         async move {
             let result = session
-                .execute_unpaged(&select, (ns, bucket, shard, seek.0, seek.1, through.ts))
+                .execute_unpaged(&select, (ns, shard, seek.0, seek.1, through.ts))
                 .await?;
             Ok::<_, anyhow::Error>(result)
         }
@@ -158,47 +119,4 @@ pub(super) async fn load_triggers(
     }
     selected.sort();
     Ok(selected)
-}
-
-#[cfg(test)]
-mod partition_tests {
-    use super::*;
-
-    #[test]
-    fn due_bucket_walk_is_clamped() {
-        let range = KeyGroupRange::full(1);
-        let unix = 1_700_000_000_000i64;
-        let unix_bucket = align_down(unix, TRIGGER_BUCKET_MS);
-
-        let first = partitions(None, Cursor::new(unix, 0), range, 1);
-        assert_ne!(unix_bucket, 0);
-        assert_eq!(
-            first,
-            vec![(unix_bucket, 0)],
-            "after None must not start at bucket 0 for a unix-ms through"
-        );
-
-        let close = partitions(
-            Some(Cursor::new(5_000, u64::MAX)),
-            Cursor::new(i64::MAX, u64::MAX),
-            range,
-            1,
-        );
-        assert_eq!(close.len(), 1, "through MAX must stay finite");
-        assert_eq!(close, vec![(0, 0)]);
-
-        assert!(
-            partitions(None, Cursor::new(i64::MAX, u64::MAX), range, 1).is_empty(),
-            "close without a frontier has no trigger bucket"
-        );
-        assert_eq!(
-            partitions(
-                Some(Cursor::new(0, u64::MAX)),
-                Cursor::new(TRIGGER_BUCKET_MS + 1, 0),
-                range,
-                1,
-            ),
-            vec![(0, 0), (TRIGGER_BUCKET_MS, 0)],
-        );
-    }
 }
