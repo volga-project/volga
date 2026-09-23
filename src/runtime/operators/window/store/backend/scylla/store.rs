@@ -72,8 +72,13 @@ impl ScyllaWindowStore {
         Ok(Self::new(config, Arc::clone(handle.scylla())))
     }
 
-    pub(super) fn session(&self) -> Arc<Session> {
+    pub(crate) fn session(&self) -> Arc<Session> {
         Arc::clone(&self.session)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn keyspace(&self) -> &str {
+        &self.config.keyspace
     }
 
     pub(super) async fn prepared(&self) -> Result<&PreparedDml> {

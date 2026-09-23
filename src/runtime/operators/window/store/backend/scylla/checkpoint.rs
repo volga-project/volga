@@ -50,16 +50,16 @@ pub(super) async fn restore(
     );
     let me = client.my_attempt();
     anyhow::ensure!(
-        me >= *attempt,
-        "execution attempt {me} does not dominate snapshot attempt {attempt}"
+        me > *attempt,
+        "execution attempt {me} must be newer than snapshot attempt {attempt}"
     );
     let mut by_group = HashMap::new();
     for (offset, cut) in cuts.iter().enumerate() {
         let kg = (range.start + offset) as i32;
         for e in cut.entries() {
             anyhow::ensure!(
-                me >= e.attempt,
-                "execution attempt {me} does not dominate inherited attempt {}",
+                me > e.attempt,
+                "execution attempt {me} must be newer than inherited attempt {}",
                 e.attempt
             );
         }
