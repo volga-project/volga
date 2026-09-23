@@ -12,7 +12,7 @@ pub(super) const INSERT_TRIGGERS: &str = "INSERT INTO window_triggers (namespace
 pub(super) const SELECT_KEY_STATE: &str = "SELECT attempt, epoch, key_state FROM window_key_states WHERE namespace = ? AND key_group = ? AND business_key = ?";
 pub(super) const SELECT_RAW: &str = "SELECT event_ts, seq_no, attempt, epoch, payload FROM window_raw WHERE namespace = ? AND key_group = ? AND business_key = ? AND bucket_start = ? AND event_ts >= ? AND event_ts <= ?";
 pub(super) const SELECT_TILES: &str = "SELECT tile_start, attempt, epoch, payload FROM window_tiles WHERE namespace = ? AND key_group = ? AND business_key = ? AND granularity_ms = ? AND tile_start >= ? AND tile_start < ?";
-pub(super) const SELECT_TRIGGERS: &str = "SELECT fire_ts, fire_seq, business_key, trigger_kind, window_id, key_group, attempt, epoch FROM window_triggers WHERE namespace = ? AND kg_shard = ? AND (fire_ts, fire_seq) > (?, ?) AND fire_ts <= ?";
+pub(super) const SELECT_TRIGGERS: &str = "SELECT fire_ts, fire_seq, business_key, trigger_kind, window_id, key_group, attempt, epoch FROM window_triggers WHERE namespace = ? AND kg_shard = ? AND (fire_ts, fire_seq) > (?, ?) AND (fire_ts, fire_seq) <= (?, ?)";
 
 pub(super) struct PreparedDml {
     pub(super) insert_raw: PreparedStatement,
