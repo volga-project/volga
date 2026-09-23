@@ -10,9 +10,11 @@ fi
 # Testcontainers images used by the docker test profile. Keep tags in sync with:
 # - src/tests/docker/kafka.rs (redpanda)
 # - src/tests/docker/parquet_s3.rs (localstack)
+# - src/tests/docker/scylla.rs (scylla)
 PREFETCH_IMAGES=(
   "localstack/localstack:3.0"
   "redpandadata/redpanda:latest"
+  "scylladb/scylla:5.4"
 )
 
 OPTION=""

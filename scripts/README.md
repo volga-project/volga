@@ -19,7 +19,7 @@ scripts/test all
 | `unit` | Fast tests with no in-process harness, Docker, or Kube |
 | `inprocess` | Local gRPC/cluster harness under `tests::inprocess`; concurrency 1; nextest profile 90s |
 | `default` | `unit` + `inprocess` (required PR/CI gate) |
-| `docker` | `tests::docker::` ignored tests (LocalStack, Kafka, etc.) |
+| `docker` | `tests::docker::` ignored tests (LocalStack, Kafka, Scylla, etc.) |
 | `kube` | `tests::kube::` ignored tests on Kind |
 | `all` | `default` + `docker` + `kube` |
 | `benchmark` | Benchmark filter |

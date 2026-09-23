@@ -8,6 +8,3 @@ mod triggers;
 mod write;
 
 pub use store::{ScyllaWindowStore, ScyllaWindowStoreClient};
-
-#[cfg(test)]
-mod tests;
