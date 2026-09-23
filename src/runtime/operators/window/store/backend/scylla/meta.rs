@@ -5,6 +5,8 @@
 
 use anyhow::Result;
 use scylla::client::session::Session;
+use scylla::deserialize::row::ColumnIterator;
+use scylla::deserialize::value::DeserializeValue;
 use scylla::statement::prepared::PreparedStatement;
 
 use crate::runtime::operators::window::store::backend::version::CutHistory;
@@ -37,7 +39,22 @@ async fn lwt_applied(
 ) -> Result<bool> {
     let result = session.execute_unpaged(stmt, values).await?;
     let rows = result.into_rows_result()?;
-    Ok(rows.maybe_first_row::<(bool,)>()?.map(|(a,)| a).unwrap_or(true))
+    // A conditional statement returns `[applied]` plus every table column.
+    let Some(columns) = rows.maybe_first_row::<ColumnIterator>()? else {
+        return Ok(true);
+    };
+    applied_flag(columns)
+}
+
+fn applied_flag(columns: ColumnIterator) -> Result<bool> {
+    for column in columns {
+        let column = column?;
+        if column.spec.name() != "[applied]" {
+            continue;
+        }
+        return Ok(bool::deserialize(column.spec.typ(), column.slice)?);
+    }
+    anyhow::bail!("LWT result has no [applied] column")
 }
 
 async fn select_row(
@@ -46,12 +63,10 @@ async fn select_row(
     ns: &[u8],
     kg: i32,
 ) -> Result<Option<MetaRow>> {
-    let result = session
-        .execute_unpaged(stmt, (ns.to_vec(), kg))
-        .await?;
+    let result = session.execute_unpaged(stmt, (ns.to_vec(), kg)).await?;
     let rows = result.into_rows_result()?;
-    let Some((cur_attempt, cut, _prev_cut, _prev_cp, _wm, _floor, checkpoint_id)) =
-        rows.maybe_first_row::<(
+    let Some((cur_attempt, cut, _prev_cut, _prev_cp, _wm, _floor, checkpoint_id)) = rows
+        .maybe_first_row::<(
             Option<i64>,
             Option<Vec<u8>>,
             Option<Vec<u8>>,
