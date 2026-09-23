@@ -81,22 +81,24 @@ fn contact() -> String {
             let docker = Box::leak(Box::new(clients::Cli::default()));
             // One shard stays under the default fs.aio-max-nr (65536). Seastar
             // asks for ~50k slots per shard and refuses to boot past that.
-            let image = GenericImage::new("scylladb/scylla", "5.4")
-                .with_exposed_port(9042)
-                .with_wait_for(WaitFor::message_on_stdout(
-                    "Starting listening for CQL clients",
-                ));
-            let container = docker.run(RunnableImage::from((
-                image,
-                vec![
-                    "--smp".to_string(),
-                    "1".to_string(),
-                    "--memory".to_string(),
-                    "1G".to_string(),
-                    "--overprovisioned".to_string(),
-                    "1".to_string(),
-                ],
-            )));
+            let image = GenericImage::new("scylladb/scylla", "5.4").with_wait_for(
+                WaitFor::message_on_stdout("Starting listening for CQL clients"),
+            );
+            // Publish only 9042. Publishing every EXPOSE port collides on the host.
+            let container = docker.run(
+                RunnableImage::from((
+                    image,
+                    vec![
+                        "--smp".to_string(),
+                        "1".to_string(),
+                        "--memory".to_string(),
+                        "1G".to_string(),
+                        "--overprovisioned".to_string(),
+                        "1".to_string(),
+                    ],
+                ))
+                .with_mapped_port((0, 9042)),
+            );
             let port = container.get_host_port_ipv4(9042);
             let contact = format!("127.0.0.1:{port}");
             std::mem::forget(container);
