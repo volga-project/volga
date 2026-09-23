@@ -521,7 +521,7 @@ impl InMemWindowStore {
         task_id: &str,
     ) -> Result<u64> {
         self.triggers.write().retain(|trigger| {
-            !Self::owns_partition(&trigger.partition, scope) || trigger.fire_at.ts > floor
+            !Self::owns_partition(&trigger.partition, scope) || trigger.fire_at.ts > watermark
         });
         let slots: Vec<_> = self
             .partitions

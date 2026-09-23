@@ -98,11 +98,8 @@ async fn consumed_triggers_are_removed_after_completed_watermark() {
     let _ = h.drain_passthrough_watermark().await;
     h.complete_checkpoint(1).await;
     h.run_maintenance().await;
-    // Consumed-due GC is deferred. Maintain only drops triggers at or behind
-    // the data floor (`committed_wm - window - lateness`), not every fired row.
-    // Here the floor is below 0, so fired rows at 1000/2000 stay.
-    assert_eq!(due_trigger_count(&h, 2_000).await, 2);
-    assert_eq!(due_trigger_count(&h, 8_000).await, 3);
+    assert_eq!(due_trigger_count(&h, 2_000).await, 0);
+    assert_eq!(due_trigger_count(&h, 8_000).await, 1);
 }
 
 #[tokio::test]
@@ -124,15 +121,14 @@ async fn future_triggers_remain_across_partial_watermarks() {
     h.complete_checkpoint(1).await;
     h.run_maintenance().await;
     assert_eq!(partial.num_rows(), 2);
-    assert_eq!(due_trigger_count(&h, 5_000).await, 3);
+    assert_eq!(due_trigger_count(&h, 5_000).await, 1);
 
     let rest = h.watermark_and_output(5_000).await;
     let _ = h.drain_passthrough_watermark().await;
     h.complete_checkpoint(2).await;
     h.run_maintenance().await;
     assert_eq!(rest.num_rows(), 1);
-    // Floor is still below the events; consumed-due GC is deferred.
-    assert_eq!(due_trigger_count(&h, 5_000).await, 3);
+    assert_eq!(due_trigger_count(&h, 5_000).await, 0);
 }
 
 #[tokio::test]
@@ -220,8 +216,7 @@ async fn checkpoint_before_cleanup_restores_pre_prune_state() {
     original.run_maintenance().await;
     // floor = 10000 - 5000 = 5000 → only ts=10000 remains
     assert_eq!(raw_timestamps(&original, "A").await, vec![10_000]);
-    // ts=10000 is above the data floor, so its due row remains until consumed-due GC.
-    assert_eq!(due_trigger_count(&original, 10_000).await, 1);
+    assert_eq!(due_trigger_count(&original, 10_000).await, 0);
 
     let mut restored = Harness::new(WindowOperatorConfig::new(exec)).await;
     restored
