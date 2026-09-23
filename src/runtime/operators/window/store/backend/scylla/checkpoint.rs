@@ -71,16 +71,6 @@ pub(super) async fn restore(
     Ok(())
 }
 
-pub(super) async fn prepare_attempt(
-    _client: &ScyllaWindowStoreClient,
-    _restored: &WindowBackendSnapshot,
-    _committed_wm: Option<i64>,
-    _retention_floor: Option<i64>,
-    _restored_checkpoint_id: Option<u64>,
-) -> Result<()> {
-    Ok(())
-}
-
 pub(super) async fn on_checkpoint_complete(
     _client: &ScyllaWindowStoreClient,
     _checkpoint_id: u64,

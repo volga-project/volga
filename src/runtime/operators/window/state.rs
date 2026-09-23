@@ -162,14 +162,6 @@ impl WindowOperatorState {
             restore.watermark_frontier.unwrap_or(WATERMARK_UNSET),
             Ordering::Release,
         );
-        self.store
-            .prepare_attempt(
-                &restore.backend,
-                restore.watermark_frontier,
-                self.retention_floor_at(restore.watermark_frontier),
-                restore.checkpoint_id,
-            )
-            .await?;
         Ok(())
     }
 
