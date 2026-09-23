@@ -372,6 +372,12 @@ async fn window_scylla_store_restore_sees_checkpointed_prefix() {
         WindowBackendSnapshot::InMemory { .. } => panic!("expected Versioned snapshot"),
     }
 
+    let same_attempt = writer.restore(&snap).await.unwrap_err();
+    assert!(
+        same_attempt.to_string().contains("must be newer"),
+        "{same_attempt}"
+    );
+
     let successor = store.client(scope(&ns, 2));
     successor.restore(&snap).await.unwrap();
     assert_eq!(
@@ -403,5 +409,107 @@ async fn window_scylla_store_restore_sees_checkpointed_prefix() {
     assert_eq!(
         other.load_key_state(&partition).await.unwrap(),
         KeyState::default()
+    );
+}
+
+fn request_scope(ns: &StateNamespace, attempt: u64) -> WindowStoreTaskScope {
+    let mut scope = scope(ns, attempt);
+    scope.request_mode = true;
+    scope
+}
+
+async fn meta_attempt_and_checkpoint(
+    store: &ScyllaWindowStore,
+    ns: &[u8],
+    kg: i32,
+) -> Option<(i64, i64)> {
+    let cql = format!(
+        "SELECT cur_attempt, checkpoint_id FROM {}.window_kg_meta WHERE namespace = ? AND key_group = ?",
+        store.keyspace()
+    );
+    let result = store
+        .session()
+        .query_unpaged(cql, (ns.to_vec(), kg))
+        .await
+        .expect("select window_kg_meta");
+    result
+        .into_rows_result()
+        .expect("meta rows")
+        .maybe_first_row::<(Option<i64>, Option<i64>)>()
+        .expect("decode meta")
+        .map(|(attempt, checkpoint_id)| (attempt.unwrap_or(0), checkpoint_id.unwrap_or(0)))
+}
+
+#[tokio::test]
+#[ignore]
+async fn window_scylla_store_request_publish_heal_and_take() {
+    let store = connect("volga_reqmeta").await;
+    let ns = StateNamespace::new(b"op");
+    let partition = partition(&ns);
+
+    let writer = store.client(request_scope(&ns, 1));
+    writer
+        .commit_events(
+            &partition,
+            0,
+            &batch(&[(1_000, 1)]),
+            &TileMap::new(),
+            &KeyState {
+                next_seq: 2,
+                ..Default::default()
+            },
+            &[],
+        )
+        .await
+        .unwrap();
+    let snap = writer.checkpoint().await.unwrap();
+
+    let healed = store.client(request_scope(&ns, 2));
+    healed.restore(&snap).await.unwrap();
+    healed
+        .prepare_attempt(&snap, Some(1_000), Some(0), Some(4))
+        .await
+        .unwrap();
+    assert_eq!(
+        meta_attempt_and_checkpoint(&store, ns.bytes.as_slice(), 0).await,
+        Some((2, 4)),
+        "heal publishes the restored cut when the meta row is absent"
+    );
+
+    healed
+        .commit_events(
+            &partition,
+            0,
+            &batch(&[(2_000, 2)]),
+            &TileMap::new(),
+            &KeyState {
+                next_seq: 3,
+                ..Default::default()
+            },
+            &[],
+        )
+        .await
+        .unwrap();
+    let snap2 = healed.checkpoint().await.unwrap();
+    healed
+        .on_checkpoint_complete(9, &snap2, Some(2_000), Some(0))
+        .await
+        .unwrap();
+    assert_eq!(
+        meta_attempt_and_checkpoint(&store, ns.bytes.as_slice(), 0).await,
+        Some((2, 9)),
+        "complete publishes the newer cut"
+    );
+
+    let taken = store.client(request_scope(&ns, 3));
+    taken.restore(&snap2).await.unwrap();
+    taken
+        .prepare_attempt(&snap2, Some(2_000), Some(0), Some(9))
+        .await
+        .unwrap();
+    assert_eq!(
+        meta_attempt_and_checkpoint(&store, ns.bytes.as_slice(), 0).await,
+        Some((3, 9)),
+        "take_attempt moves cur_attempt and leaves the published cut"
     );
 }

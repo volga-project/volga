@@ -178,7 +178,8 @@ impl WindowOperatorState {
             .pending_checkpoints
             .lock()
             .expect("pending_checkpoints")
-            .remove(&checkpoint_id);
+            .get(&checkpoint_id)
+            .cloned();
         let Some(snap) = snap else {
             return Ok(());
         };
@@ -189,7 +190,12 @@ impl WindowOperatorState {
                 snap.watermark_frontier,
                 self.retention_floor_at(snap.watermark_frontier),
             )
-            .await
+            .await?;
+        self.pending_checkpoints
+            .lock()
+            .expect("pending_checkpoints")
+            .remove(&checkpoint_id);
+        Ok(())
     }
 
     pub async fn insert_batch(
