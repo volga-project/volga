@@ -675,8 +675,9 @@ async fn stored_versions(
     (sorted(key_states), sorted(raw))
 }
 
-/// Attempt 1 writes again after attempt 2 has restored the cut. The new row
-/// stays in Scylla. The restored reader keeps the checkpointed prefix.
+/// After restore, attempt 2 commits its own row and attempt 1 commits a later
+/// epoch. One read keeps the new row and the checkpointed prefix, and drops
+/// the zombie. Both writes stay stored.
 #[tokio::test]
 #[ignore]
 async fn window_scylla_store_restored_reader_hides_zombie_write() {
@@ -706,6 +707,20 @@ async fn window_scylla_store_restored_reader_hides_zombie_write() {
     reader.restore(&snap).await.unwrap();
     assert_eq!(reader.load_key_state(&partition).await.unwrap().next_seq, 2);
 
+    reader
+        .commit_events(
+            &partition,
+            0,
+            &batch(&[(3_000, 2)]),
+            &TileMap::new(),
+            &KeyState {
+                next_seq: 3,
+                ..Default::default()
+            },
+            &[],
+        )
+        .await
+        .unwrap();
     writer
         .commit_events(
             &partition,
@@ -721,20 +736,23 @@ async fn window_scylla_store_restored_reader_hides_zombie_write() {
         .await
         .unwrap();
 
-    assert_eq!(writer.load_key_state(&partition).await.unwrap().next_seq, 9);
-    assert_eq!(reader.load_key_state(&partition).await.unwrap().next_seq, 2);
+    let span = [raw_run((0, 0), (4_000, 0))];
+    assert_eq!(reader.load_key_state(&partition).await.unwrap().next_seq, 3);
     assert_eq!(
-        raw_cursors(
-            &reader
-                .load_raw(&partition, &[raw_run((0, 0), (3_000, 0))])
-                .await
-                .unwrap()
-        ),
-        vec![Cursor::new(1_000, 1)]
+        raw_cursors(&reader.load_raw(&partition, &span).await.unwrap()),
+        vec![Cursor::new(1_000, 1), Cursor::new(3_000, 2)]
+    );
+    assert_eq!(writer.load_key_state(&partition).await.unwrap().next_seq, 9);
+    assert_eq!(
+        raw_cursors(&writer.load_raw(&partition, &span).await.unwrap()),
+        vec![Cursor::new(1_000, 1), Cursor::new(2_000, 2)]
     );
     assert_eq!(
         stored_versions(&store, ns.bytes.as_slice(), &partition.business_key).await,
-        (vec![(1, 0), (1, 1)], vec![(1_000, 1, 0), (2_000, 1, 1)])
+        (
+            vec![(1, 0), (1, 1), (2, 0)],
+            vec![(1_000, 1, 0), (2_000, 1, 1), (3_000, 2, 0)]
+        )
     );
 }
 
