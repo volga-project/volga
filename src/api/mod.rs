@@ -21,6 +21,7 @@ pub use spec::operators::{OperatorOverride, OperatorOverrides};
 pub use spec::connectors::{DatagenSpec, RequestSourceSinkSpec, SinkSpec, SourceSpec};
 pub use spec::state::{
     CheckpointSpec, CheckpointStoreConfig, OperatorStateBackendConfig, RequestStoreConfig,
+    ScyllaConfig,
     StateSpec,
 };
 pub use spec::worker_runtime::WorkerRuntimeSpec;

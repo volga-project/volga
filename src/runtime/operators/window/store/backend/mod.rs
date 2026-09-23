@@ -7,23 +7,27 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::spec::state::{OperatorStateBackendConfig, RequestStoreConfig};
 use crate::common::KeyGroupRange;
-use crate::runtime::consts::{runtime_consts, WINDOW_PROCESS_PAGE_SIZE};
 use crate::runtime::operators::window::model::{
     Cursor, KeyState, PartitionKey, RawRun, StateNamespace, TileMap, TileRun, WindowTrigger,
 };
 use crate::runtime::operators::OperatorKind;
-use crate::runtime::state::{OperatorStore, StateRegistry};
+use crate::runtime::state::{OperatorStore, StateRegistry, StateSessionHandle};
 
 use super::WindowData;
 
+mod codec;
 mod inmem;
+mod scylla;
+mod version;
 
 pub use inmem::{InMemWindowStore, InMemWindowStoreClient};
+pub use scylla::{ScyllaWindowStore, ScyllaWindowStoreClient};
+pub use version::{Attempt, CutHistory, Version};
 
-/// Job-level execution attempt stamped on published versions.
-pub type AttemptToken = Vec<u8>;
+/// Job-level execution attempt. Durable, never reused (#156).
+pub type AttemptToken = Attempt;
 
-/// Task-execution identity stored on the writer head fence (Scylla).
+/// Task-execution identity. Not part of data PKs.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct WriterId(pub Vec<u8>);
 
@@ -34,7 +38,7 @@ pub struct WindowStoreTaskScope {
     pub max_parallelism: usize,
     pub key_group_range: KeyGroupRange,
     pub writer_id: WriterId,
-    pub attempt: AttemptToken,
+    pub attempt: Attempt,
 }
 
 impl WindowStoreTaskScope {
@@ -44,7 +48,7 @@ impl WindowStoreTaskScope {
             max_parallelism: 1,
             key_group_range: KeyGroupRange::full(1),
             writer_id: WriterId(Vec::new()),
-            attempt: Vec::new(),
+            attempt: 1,
         }
     }
 }
@@ -69,6 +73,22 @@ pub fn open_window_operator_store(
                 .clone();
             Ok(Arc::new(inmem.client(scope.clone())) as Arc<dyn WindowOperatorStore>)
         }
+        OperatorStateBackendConfig::Scylla(cfg) => {
+            let cfg = cfg.clone();
+            let registered = registry.get_or_insert_store(OperatorKind::Window, move |session| {
+                let session = match session {
+                    Some(StateSessionHandle::Scylla(session)) => Arc::clone(session),
+                    None => panic!("Scylla window store requires StateSessionHandle::Scylla"),
+                };
+                Arc::new(ScyllaWindowStore::new(cfg.clone(), session)) as Arc<dyn OperatorStore>
+            });
+            let store = registered
+                .as_any()
+                .downcast_ref::<ScyllaWindowStore>()
+                .expect("window Scylla store type")
+                .clone();
+            Ok(Arc::new(store.client(scope.clone())) as Arc<dyn WindowOperatorStore>)
+        }
     }
 }
 
@@ -78,55 +98,17 @@ pub async fn open_window_request_store(
     match *config {}
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StateVersion {
-    pub attempt: AttemptToken,
-    pub epoch: u64,
-}
+pub type StateVersion = Version;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WindowBackendSnapshot {
     /// Development/test-only inline snapshot.
-    InMemory { snapshot: Vec<u8> },
-    Versioned { version: StateVersion },
-}
-
-/// Drain `(after, through]` for tests. The operator loops `load_triggers` itself.
-pub async fn collect_triggers(
-    store: &dyn WindowOperatorStore,
-    after: Option<Cursor>,
-    through: Cursor,
-) -> Result<Vec<WindowTrigger>> {
-    let limit = runtime_consts().u64(WINDOW_PROCESS_PAGE_SIZE).max(1) as usize;
-    let mut resume = None;
-    let mut out = Vec::new();
-    loop {
-        let (triggers, next) = store
-            .load_triggers(after, through, resume.as_ref(), limit)
-            .await?;
-        out.extend(triggers);
-        match next {
-            Some(token) => resume = Some(token),
-            None => break,
-        }
-    }
-    Ok(out)
-}
-
-/// Opaque pager token. Only the backend that produced it should pass it back.
-#[derive(Debug, Clone)]
-pub struct TriggerResume {
-    last: WindowTrigger,
-}
-
-impl TriggerResume {
-    pub(crate) fn after_visible(last: WindowTrigger) -> Self {
-        Self { last }
-    }
-
-    pub(crate) fn last(&self) -> &WindowTrigger {
-        &self.last
-    }
+    InMemory {
+        snapshot: Vec<u8>,
+    },
+    Versioned {
+        version: StateVersion,
+    },
 }
 
 /// Store operations used by the sole Window Operator for a partition.
@@ -145,17 +127,12 @@ pub trait WindowOperatorStore: OperatorStore {
         meta: &KeyState,
         triggers: &[WindowTrigger],
     ) -> Result<()>;
-    /// One hop of due triggers in `(after, through]`.
-    ///
-    /// Short pages and empty `triggers` with `Some(resume)` are legal. End of
-    /// range is `next is None` — do not treat an empty page as EOF.
+    /// Due triggers in `(after, through]`.
     async fn load_triggers(
         &self,
         after: Option<Cursor>,
         through: Cursor,
-        resume: Option<&TriggerResume>,
-        limit: usize,
-    ) -> Result<(Vec<WindowTrigger>, Option<TriggerResume>)>;
+    ) -> Result<Vec<WindowTrigger>>;
     async fn store_key_state(&self, partition: &PartitionKey, state: &KeyState) -> Result<()>;
     /// Complete all pending writes before capturing the returned snapshot.
     async fn checkpoint(&self) -> Result<WindowBackendSnapshot>;

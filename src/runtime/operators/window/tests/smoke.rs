@@ -230,7 +230,7 @@ WINDOW w AS (
     for msg in &out.messages {
         match msg {
             Message::Regular(base) => {
-                assert!(!saw_wm, "due hops must emit before the watermark");
+                assert!(!saw_wm, "due pages must emit before the watermark");
                 pages += 1;
                 rows += base.record_batch.num_rows();
             }
@@ -238,13 +238,13 @@ WINDOW w AS (
                 assert_eq!(w.watermark_value, wm);
                 saw_wm = true;
             }
-            other => panic!("expected due hop or watermark, got {other:?}"),
+            other => panic!("expected due page or watermark, got {other:?}"),
         }
     }
     assert!(saw_wm);
-    assert!(
-        pages >= 2,
-        "{n} triggers should span more than one due hop"
+    assert_eq!(
+        pages, 1,
+        "one key is one advance_key / one due message (page_size chunks keys)"
     );
     assert_eq!(rows, n as usize);
 

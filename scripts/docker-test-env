@@ -10,9 +10,11 @@ fi
 # Testcontainers images used by the docker test profile. Keep tags in sync with:
 # - src/tests/docker/kafka.rs (redpanda)
 # - src/tests/docker/parquet_s3.rs (localstack)
+# - src/tests/docker/scylla.rs (scylla)
 PREFETCH_IMAGES=(
   "localstack/localstack:3.0"
   "redpandadata/redpanda:latest"
+  "scylladb/scylla:5.4"
 )
 
 OPTION=""
@@ -112,6 +114,28 @@ build() {
   build_image "$IMAGE_TAG" "$IMAGE_CONTEXT" "$CACHE_SCOPE"
 }
 
+# One Scylla shard needs ~50k AIO slots. Docker Desktop and some CI kernels
+# ship fs.aio-max-nr=65536, which is exhausted as soon as a second shard starts.
+ensure_aio_slots() {
+  local target=1048576
+  local current=0
+  if [[ -r /proc/sys/fs/aio-max-nr ]]; then
+    current="$(cat /proc/sys/fs/aio-max-nr)"
+  fi
+  if [[ "${current}" -ge "${target}" ]]; then
+    return 0
+  fi
+  if [[ -w /proc/sys/fs/aio-max-nr ]]; then
+    echo "${target}" > /proc/sys/fs/aio-max-nr
+    return 0
+  fi
+  if command -v sudo >/dev/null 2>&1 && sudo -n sysctl -w "fs.aio-max-nr=${target}" >/dev/null 2>&1; then
+    return 0
+  fi
+  docker run --rm --privileged --entrypoint sh scylladb/scylla:5.4 -c "echo ${target} > /proc/sys/fs/aio-max-nr" >/dev/null 2>&1 || \
+    echo "warning: could not raise fs.aio-max-nr; Scylla docker tests need it" >&2
+}
+
 setup() {
   command -v docker >/dev/null || {
     echo "missing required command: docker" >&2
@@ -120,6 +144,7 @@ setup() {
   docker info >/dev/null
 
   prefetch_images
+  ensure_aio_slots
   build_image "$IMAGE_TAG" "$IMAGE_CONTEXT" "$CACHE_SCOPE"
 }
 

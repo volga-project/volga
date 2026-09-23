@@ -12,8 +12,8 @@ use async_trait::async_trait;
 use futures::{stream, StreamExt, TryStreamExt};
 
 use crate::common::key::Key;
-use crate::common::KeyGroupRange;
 use crate::common::message::{Message, WatermarkMessage};
+use crate::common::KeyGroupRange;
 use crate::common::MAX_WATERMARK_VALUE;
 use crate::runtime::checkpoint::{SerializedCheckpoint, SerializedRestore};
 use crate::runtime::consts::{
@@ -34,7 +34,7 @@ use crate::runtime::operators::window::model::{Cursor, WindowId};
 use crate::runtime::operators::window::spec::WindowSpec;
 use crate::runtime::operators::window::state::{WindowOperatorState, WindowStateSnapshot};
 use crate::runtime::operators::window::store::{
-    open_window_operator_store, AttemptToken, StateNamespace, WindowStoreTaskScope, WriterId,
+    open_window_operator_store, StateNamespace, WindowStoreTaskScope, WriterId,
 };
 use crate::runtime::operators::window::TileConfig;
 use crate::runtime::runtime_context::RuntimeContext;
@@ -196,53 +196,50 @@ impl WindowOperator {
 
     async fn emit_due_pages(&self, through: Cursor, out: &mut dyn Output) -> Result<()> {
         let concurrency = runtime_consts().u64(WINDOW_PROCESS_KEY_CONCURRENCY).max(1) as usize;
-        let limit = runtime_consts().u64(WINDOW_PROCESS_PAGE_SIZE).max(1) as usize;
+        let page_size = runtime_consts().u64(WINDOW_PROCESS_PAGE_SIZE).max(1) as usize;
         let state = self.state_ref();
         let after = state
             .watermark_frontier()
             .map(|timestamp| Cursor::new(timestamp, u64::MAX));
-        let mut resume = None;
-        loop {
-            let (triggers, next) = state
-                .store()
-                .load_triggers(after, through, resume.as_ref(), limit)
+        let triggers = state
+            .store()
+            .load_triggers(after, through)
+            .await
+            .expect("load due window triggers");
+        if triggers.is_empty() {
+            return Ok(());
+        }
+        let mut grouped: BTreeMap<_, Vec<_>> = BTreeMap::new();
+        for trigger in triggers {
+            grouped
+                .entry(trigger.partition.clone())
+                .or_default()
+                .push(trigger);
+        }
+        let groups: Vec<_> = grouped.into_iter().collect();
+        for chunk in groups.chunks(page_size) {
+            let page = stream::iter(chunk.to_vec())
+                .map(|(partition, triggers)| {
+                    advance_key(
+                        state.store(),
+                        partition,
+                        triggers,
+                        self.window_configs.as_ref(),
+                        self.ts_column_index,
+                        &self.output_schema,
+                        &self.input_schema,
+                    )
+                })
+                .buffered(concurrency)
+                .try_collect::<Vec<_>>()
                 .await
-                .expect("load due window triggers");
-            if !triggers.is_empty() {
-                let mut grouped: BTreeMap<_, Vec<_>> = BTreeMap::new();
-                for trigger in triggers {
-                    grouped
-                        .entry(trigger.partition.clone())
-                        .or_default()
-                        .push(trigger);
-                }
-                let page = stream::iter(grouped)
-                    .map(|(partition, triggers)| {
-                        advance_key(
-                            state.store(),
-                            partition,
-                            triggers,
-                            self.window_configs.as_ref(),
-                            self.ts_column_index,
-                            &self.output_schema,
-                            &self.input_schema,
-                        )
-                    })
-                    .buffered(concurrency)
-                    .try_collect::<Vec<_>>()
-                    .await
-                    .expect("advance due window triggers");
-                let batch = if page.is_empty() {
-                    RecordBatch::new_empty(self.output_schema.clone())
-                } else {
-                    concat_batches(&self.output_schema, &page).expect("concat")
-                };
-                out.emit(Message::new(None, batch, None, None)).await?;
-            }
-            match next {
-                Some(token) => resume = Some(token),
-                None => break,
-            }
+                .expect("advance due window triggers");
+            let batch = if page.is_empty() {
+                RecordBatch::new_empty(self.output_schema.clone())
+            } else {
+                concat_batches(&self.output_schema, &page).expect("concat")
+            };
+            out.emit(Message::new(None, batch, None, None)).await?;
         }
         Ok(())
     }
@@ -367,12 +364,11 @@ impl OperatorTrait for WindowOperator {
                 parallelism as usize,
                 max_parallelism,
             );
-            let attempt: AttemptToken = context
+            let attempt = context
                 .job_config()
                 .get("execution_attempt_id")
                 .and_then(|v| v.as_u64())
-                .map(|id| id.to_be_bytes().to_vec())
-                .unwrap_or_default();
+                .unwrap_or(0);
             let scope = WindowStoreTaskScope {
                 namespace: ns.clone(),
                 max_parallelism,

@@ -41,7 +41,7 @@ pub(crate) struct WorkerInner {
 }
 
 impl WorkerInner {
-    pub(crate) fn from_config(config: WorkerConfig) -> Self {
+    pub(crate) async fn from_config(config: WorkerConfig) -> Result<Self, String> {
         let health = Arc::new(WorkerHealth::new());
         let mut task_runtimes = HashMap::new();
         for vertex_id in &config.vertex_ids {
@@ -75,7 +75,8 @@ impl WorkerInner {
         )));
 
         let session = StateSessionHandle::connect(&config.operator_state_backend)
-            .expect("state session init");
+            .await
+            .map_err(|e| format!("state session init: {e}"))?;
         let state_registry = Arc::new(StateRegistry::new(
             session,
             Arc::new(StateResourceTracker::new()),
@@ -86,7 +87,7 @@ impl WorkerInner {
         ));
         state_registry.set_maintenance_enabled(config.state_maintenance_enabled);
 
-        Self {
+        Ok(Self {
             config,
             health,
             task_actors: HashMap::new(),
@@ -109,7 +110,7 @@ impl WorkerInner {
             request_source_processor: None,
             request_source_processor_runtime,
             source_handles: Arc::new(SourceHandles::new()),
-        }
+        })
     }
 
     pub(crate) fn is_running(&self) -> bool {
