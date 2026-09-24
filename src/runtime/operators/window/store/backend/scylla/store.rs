@@ -18,7 +18,8 @@ use crate::runtime::operators::window::store::backend::{
 use crate::runtime::state::{OperatorStore, OperatorTaskState, StateSessionHandle};
 
 use super::cql::{
-    prepare_stmts, PreparedDml, PreparedGc, DELETE_KEY_STATE_VERSION, DELETE_KG_BUCKETS,
+    mark_idempotent, prepare_stmts, PreparedDml, PreparedGc, DELETE_KEY_STATE_VERSION,
+    DELETE_KG_BUCKETS,
     DELETE_RAW, DELETE_TILES, DELETE_TILE_VERSION, DELETE_TRIGGERS, INSERT_KEY_STATES,
     INSERT_KG_BUCKETS, INSERT_RAW, INSERT_TILES, INSERT_TRIGGERS, SELECT_KEY_STATE,
     SELECT_KEY_STATE_VERSIONS, SELECT_KG_BUCKETS, SELECT_RAW, SELECT_TILES, SELECT_TILE_VERSIONS,
@@ -114,15 +115,15 @@ impl ScyllaWindowStore {
                 )
                 .await?;
                 Ok::<_, anyhow::Error>(PreparedDml {
-                    insert_raw,
-                    insert_kg_buckets,
-                    insert_tiles,
-                    insert_key_states,
-                    insert_triggers,
-                    select_key_state,
-                    select_raw,
-                    select_tiles,
-                    select_triggers,
+                    insert_raw: mark_idempotent(insert_raw),
+                    insert_kg_buckets: mark_idempotent(insert_kg_buckets),
+                    insert_tiles: mark_idempotent(insert_tiles),
+                    insert_key_states: mark_idempotent(insert_key_states),
+                    insert_triggers: mark_idempotent(insert_triggers),
+                    select_key_state: mark_idempotent(select_key_state),
+                    select_raw: mark_idempotent(select_raw),
+                    select_tiles: mark_idempotent(select_tiles),
+                    select_triggers: mark_idempotent(select_triggers),
                 })
             })
             .await
@@ -160,15 +161,15 @@ impl ScyllaWindowStore {
                 )
                 .await?;
                 Ok::<_, anyhow::Error>(PreparedGc {
-                    select_kg_buckets,
-                    select_key_state_versions,
-                    select_tile_versions,
-                    delete_raw,
-                    delete_tiles,
-                    delete_kg_buckets,
-                    delete_key_state_version,
-                    delete_tile_version,
-                    delete_triggers,
+                    select_kg_buckets: mark_idempotent(select_kg_buckets),
+                    select_key_state_versions: mark_idempotent(select_key_state_versions),
+                    select_tile_versions: mark_idempotent(select_tile_versions),
+                    delete_raw: mark_idempotent(delete_raw),
+                    delete_tiles: mark_idempotent(delete_tiles),
+                    delete_kg_buckets: mark_idempotent(delete_kg_buckets),
+                    delete_key_state_version: mark_idempotent(delete_key_state_version),
+                    delete_tile_version: mark_idempotent(delete_tile_version),
+                    delete_triggers: mark_idempotent(delete_triggers),
                 })
             })
             .await
