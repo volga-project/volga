@@ -240,12 +240,7 @@
         }
       ]
     },
-    "RequestStoreConfig": {
-      "type": "string",
-      "enum": [
-        "scylla"
-      ]
-    },
+    "RequestStoreConfig": false,
     "StateSpec": {
       "type": "object",
       "properties": {

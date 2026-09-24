@@ -12,7 +12,6 @@ state:
         - 127.0.0.1:9042
       keyspace: volga_window
       datacenter: datacenter1
-  request_store: scylla
   checkpoint:
     interval_ms: 0
     timeout_ms: 60000

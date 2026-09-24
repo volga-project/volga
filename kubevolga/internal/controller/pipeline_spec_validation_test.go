@@ -20,24 +20,6 @@ func TestScyllaSamplePipelineSpecValidates(t *testing.T) {
 	validateSampleManifest(t, "volga_v1alpha1_pipeline_scylla.yaml")
 }
 
-func TestScyllaRequestStoreValidates(t *testing.T) {
-	raw := loadSamplePipelineSpec(t, "volga_v1alpha1_pipeline_scylla.yaml")
-	var spec map[string]any
-	if err := json.Unmarshal(raw, &spec); err != nil {
-		t.Fatalf("unmarshal pipelineSpec: %v", err)
-	}
-	state, ok := spec["state"].(map[string]any)
-	if !ok {
-		t.Fatal("pipelineSpec.state missing")
-	}
-	if got := state["request_store"]; got != "scylla" {
-		t.Fatalf("request_store=%v, want scylla", got)
-	}
-	if err := validatePipelineSpec(raw); err != nil {
-		t.Fatalf("scylla request_store should be valid, got error: %v", err)
-	}
-}
-
 func TestOperatorBackendScyllaMissingKeyspaceRejected(t *testing.T) {
 	raw := loadSamplePipelineSpec(t, "volga_v1alpha1_pipeline_scylla.yaml")
 	var spec map[string]any

@@ -196,9 +196,5 @@ mod tests {
             }
             other => panic!("expected Scylla operator backend, got {other:?}"),
         }
-        match &spec.state.request_store {
-            Some(crate::api::spec::state::RequestStoreConfig::Scylla) => {}
-            other => panic!("expected Scylla request store, got {other:?}"),
-        }
     }
 }
