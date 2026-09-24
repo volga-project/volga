@@ -1,0 +1,49 @@
+# Single-node Scylla for Kind. Same image and shard budget as the docker tests.
+# Workers dial the Service; Scylla advertises the pod IP itself.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scylla
+  namespace: default
+  labels:
+    app: scylla
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: scylla
+  template:
+    metadata:
+      labels:
+        app: scylla
+    spec:
+      nodeSelector:
+        volga.io/role: infra
+      containers:
+        - name: scylla
+          image: scylladb/scylla:5.4
+          imagePullPolicy: IfNotPresent
+          args: ["--smp", "1", "--memory", "1G", "--overprovisioned", "1"]
+          ports:
+            - name: cql
+              containerPort: 9042
+          readinessProbe:
+            exec:
+              command: ["cqlsh", "-e", "SELECT now() FROM system.local"]
+            initialDelaySeconds: 15
+            periodSeconds: 5
+            timeoutSeconds: 10
+            failureThreshold: 24
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: scylla
+  namespace: default
+spec:
+  selector:
+    app: scylla
+  ports:
+    - name: cql
+      port: 9042
+      targetPort: cql
