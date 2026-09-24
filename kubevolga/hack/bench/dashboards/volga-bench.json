@@ -1499,6 +1499,379 @@
       "description": "p99 of index_scan, key_gc, and trigger_delete."
     },
     {
+      "id": 100,
+      "type": "row",
+      "title": "Scylla node",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 71
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 101,
+      "type": "timeseries",
+      "title": "Disk space",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 72
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(scylla_column_family_total_disk_space)",
+          "legendFormat": "total",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(scylla_column_family_live_disk_space)",
+          "legendFormat": "live",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(scylla_commitlog_disk_active_bytes)",
+          "legendFormat": "commitlog",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Native Scylla gauges. Total should level off once maintain keeps up with ingest. A steady climb means data is accumulating on disk."
+    },
+    {
+      "id": 102,
+      "type": "timeseries",
+      "title": "Reactor CPU",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 72
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "avg(scylla_reactor_utilization)",
+          "legendFormat": "avg",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max(scylla_reactor_utilization)",
+          "legendFormat": "max",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Scylla reactor utilization, 1.0 = the shard is busy. This is Scylla's own CPU, not the cAdvisor core count."
+    },
+    {
+      "id": 103,
+      "type": "timeseries",
+      "title": "Compaction",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 80
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(scylla_compaction_manager_compactions)",
+          "legendFormat": "active",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(scylla_compaction_manager_pending_compactions)",
+          "legendFormat": "pending",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Active and waiting compaction tasks. A pending line that stays above zero means compaction is behind."
+    },
+    {
+      "id": 104,
+      "type": "timeseries",
+      "title": "Compaction backlog",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 80
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(scylla_compaction_manager_backlog)",
+          "legendFormat": "backlog",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Sum of compaction backlog. Should return toward zero between bursts."
+    },
+    {
+      "id": 105,
+      "type": "timeseries",
+      "title": "Memory",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 80
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(scylla_memory_regular_dirty_bytes)",
+          "legendFormat": "dirty",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(scylla_cache_bytes_used)",
+          "legendFormat": "cache",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Dirty regular memory and row-cache bytes. Dirty should stay bounded under the 1G shard."
+    },
+    {
       "id": 10,
       "type": "row",
       "title": "Job",
@@ -1506,7 +1879,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 71
+        "y": 88
       },
       "collapsed": false,
       "panels": []
@@ -1519,7 +1892,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 72
+        "y": 89
       },
       "datasource": {
         "type": "prometheus",
@@ -1590,7 +1963,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 72
+        "y": 89
       },
       "datasource": {
         "type": "prometheus",
@@ -1650,7 +2023,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 80
+        "y": 114
       },
       "collapsed": false,
       "panels": []
@@ -1663,7 +2036,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 81
+        "y": 115
       },
       "datasource": {
         "type": "prometheus",
@@ -1723,7 +2096,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 81
+        "y": 115
       },
       "datasource": {
         "type": "prometheus",
@@ -1795,7 +2168,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 89
+        "y": 97
       },
       "collapsed": false,
       "panels": []
@@ -1808,7 +2181,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 90
+        "y": 98
       },
       "datasource": {
         "type": "prometheus",
@@ -1867,7 +2240,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 90
+        "y": 98
       },
       "datasource": {
         "type": "prometheus",
@@ -1926,7 +2299,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 98
+        "y": 106
       },
       "datasource": {
         "type": "prometheus",
@@ -1986,7 +2359,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 98
+        "y": 106
       },
       "datasource": {
         "type": "prometheus",
