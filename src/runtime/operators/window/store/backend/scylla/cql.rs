@@ -59,6 +59,12 @@ pub(super) async fn prepare_stmts<const N: usize>(
         .map_err(|v: Vec<_>| anyhow!("expected {N} prepared statements, got {}", v.len()))
 }
 
+/// Safe driver retries. `window_kg_meta` LWT statements stay unmarked.
+pub(super) fn mark_idempotent(mut stmt: PreparedStatement) -> PreparedStatement {
+    stmt.set_is_idempotent(true);
+    stmt
+}
+
 pub(super) async fn unlogged_batch(
     session: &Session,
     stmt: &PreparedStatement,
