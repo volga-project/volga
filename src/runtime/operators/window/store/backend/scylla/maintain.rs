@@ -1,8 +1,26 @@
-//! Maintain / GC: raw minute deletes, tile and trigger range deletes, three-slot versions.
+//! Maintain / GC, from the last completed checkpoint.
 //!
-//! Slot 1 is `my_attempt`. Slots 2–3 are the published cut and the previous cut.
-//! Live raw minutes are not version-scanned: a cursor is written once, and the
-//! minute partition delete removes every version when the minute expires.
+//! The floor is `committed_watermark - longest_window - lateness`. A full
+//! delete drops every version in a time range. A version trim runs only on
+//! what that delete left behind.
+//!
+//! Full deletes:
+//! - a raw minute whose `bucket_start` is below the floor
+//! - a tile whose `tile_start + granularity` is at or below the floor
+//! - a trigger with `fire_ts` at or below the committed watermark, on a shard
+//!   this task fully owns
+//!
+//! Version trim keeps three versions of one cell and deletes every other
+//! stored `(attempt, epoch)`. The newest of the current attempt is the live
+//! writer, including epochs written after the last checkpoint. The newest the
+//! published cut allows is the checkpoint a reader is pinned to. The newest
+//! the previous cut allows is the checkpoint a reader may still be on while
+//! the next one is published. This applies to a tile that still overlaps the
+//! floor, and to key state, which has no time range. Raw rows inside a live
+//! minute are not version-trimmed; the minute delete takes them all.
+//!
+//! The `window_kg_buckets` row is deleted after the tile trim and the key-state
+//! trim succeed, so a failed tick can find the key again.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
@@ -18,7 +36,7 @@ use super::cql::{unlogged_batch, PreparedGc};
 use super::schema::{align_down, fully_owned_trigger_shards, RAW_BUCKET_MS};
 use super::store::ScyllaWindowStoreClient;
 
-pub(super) fn keep_slots(
+pub(super) fn keep_versions(
     versions: impl IntoIterator<Item = Version>,
     my_attempt: Attempt,
     cut: &CutHistory,
@@ -49,7 +67,7 @@ struct Retention {
 }
 
 fn versions_outside_slots(versions: &[Version], slots: &Retention) -> Vec<Version> {
-    let keep = keep_slots(
+    let keep = keep_versions(
         versions.iter().copied(),
         slots.attempt,
         &slots.cut,
@@ -325,7 +343,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn keep_slots_holds_mine_cut_and_prev() {
+    fn keep_versions_holds_mine_cut_and_prev() {
         let cut = CutHistory::empty().advance(1, Some(4));
         let prev = CutHistory::empty().advance(1, Some(2));
         let versions = [
@@ -350,7 +368,7 @@ mod tests {
                 epoch: 0,
             },
         ];
-        let keep = keep_slots(versions, 2, &cut, &prev);
+        let keep = keep_versions(versions, 2, &cut, &prev);
         assert!(keep.contains(&Version {
             attempt: 2,
             epoch: 0
