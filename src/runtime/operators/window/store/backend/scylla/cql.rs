@@ -73,6 +73,7 @@ pub(super) async fn unlogged_batch(
     if values.is_empty() {
         return Ok(());
     }
+    super::observe::note_stmt();
     let mut batch = Batch::new(BatchType::Unlogged);
     // session.batch reads this flag from the Batch, not the prepared statements.
     batch.set_is_idempotent(stmt.get_is_idempotent());

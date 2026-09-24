@@ -75,12 +75,15 @@ pub fn open_window_operator_store(
         }
         OperatorStateBackendConfig::Scylla(cfg) => {
             let cfg = cfg.clone();
+            let labels = registry.metrics_labels().cloned();
             let registered = registry.get_or_insert_store(OperatorKind::Window, move |session| {
                 let session = match session {
                     Some(StateSessionHandle::Scylla(session)) => Arc::clone(session),
                     None => panic!("Scylla window store requires StateSessionHandle::Scylla"),
                 };
-                Arc::new(ScyllaWindowStore::new(cfg.clone(), session)) as Arc<dyn OperatorStore>
+                Arc::new(
+                    ScyllaWindowStore::new(cfg.clone(), session).with_metrics_labels(labels.clone()),
+                ) as Arc<dyn OperatorStore>
             });
             let store = registered
                 .as_any()

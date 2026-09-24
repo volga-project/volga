@@ -1,6 +1,7 @@
 use std::any::Any;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use anyhow::{anyhow, Result};
 use arrow::array::RecordBatch;
@@ -9,6 +10,7 @@ use scylla::client::session::Session;
 use tokio::sync::OnceCell;
 
 use crate::api::spec::state::ScyllaConfig;
+use crate::runtime::metrics::MetricsLabels;
 use crate::runtime::operators::window::model::{
     Cursor, KeyState, PartitionKey, RawRun, TileMap, TileRun, WindowTrigger,
 };
@@ -25,6 +27,7 @@ use super::cql::{
     SELECT_KEY_STATE_VERSIONS, SELECT_KG_BUCKETS, SELECT_RAW, SELECT_TILES, SELECT_TILE_VERSIONS,
     SELECT_TRIGGERS,
 };
+use super::observe::{self, CallMeter};
 use super::schema::TABLES;
 use super::{checkpoint, maintain, read, triggers, write};
 
@@ -40,6 +43,7 @@ pub struct ScyllaWindowStore {
     session: Arc<Session>,
     prepared: Arc<OnceCell<PreparedDml>>,
     prepared_gc: Arc<OnceCell<PreparedGc>>,
+    metrics_labels: Option<MetricsLabels>,
 }
 
 impl std::fmt::Debug for ScyllaWindowStore {
@@ -57,7 +61,13 @@ impl ScyllaWindowStore {
             session,
             prepared: Arc::new(OnceCell::new()),
             prepared_gc: Arc::new(OnceCell::new()),
+            metrics_labels: None,
         }
+    }
+
+    pub fn with_metrics_labels(mut self, labels: Option<MetricsLabels>) -> Self {
+        self.metrics_labels = labels;
+        self
     }
 
     /// Test/tooling: connect a cluster and open a window store on it.
@@ -184,6 +194,7 @@ impl ScyllaWindowStore {
             in_flight_keys: Arc::new(Mutex::new(HashSet::new())),
             cp_cut: Arc::new(Mutex::new(HashMap::new())),
             prev_cut: Arc::new(Mutex::new(HashMap::new())),
+            last_maintain: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -197,6 +208,7 @@ pub struct ScyllaWindowStoreClient {
     /// Restored overlay; empty until restore.
     cp_cut: Arc<Mutex<HashMap<i32, CutHistory>>>,
     prev_cut: Arc<Mutex<HashMap<i32, CutHistory>>>,
+    last_maintain: Arc<Mutex<Option<Instant>>>,
 }
 
 impl std::fmt::Debug for ScyllaWindowStoreClient {
@@ -335,6 +347,33 @@ impl ScyllaWindowStoreClient {
             .remove(key);
     }
 
+    pub(super) fn call_meter(&self) -> CallMeter {
+        CallMeter {
+            task_id: String::from_utf8(self.scope.writer_id.0.clone()).unwrap_or_default(),
+            labels: self.inner.metrics_labels.clone(),
+        }
+    }
+
+    /// Scylla maintain runs at most once per 10s on this task's client.
+    /// A skipped tick records nothing.
+    pub(super) fn begin_maintain_tick(&self) -> bool {
+        let mut last = self.last_maintain.lock().expect("last_maintain");
+        let now = Instant::now();
+        if !observe::maintain_interval_elapsed(*last, now) {
+            return false;
+        }
+        *last = Some(now);
+        true
+    }
+
+    async fn metered<T>(
+        &self,
+        op: &'static str,
+        fut: impl std::future::Future<Output = Result<T>>,
+    ) -> Result<T> {
+        observe::observe(&self.call_meter(), op, fut).await
+    }
+
     pub(super) fn overlay_visible(&self, kg: i32, attempt: i64, epoch: i64) -> bool {
         let v = Version {
             attempt: attempt as Attempt,
@@ -351,7 +390,8 @@ impl ScyllaWindowStoreClient {
 #[async_trait]
 impl WindowOperatorStore for ScyllaWindowStoreClient {
     async fn load_key_state(&self, partition: &PartitionKey) -> Result<KeyState> {
-        read::load_key_state(self, partition).await
+        self.metered("load_key_state", read::load_key_state(self, partition))
+            .await
     }
 
     async fn load_raw(
@@ -359,11 +399,13 @@ impl WindowOperatorStore for ScyllaWindowStoreClient {
         partition: &PartitionKey,
         runs: &[RawRun],
     ) -> Result<Vec<RecordBatch>> {
-        read::load_raw(self, partition, runs).await
+        self.metered("load_raw", read::load_raw(self, partition, runs))
+            .await
     }
 
     async fn load_tiles(&self, partition: &PartitionKey, runs: &[TileRun]) -> Result<TileMap> {
-        read::load_tiles(self, partition, runs).await
+        self.metered("load_tiles", read::load_tiles(self, partition, runs))
+            .await
     }
 
     async fn commit_events(
@@ -375,14 +417,17 @@ impl WindowOperatorStore for ScyllaWindowStoreClient {
         meta: &KeyState,
         triggers: &[WindowTrigger],
     ) -> Result<()> {
-        write::commit_events(
-            self,
-            partition,
-            ts_column_index,
-            events,
-            tiles,
-            meta,
-            triggers,
+        self.metered(
+            "commit_events",
+            write::commit_events(
+                self,
+                partition,
+                ts_column_index,
+                events,
+                tiles,
+                meta,
+                triggers,
+            ),
         )
         .await
     }
@@ -392,7 +437,11 @@ impl WindowOperatorStore for ScyllaWindowStoreClient {
         after: Option<Cursor>,
         through: Cursor,
     ) -> Result<Vec<WindowTrigger>> {
-        triggers::load_triggers(self, after, through).await
+        self.metered(
+            "load_triggers",
+            triggers::load_triggers(self, after, through),
+        )
+        .await
     }
 
     async fn store_key_state(&self, partition: &PartitionKey, state: &KeyState) -> Result<()> {
@@ -400,11 +449,13 @@ impl WindowOperatorStore for ScyllaWindowStoreClient {
     }
 
     async fn checkpoint(&self) -> Result<WindowBackendSnapshot> {
-        checkpoint::checkpoint(self).await
+        self.metered("checkpoint", checkpoint::checkpoint(self))
+            .await
     }
 
     async fn restore(&self, snapshot: &WindowBackendSnapshot) -> Result<()> {
-        checkpoint::restore(self, snapshot).await
+        self.metered("restore", checkpoint::restore(self, snapshot))
+            .await
     }
 
     async fn on_checkpoint_complete(

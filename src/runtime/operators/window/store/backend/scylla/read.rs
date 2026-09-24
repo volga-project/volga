@@ -12,6 +12,7 @@ use crate::runtime::operators::window::store::backend::codec::{decode_batch, dec
 
 use crate::runtime::operators::window::store::backend::{Attempt, Version};
 
+use super::observe::{note_bytes, note_rows, note_stmt};
 use super::schema::{last_included_ts, time_buckets, RAW_BUCKET_MS};
 use super::store::ScyllaWindowStoreClient;
 
@@ -29,6 +30,7 @@ pub(super) async fn load_key_state(
     let kg = client.key_group(partition)?;
     let session = client.inner.session();
     let prepared = client.inner.prepared().await?;
+    note_stmt();
     let result = session
         .execute_unpaged(
             &prepared.select_key_state,
@@ -43,6 +45,7 @@ pub(super) async fn load_key_state(
     for row in result.into_rows_result()?.rows::<(i64, i64, Vec<u8>)>()? {
         let (attempt, epoch, payload) = row?;
         if client.overlay_visible(kg, attempt, epoch) {
+            note_rows(1);
             return decode_val(&payload);
         }
     }
@@ -67,6 +70,7 @@ pub(super) async fn load_raw(
             let from = run.from;
             let to = run.to;
             pages.push(async move {
+                note_stmt();
                 let result = session
                     .execute_unpaged(&select_raw, (ns, kg, key, bucket, from.ts, to.ts))
                     .await?;
@@ -86,6 +90,8 @@ pub(super) async fn load_raw(
             if !client.overlay_visible(kg, attempt, epoch) {
                 continue;
             }
+            note_rows(1);
+            note_bytes(payload.len() as u64);
             let v = row_version(attempt, epoch);
             match by_cursor.get(&cursor) {
                 Some((best, _)) if *best >= v => {}
@@ -117,6 +123,7 @@ pub(super) async fn load_tiles(
         let ns = client.scope.namespace.bytes.clone();
         let key = partition.business_key.clone();
         pages.push(async move {
+            note_stmt();
             let result = session
                 .execute_unpaged(&select_tiles, (ns, kg, key, gran, start_ts, end_ts))
                 .await?;
@@ -132,6 +139,8 @@ pub(super) async fn load_tiles(
             if !client.overlay_visible(kg, attempt, epoch) {
                 continue;
             }
+            note_rows(1);
+            note_bytes(payload.len() as u64);
             let v = row_version(attempt, epoch);
             if best.get(&tile_start).map_or(true, |(e, _)| v > *e) {
                 best.insert(tile_start, (v, payload));
