@@ -452,7 +452,7 @@ fn sorted<T: Ord>(mut rows: Vec<T>) -> Vec<T> {
 
 /// Maintain against Scylla: drop an expired minute, range-delete tiles that
 /// end at or below the floor (including the `tile_keep_from` boundary), trim
-/// tile and key-state versions to three slots, and delete triggers at or
+/// tile and key-state versions to three versions, and delete triggers at or
 /// below the committed watermark. A second tick keeps those rows.
 #[tokio::test]
 #[ignore]
@@ -617,7 +617,7 @@ async fn window_scylla_store_maintain_gc() {
             .await,
         ),
         vec![(1, 2), (1, 4), (1, 10)],
-        "key state keeps the three version slots"
+        "key state keeps the three versions"
     );
         assert_eq!(
         sorted(
@@ -631,7 +631,7 @@ async fn window_scylla_store_maintain_gc() {
             .await,
         ),
         vec![(1, 13)],
-        "a key whose minutes all expired still drops versions outside the three slots"
+        "a key whose minutes all expired still drops versions outside the three versions"
     );
         assert_eq!(
             query::<(i64,)>(

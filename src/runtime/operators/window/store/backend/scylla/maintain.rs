@@ -66,12 +66,12 @@ struct Retention {
     prev_cut: CutHistory,
 }
 
-fn versions_outside_slots(versions: &[Version], slots: &Retention) -> Vec<Version> {
+fn versions_to_drop(versions: &[Version], retention: &Retention) -> Vec<Version> {
     let keep = keep_versions(
         versions.iter().copied(),
-        slots.attempt,
-        &slots.cut,
-        &slots.prev_cut,
+        retention.attempt,
+        &retention.cut,
+        &retention.prev_cut,
     );
     versions
         .iter()
@@ -130,9 +130,9 @@ pub(super) async fn maintain(
         }
     }
 
-    let mut slots_by_kg: HashMap<i32, Retention> = HashMap::new();
+    let mut retention_by_kg: HashMap<i32, Retention> = HashMap::new();
     for ((kg, _), _) in &by_key {
-        slots_by_kg
+        retention_by_kg
             .entry(*kg)
             .or_insert_with(|| retention_for(client, *kg));
     }
@@ -143,7 +143,7 @@ pub(super) async fn maintain(
         let gc = gc.clone();
         let ns = ns.bytes.clone();
         let granularities = granularities.clone();
-        let slots = slots_by_kg
+        let retention = retention_by_kg
             .get(&kg)
             .cloned()
             .unwrap_or_else(|| retention_for(client, kg));
@@ -157,7 +157,7 @@ pub(super) async fn maintain(
                 expired,
                 granularities,
                 floor,
-                slots,
+                retention,
             )
             .await
         });
@@ -196,7 +196,7 @@ async fn gc_key(
     expired: Vec<i64>,
     granularities: Vec<i64>,
     floor: i64,
-    slots: Retention,
+    retention: Retention,
 ) -> Result<()> {
     let raw_futs = expired.iter().copied().map(|bucket| {
         let session = Arc::clone(&session);
@@ -219,7 +219,7 @@ async fn gc_key(
             key.clone(),
             gran,
             floor,
-            slots.clone(),
+            retention.clone(),
         )
     });
     let key_state = trim_key_state(
@@ -228,7 +228,7 @@ async fn gc_key(
         ns.clone(),
         kg,
         key.clone(),
-        slots.clone(),
+        retention.clone(),
     );
     tokio::try_join!(try_join_all(raw_futs), try_join_all(tile_futs), key_state)?;
 
@@ -259,7 +259,7 @@ async fn gc_tile_gran(
     key: Vec<u8>,
     gran: i64,
     floor: i64,
-    slots: Retention,
+    retention: Retention,
 ) -> Result<()> {
     session
         .execute_unpaged(
@@ -289,7 +289,7 @@ async fn gc_tile_gran(
     }
     let mut tile_deletes = Vec::new();
     for (tile_start, cell) in by_cell {
-        for v in versions_outside_slots(&cell, &slots) {
+        for v in versions_to_drop(&cell, &retention) {
             tile_deletes.push((
                 ns.clone(),
                 kg,
@@ -311,7 +311,7 @@ async fn trim_key_state(
     ns: Vec<u8>,
     kg: i32,
     key: Vec<u8>,
-    slots: Retention,
+    retention: Retention,
 ) -> Result<()> {
     let key_rows = session
         .execute_unpaged(&gc.select_key_state_versions, (ns.clone(), kg, key.clone()))
@@ -325,7 +325,7 @@ async fn trim_key_state(
         });
     }
     let mut deletes = Vec::new();
-    for v in versions_outside_slots(&versions, &slots) {
+    for v in versions_to_drop(&versions, &retention) {
         deletes.push((
             ns.clone(),
             kg,
