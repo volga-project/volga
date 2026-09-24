@@ -29,7 +29,10 @@ pub struct ScyllaConfig {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub enum RequestStoreConfig {}
+pub enum RequestStoreConfig {
+    /// Use the already-open worker session. The store must not call `connect()`.
+    Scylla,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]

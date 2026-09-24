@@ -25,7 +25,7 @@ use crate::runtime::operators::window::model::WindowId;
 use crate::runtime::operators::window::operator::WindowOperatorConfig;
 use crate::runtime::operators::window::spec::WindowSpec;
 use crate::runtime::operators::window::store::{
-    open_window_request_store, PartitionKey, StateNamespace, WindowRequestStore,
+    open_window_request_store, PartitionKey, ReadOptions, StateNamespace, WindowRequestStore,
 };
 use crate::runtime::operators::window::TileConfig;
 use crate::runtime::runtime_context::RuntimeContext;
@@ -38,6 +38,7 @@ pub struct WindowRequestOperatorConfig {
     /// `EXCLUDE CURRENT ROW`: lookup time only (no request-row args). SQL wiring still TODO.
     pub exclude_current_row: bool,
     pub state_owner_operator_id: Option<String>,
+    pub read_options: ReadOptions,
 }
 
 impl WindowRequestOperatorConfig {
@@ -48,6 +49,7 @@ impl WindowRequestOperatorConfig {
             spec: window_operator_config.spec,
             exclude_current_row: false,
             state_owner_operator_id: None,
+            read_options: ReadOptions::Committed,
         }
     }
 }
@@ -58,6 +60,7 @@ pub struct WindowRequestOperator {
     store: Option<Arc<dyn WindowRequestStore>>,
     namespace: Option<StateNamespace>,
     state_owner_operator_id: Option<String>,
+    read_options: ReadOptions,
     ts_column_index: usize,
     partition_by: Vec<Arc<dyn PhysicalExpr>>,
     output_schema: SchemaRef,
@@ -97,6 +100,7 @@ impl WindowRequestOperator {
             store: None,
             namespace: None,
             state_owner_operator_id: window_request_operator_config.state_owner_operator_id,
+            read_options: window_request_operator_config.read_options,
             ts_column_index: built.ts_column_index,
             partition_by: window_request_operator_config.window_exec.window_expr()[0]
                 .partition_by()
@@ -120,13 +124,12 @@ impl WindowRequestOperator {
         self.namespace = Some(namespace);
     }
 
-    async fn process_key(&self, key: &Key, record_batch: &RecordBatch) -> RecordBatch {
+    async fn process_key(&self, key: &Key, record_batch: &RecordBatch) -> Result<RecordBatch> {
         let store = self.store.as_ref().expect("store");
         let partition = PartitionKey::new(self.namespace.as_ref().expect("namespace"), key);
 
-        // No lateness filter. Answer from whatever state the backend still retains.
         if record_batch.num_rows() == 0 {
-            return RecordBatch::new_empty(self.output_schema.clone());
+            return Ok(RecordBatch::new_empty(self.output_schema.clone()));
         }
 
         let ts_array = record_batch
@@ -148,32 +151,40 @@ impl WindowRequestOperator {
             &point_timestamps,
             record_batch,
             self.ts_column_index,
+            self.read_options,
         )
-        .await
-        .expect("evaluate");
+        .await?;
 
         let input_values = get_input_values(record_batch, &self.input_schema);
-        assemble_window_batch(
+        Ok(assemble_window_batch(
             input_values,
             aggregated,
             &self.output_schema,
             &self.input_schema,
-        )
+        ))
     }
 
-    async fn process_groups(&self, groups: Vec<(Key, RecordBatch)>) -> RecordBatch {
+    async fn process_groups(&self, groups: Vec<(Key, RecordBatch)>) -> Result<RecordBatch> {
         let mut batches: Vec<(usize, RecordBatch)> = stream::iter(groups.into_iter().enumerate())
-            .map(|(i, (key, payload))| async move { (i, self.process_key(&key, &payload).await) })
+            .map(|(i, (key, payload))| async move {
+                self.process_key(&key, &payload)
+                    .await
+                    .map(|batch| (i, batch))
+            })
             .buffer_unordered(runtime_consts().u64(WINDOW_INGEST_KEY_CONCURRENCY).max(1) as usize)
-            .collect()
-            .await;
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?;
         batches.sort_by_key(|(i, _)| *i);
         let batches: Vec<RecordBatch> = batches.into_iter().map(|(_, batch)| batch).collect();
         if batches.len() == 1 {
-            batches.into_iter().next().unwrap()
+            Ok(batches.into_iter().next().unwrap())
         } else {
-            arrow::compute::concat_batches(&self.output_schema, &batches)
-                .expect("concat WRO batches")
+            Ok(
+                arrow::compute::concat_batches(&self.output_schema, &batches)
+                    .expect("concat WRO batches"),
+            )
         }
     }
 }
@@ -201,7 +212,17 @@ impl OperatorTrait for WindowRequestOperator {
             let request_store = context
                 .request_store()
                 .expect("request store must be configured for WindowRequestOperator");
-            self.store = Some(open_window_request_store(request_store).await?);
+            self.store = Some(
+                open_window_request_store(
+                    request_store,
+                    context.state_registry().and_then(|r| r.session()),
+                    context.max_parallelism(),
+                    context
+                        .metrics_labels()
+                        .map(|labels| (context.vertex_id(), labels)),
+                )
+                .await?,
+            );
         }
         if self.namespace.is_none() {
             let owner_operator_id = self
@@ -251,7 +272,7 @@ impl StreamOperator for WindowRequestOperator {
                 .await?;
                 continue;
             }
-            let batch = self.process_groups(groups).await;
+            let batch = self.process_groups(groups).await?;
             out.emit(Message::new(None, batch, ingest_timestamp, extras))
                 .await?;
         }

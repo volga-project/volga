@@ -59,6 +59,7 @@ spec:
             - scylla.default.svc.cluster.local:9042
           keyspace: volga_window
           datacenter: datacenter1
+      request_store: scylla
       maintenance_enabled: true
       maintenance_interval_ms: 1000
       checkpoint:

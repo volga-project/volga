@@ -11,7 +11,7 @@ use datafusion::scalar::ScalarValue;
 use crate::runtime::operators::window::config::WindowConfig;
 use crate::runtime::operators::window::frame_utils::{get_window_length_ms, require_range_frame};
 use crate::runtime::operators::window::model::{Cursor, WindowId};
-use crate::runtime::operators::window::store::{PartitionKey, WindowData, WindowRequestStore};
+use crate::runtime::operators::window::store::{PartitionKey, ReadOptions, WindowData, WindowRequestStore};
 
 use super::coverage_plan::{merge_raw_runs, merge_tile_runs};
 use super::eval_plan::{append_coverage_runs, plan_rebuilds, EvalPlan};
@@ -24,6 +24,7 @@ pub async fn evaluate_points(
     point_timestamps: &[i64],
     request_batch: &RecordBatch,
     ts_column_index: usize,
+    opts: ReadOptions,
 ) -> Result<Vec<Vec<ScalarValue>>> {
     if point_timestamps.is_empty() {
         return Ok(window_configs.keys().map(|_| Vec::new()).collect());
@@ -45,9 +46,24 @@ pub async fn evaluate_points(
     }
     let raw_runs = merge_raw_runs(raw_runs);
     let tile_runs = merge_tile_runs(tile_runs);
-    let data = store
-        .load_window_data(partition, &raw_runs, &tile_runs)
+    let read = store
+        .load_window_data(partition, &raw_runs, &tile_runs, opts)
         .await?;
+    if let Some(floor) = read.retention_floor {
+        let max_wl = window_configs
+            .values()
+            .map(|cfg| get_window_length_ms(cfg.window_expr.get_window_frame()))
+            .max()
+            .unwrap_or(0);
+        if let Some(hi) = point_timestamps.iter().copied().min() {
+            let lo = hi.saturating_sub(max_wl);
+            anyhow::ensure!(
+                lo >= floor,
+                "request range is no longer retained (lo={lo} < retention_floor={floor})"
+            );
+        }
+    }
+    let data = read.data;
 
     Ok(window_configs
         .iter()

@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Result};
 use futures::future::try_join_all;
 use scylla::client::session::Session;
+use scylla::frame::types::{Consistency, SerialConsistency};
 use scylla::statement::batch::{Batch, BatchType};
 use scylla::statement::prepared::PreparedStatement;
 
@@ -13,6 +14,10 @@ pub(super) const SELECT_KEY_STATE: &str = "SELECT attempt, epoch, key_state FROM
 pub(super) const SELECT_RAW: &str = "SELECT event_ts, seq_no, attempt, epoch, payload FROM window_raw WHERE namespace = ? AND key_group = ? AND business_key = ? AND bucket_start = ? AND event_ts >= ? AND event_ts <= ?";
 pub(super) const SELECT_TILES: &str = "SELECT tile_start, attempt, epoch, payload FROM window_tiles WHERE namespace = ? AND key_group = ? AND business_key = ? AND granularity_ms = ? AND tile_start >= ? AND tile_start < ?";
 pub(super) const SELECT_TRIGGERS: &str = "SELECT fire_ts, fire_seq, business_key, trigger_kind, window_id, key_group, attempt, epoch FROM window_triggers WHERE namespace = ? AND kg_shard = ? AND (fire_ts, fire_seq) > (?, ?) AND (fire_ts, fire_seq) <= (?, ?)";
+pub(super) const SELECT_META: &str = "SELECT cur_attempt, cut, prev_cut, prev_checkpoint_id, committed_wm, retention_floor, checkpoint_id FROM window_kg_meta WHERE namespace = ? AND key_group = ?";
+pub(super) const INSERT_META: &str = "INSERT INTO window_kg_meta (namespace, key_group, cur_attempt, cut, prev_cut, prev_checkpoint_id, committed_wm, retention_floor, checkpoint_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) IF NOT EXISTS";
+pub(super) const PUBLISH_META: &str = "UPDATE window_kg_meta SET cur_attempt = ?, prev_cut = ?, prev_checkpoint_id = ?, cut = ?, committed_wm = ?, retention_floor = ?, checkpoint_id = ? WHERE namespace = ? AND key_group = ? IF cur_attempt <= ? AND checkpoint_id = ?";
+pub(super) const TAKE_ATTEMPT: &str = "UPDATE window_kg_meta SET cur_attempt = ? WHERE namespace = ? AND key_group = ? IF cur_attempt <= ?";
 pub(super) const SELECT_KG_BUCKETS: &str = "SELECT bucket_start, business_key FROM window_kg_buckets WHERE namespace = ? AND key_group = ?";
 pub(super) const SELECT_KEY_STATE_VERSIONS: &str = "SELECT attempt, epoch FROM window_key_states WHERE namespace = ? AND key_group = ? AND business_key = ?";
 pub(super) const SELECT_TILE_VERSIONS: &str = "SELECT tile_start, attempt, epoch FROM window_tiles WHERE namespace = ? AND key_group = ? AND business_key = ? AND granularity_ms = ?";
@@ -34,6 +39,10 @@ pub(super) struct PreparedDml {
     pub(super) select_raw: PreparedStatement,
     pub(super) select_tiles: PreparedStatement,
     pub(super) select_triggers: PreparedStatement,
+    pub(super) select_meta: PreparedStatement,
+    pub(super) insert_meta: PreparedStatement,
+    pub(super) publish_meta: PreparedStatement,
+    pub(super) take_attempt: PreparedStatement,
 }
 
 #[derive(Clone)]
@@ -49,6 +58,11 @@ pub(super) struct PreparedGc {
     pub(super) delete_triggers: PreparedStatement,
 }
 
+pub(super) fn configure_lwt(stmt: &mut PreparedStatement) {
+    stmt.set_consistency(Consistency::LocalQuorum);
+    stmt.set_serial_consistency(Some(SerialConsistency::LocalSerial));
+}
+
 pub(super) async fn prepare_stmts<const N: usize>(
     session: &Session,
     cql: [&'static str; N],
@@ -59,7 +73,7 @@ pub(super) async fn prepare_stmts<const N: usize>(
         .map_err(|v: Vec<_>| anyhow!("expected {N} prepared statements, got {}", v.len()))
 }
 
-/// Safe driver retries. `window_kg_meta` LWT statements stay unmarked.
+/// Safe driver retries. Do not mark `window_kg_meta` LWT statements.
 pub(super) fn mark_idempotent(mut stmt: PreparedStatement) -> PreparedStatement {
     stmt.set_is_idempotent(true);
     stmt

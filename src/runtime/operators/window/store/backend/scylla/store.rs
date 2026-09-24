@@ -20,12 +20,11 @@ use crate::runtime::operators::window::store::backend::{
 use crate::runtime::state::{OperatorStore, OperatorTaskState, StateSessionHandle};
 
 use super::cql::{
-    mark_idempotent, prepare_stmts, PreparedDml, PreparedGc, DELETE_KEY_STATE_VERSION,
-    DELETE_KG_BUCKETS,
-    DELETE_RAW, DELETE_TILES, DELETE_TILE_VERSION, DELETE_TRIGGERS, INSERT_KEY_STATES,
-    INSERT_KG_BUCKETS, INSERT_RAW, INSERT_TILES, INSERT_TRIGGERS, SELECT_KEY_STATE,
-    SELECT_KEY_STATE_VERSIONS, SELECT_KG_BUCKETS, SELECT_RAW, SELECT_TILES, SELECT_TILE_VERSIONS,
-    SELECT_TRIGGERS,
+    configure_lwt, mark_idempotent, prepare_stmts, PreparedDml, PreparedGc,
+    DELETE_KEY_STATE_VERSION, DELETE_KG_BUCKETS, DELETE_RAW, DELETE_TILES, DELETE_TILE_VERSION,
+    DELETE_TRIGGERS, INSERT_KEY_STATES, INSERT_KG_BUCKETS, INSERT_META, INSERT_RAW, INSERT_TILES,
+    INSERT_TRIGGERS, PUBLISH_META, SELECT_KEY_STATE, SELECT_KEY_STATE_VERSIONS, SELECT_KG_BUCKETS,
+    SELECT_META, SELECT_RAW, SELECT_TILES, SELECT_TILE_VERSIONS, SELECT_TRIGGERS, TAKE_ATTEMPT,
 };
 use super::observe::{self, CallMeter};
 use super::schema::TABLES;
@@ -109,6 +108,10 @@ impl ScyllaWindowStore {
                     select_raw,
                     select_tiles,
                     select_triggers,
+                    select_meta,
+                    mut insert_meta,
+                    mut publish_meta,
+                    mut take_attempt,
                 ] = prepare_stmts(
                     session.as_ref(),
                     [
@@ -121,9 +124,16 @@ impl ScyllaWindowStore {
                         SELECT_RAW,
                         SELECT_TILES,
                         SELECT_TRIGGERS,
+                        SELECT_META,
+                        INSERT_META,
+                        PUBLISH_META,
+                        TAKE_ATTEMPT,
                     ],
                 )
                 .await?;
+                configure_lwt(&mut insert_meta);
+                configure_lwt(&mut publish_meta);
+                configure_lwt(&mut take_attempt);
                 Ok::<_, anyhow::Error>(PreparedDml {
                     insert_raw: mark_idempotent(insert_raw),
                     insert_kg_buckets: mark_idempotent(insert_kg_buckets),
@@ -134,6 +144,10 @@ impl ScyllaWindowStore {
                     select_raw: mark_idempotent(select_raw),
                     select_tiles: mark_idempotent(select_tiles),
                     select_triggers: mark_idempotent(select_triggers),
+                    select_meta: mark_idempotent(select_meta),
+                    insert_meta,
+                    publish_meta,
+                    take_attempt,
                 })
             })
             .await
@@ -456,6 +470,23 @@ impl WindowOperatorStore for ScyllaWindowStoreClient {
     async fn restore(&self, snapshot: &WindowBackendSnapshot) -> Result<()> {
         self.metered("restore", checkpoint::restore(self, snapshot))
             .await
+    }
+
+    async fn prepare_attempt(
+        &self,
+        restored: &WindowBackendSnapshot,
+        committed_wm: Option<i64>,
+        retention_floor: Option<i64>,
+        restored_checkpoint_id: Option<u64>,
+    ) -> Result<()> {
+        checkpoint::prepare_attempt(
+            self,
+            restored,
+            committed_wm,
+            retention_floor,
+            restored_checkpoint_id,
+        )
+        .await
     }
 
     async fn on_checkpoint_complete(
