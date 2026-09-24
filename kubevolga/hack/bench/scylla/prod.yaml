@@ -1,0 +1,35 @@
+# Multi-member rack for a real cluster. Nodes need the operator's dedicated
+# pool (label scylla.scylladb.com/node-type=scylla) and the local-xfs StorageClass.
+developerMode: false
+cpuset: false
+datacenter: datacenter1
+scyllaImage:
+  repository: scylladb/scylla
+  tag: "5.4"
+racks:
+  - name: rack1
+    members: 3
+    storage:
+      storageClassName: scylladb-local-xfs
+      capacity: 120Gi
+    resources:
+      requests:
+        cpu: "1"
+        memory: 4Gi
+      limits:
+        cpu: "1"
+        memory: 4Gi
+    placement:
+      nodeAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+          nodeSelectorTerms:
+            - matchExpressions:
+                - key: scylla.scylladb.com/node-type
+                  operator: In
+                  values:
+                    - scylla
+      tolerations:
+        - key: scylla-operator.scylladb.com/dedicated
+          operator: Equal
+          value: scyllaclusters
+          effect: NoSchedule

@@ -3,7 +3,7 @@ SHELL := /bin/bash
 KUBECTL ?= kubectl
 KUSTOMIZE ?= $(KUBECTL) kustomize
 
-.PHONY: install uninstall deploy undeploy sample unsample render bench unbench
+.PHONY: install uninstall deploy undeploy sample unsample render bench unbench bench-scylla
 
 install:
 	$(KUSTOMIZE) config/crd | $(KUBECTL) apply -f -
@@ -34,3 +34,8 @@ bench:
 
 unbench:
 	$(KUSTOMIZE) hack/bench | $(KUBECTL) delete --ignore-not-found=true -f -
+
+# Scylla operator chart. Default values are the one-member Kind file.
+# VOLGA_SCYLLA_VALUES=kubevolga/hack/bench/scylla/prod.yaml for a real cluster.
+bench-scylla:
+	../scripts/bench-scylla

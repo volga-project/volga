@@ -186,12 +186,16 @@ scripts/kube-test-env setup
 # 2) Prom + Grafana in namespace volga-bench (infra nodeSelector).
 make -C kubevolga bench
 
-# 3) Reach Prom (oracles/dump) and the Grafana board from the laptop.
+# 3) Scylla operator chart. Kind values are one member on the infra node.
+#    A real cluster: VOLGA_SCYLLA_VALUES=kubevolga/hack/bench/scylla/prod.yaml make -C kubevolga bench-scylla
+make -C kubevolga bench-scylla
+
+# 4) Reach Prom (oracles/dump) and the Grafana board from the laptop.
 export VOLGA_KUBE_CONTEXT="${VOLGA_KUBE_CONTEXT:-kind-kubevolga}"
 kubectl --context "$VOLGA_KUBE_CONTEXT" -n volga-bench port-forward svc/prometheus 9090:9090 &
 kubectl --context "$VOLGA_KUBE_CONTEXT" -n volga-bench port-forward svc/grafana 3000:3000 &
 
-# 4) Short Kind smoke (example.yaml is a 1h kill scenario; override duration).
+# 5) Short Kind smoke (example.yaml is a 1h kill scenario; override duration).
 cargo run --bin volga-bench -- \
   --config kubevolga/hack/bench/example.yaml \
   --env kube \

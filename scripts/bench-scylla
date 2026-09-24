@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Install the Scylla operator chart. Kind uses one member; VOLGA_SCYLLA_VALUES
+# can point at kubevolga/hack/bench/scylla/prod.yaml for a real cluster.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CONTEXT="${VOLGA_KUBE_CONTEXT:-kind-${VOLGA_KIND_CLUSTER:-kubevolga}}"
+VALUES="${VOLGA_SCYLLA_VALUES:-$ROOT/kubevolga/hack/bench/scylla/kind.yaml}"
+KUBECTL=(kubectl --context "$CONTEXT")
+
+command -v helm >/dev/null || { echo "missing required command: helm" >&2; exit 2; }
+command -v kubectl >/dev/null || { echo "missing required command: kubectl" >&2; exit 2; }
+
+helm repo add scylla https://scylla-operator-charts.storage.googleapis.com/stable
+helm repo update scylla
+
+helm upgrade --install scylla-operator scylla/scylla-operator \
+  --create-namespace --namespace scylla-operator --kube-context "$CONTEXT"
+helm upgrade --install scylla scylla/scylla \
+  --create-namespace --namespace scylla --kube-context "$CONTEXT" \
+  --values "$VALUES"
+
+"${KUBECTL[@]}" -n scylla-operator rollout status deployment/scylla-operator --timeout=180s
+"${KUBECTL[@]}" -n scylla wait --for=condition=Ready pod -l scylla/cluster=scylla --timeout=600s
+echo "CQL: scylla-client.scylla.svc.cluster.local:9042"
