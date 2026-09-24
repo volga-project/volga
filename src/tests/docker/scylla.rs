@@ -78,7 +78,7 @@ fn free_port() -> u16 {
     listener.local_addr().expect("ephemeral port").port()
 }
 
-fn contact() -> String {
+pub(super) fn contact() -> String {
     if let Ok(cp) = std::env::var("VOLGA_SCYLLA_CONTACT") {
         return cp;
     }
@@ -119,7 +119,7 @@ fn contact() -> String {
         .clone()
 }
 
-fn unique_keyspace(prefix: &str) -> String {
+pub(super) fn unique_keyspace(prefix: &str) -> String {
     static N: AtomicU64 = AtomicU64::new(0);
     format!(
         "{}_{}_{}",

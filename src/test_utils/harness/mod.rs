@@ -133,6 +133,14 @@ impl PipelineLaunchSpec {
         self.pipeline.state.checkpoint = checkpoint;
         self
     }
+
+    pub fn with_operator_backend(
+        mut self,
+        backend: crate::api::spec::state::OperatorStateBackendConfig,
+    ) -> Self {
+        self.pipeline.state.operator_backend = backend;
+        self
+    }
 }
 
 /// Install/replace the in-memory gRPC sink address, preserving any upsert keys already on the pipeline.
