@@ -125,9 +125,11 @@ pub(super) async fn maintain(
     else {
         return Ok(());
     };
-    let Some((committed_wm, floor)) = wo.committed_retention_cutoff() else {
+    // Gauges follow the live watermark. Deletes wait for a committed checkpoint.
+    let Some((_, live_floor)) = wo.retention_cutoff() else {
         return Ok(());
     };
+    let committed = wo.committed_retention_cutoff();
     if !client.begin_maintain_tick() {
         return Ok(());
     }
@@ -135,7 +137,7 @@ pub(super) async fn maintain(
     observe::observe(
         &meter,
         "maintain",
-        run_maintain(client, ns, wo, committed_wm, floor, &meter),
+        run_maintain(client, ns, wo, live_floor, committed, &meter),
     )
     .await
 }
@@ -144,14 +146,15 @@ async fn run_maintain(
     client: &ScyllaWindowStoreClient,
     ns: &crate::runtime::operators::window::model::StateNamespace,
     wo: &crate::runtime::operators::window::state::WindowOperatorState,
-    committed_wm: i64,
-    floor: i64,
+    live_floor: i64,
+    committed: Option<(i64, i64)>,
     meter: &CallMeter,
 ) -> Result<()> {
     let session = client.inner.session();
     let gc = client.inner.prepared_gc().await?;
     let range = wo.scope().key_group_range;
-    let floor_bucket = align_down(floor, RAW_BUCKET_MS);
+    let floor_bucket = align_down(live_floor, RAW_BUCKET_MS);
+    let committed_floor_bucket = committed.map(|(_, floor)| align_down(floor, RAW_BUCKET_MS));
     let granularities = wo.tile_granularity_ms();
 
     let started = Instant::now();
@@ -177,13 +180,35 @@ async fn run_maintain(
             let expired = by_key.entry((kg, business_key)).or_default();
             if bucket_start < floor_bucket {
                 kg_buckets_expired += 1;
-                expired.push(bucket_start);
             } else {
                 kg_buckets_live += 1;
+            }
+            if committed_floor_bucket.is_some_and(|bound| bucket_start < bound) {
+                expired.push(bucket_start);
             }
         }
     }
     phase_done(meter, "index_scan", started);
+
+    let keys = by_key.len() as u64;
+    let Some((committed_wm, committed_floor)) = committed else {
+        publish_tick(
+            meter,
+            &TickStats {
+                kg_buckets_live,
+                keys,
+                kg_buckets_expired,
+                tile_version_rows: 0,
+                key_state_rows: 0,
+                raw_partitions_deleted: 0,
+                tile_range_deletes: 0,
+                trigger_shard_deletes: 0,
+                tile_versions_deleted: 0,
+                key_state_versions_deleted: 0,
+            },
+        );
+        return Ok(());
+    };
 
     let kgs: Vec<i32> = {
         let mut seen = BTreeSet::new();
@@ -192,15 +217,14 @@ async fn run_maintain(
         }
         seen.into_iter().collect()
     };
-    let retention_by_kg: HashMap<i32, Retention> =
-        try_join_all(kgs.into_iter().map(|kg| async move {
-            Ok::<_, anyhow::Error>((kg, retention_for(client, kg)))
-        }))
-        .await?
-        .into_iter()
-        .collect();
+    let retention_by_kg: HashMap<i32, Retention> = try_join_all(
+        kgs.into_iter()
+            .map(|kg| async move { Ok::<_, anyhow::Error>((kg, retention_for(client, kg))) }),
+    )
+    .await?
+    .into_iter()
+    .collect();
 
-    let keys = by_key.len() as u64;
     let key_started = Instant::now();
     let mut key_futs = Vec::new();
     for ((kg, key), expired) in by_key {
@@ -221,7 +245,7 @@ async fn run_maintain(
                 key,
                 expired,
                 granularities,
-                floor,
+                committed_floor,
                 retention,
             )
             .await
