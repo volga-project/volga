@@ -7,7 +7,9 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
-use crate::api::spec::state::ScyllaConfig;
+use anyhow::Result;
+
+use crate::api::spec::state::{OperatorStateBackendConfig, ScyllaConfig};
 use crate::runtime::operators::window::model::{
     Cursor, KeyState, PartitionKey, RawRun, StateNamespace, TileMap, TileRun, TimeGranularity,
     WindowTiles, WindowTrigger, WindowTriggerKind,
@@ -18,6 +20,11 @@ use crate::runtime::operators::window::store::backend::{
 };
 use crate::runtime::operators::window::store::data::cursors_from_batch;
 use crate::runtime::state::OperatorStore;
+use crate::test_utils::checkpoint::{
+    assert_checkpoint_multi_restore, checkpoint_recovery_launch_spec,
+    run_checkpoint_worker_kill_recovery, CheckpointWorkload, SINGLE_WORKER_PARALLELISM,
+};
+use crate::test_utils::harness::{RuntimeEnv, WorkerKillMode};
 use crate::test_utils::window_aggs as test_utils;
 use arrow::array::RecordBatch;
 use testcontainers::core::WaitFor;
@@ -78,7 +85,7 @@ fn free_port() -> u16 {
     listener.local_addr().expect("ephemeral port").port()
 }
 
-pub(super) fn contact() -> String {
+fn contact() -> String {
     if let Ok(cp) = std::env::var("VOLGA_SCYLLA_CONTACT") {
         return cp;
     }
@@ -119,7 +126,7 @@ pub(super) fn contact() -> String {
         .clone()
 }
 
-pub(super) fn unique_keyspace(prefix: &str) -> String {
+fn unique_keyspace(prefix: &str) -> String {
     static N: AtomicU64 = AtomicU64::new(0);
     format!(
         "{}_{}_{}",
@@ -857,4 +864,24 @@ async fn window_scylla_store_restore_uses_earlier_cut() {
         stored_versions(&store, ns.bytes.as_slice(), &partition.business_key).await,
         (vec![(1, 0), (1, 1)], vec![(1_000, 1, 0), (2_000, 1, 1)])
     );
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_docker_scylla_local_worker_window_checkpoint_restore() -> Result<()> {
+    let launch =
+        checkpoint_recovery_launch_spec(SINGLE_WORKER_PARALLELISM, CheckpointWorkload::Window)
+            .with_operator_backend(OperatorStateBackendConfig::Scylla(ScyllaConfig {
+                contact_points: vec![contact()],
+                keyspace: unique_keyspace("volga_local_window"),
+                datacenter: None,
+            }));
+    let report = run_checkpoint_worker_kill_recovery(
+        RuntimeEnv::Local,
+        launch,
+        WorkerKillMode::Abrupt,
+        CheckpointWorkload::Window,
+    )
+    .await?;
+    assert_checkpoint_multi_restore(&report, 1, 1)
 }
