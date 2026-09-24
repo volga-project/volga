@@ -2189,7 +2189,7 @@
               "group": "A"
             }
           },
-          "unit": "percentunit"
+          "unit": "percent"
         },
         "overrides": []
       },
