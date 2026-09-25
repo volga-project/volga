@@ -59,6 +59,12 @@ pub(super) async fn prepare_stmts<const N: usize>(
         .map_err(|v: Vec<_>| anyhow!("expected {N} prepared statements, got {}", v.len()))
 }
 
+/// Safe driver retries. `window_kg_meta` LWT statements stay unmarked.
+pub(super) fn mark_idempotent(mut stmt: PreparedStatement) -> PreparedStatement {
+    stmt.set_is_idempotent(true);
+    stmt
+}
+
 pub(super) async fn unlogged_batch(
     session: &Session,
     stmt: &PreparedStatement,
@@ -68,6 +74,8 @@ pub(super) async fn unlogged_batch(
         return Ok(());
     }
     let mut batch = Batch::new(BatchType::Unlogged);
+    // session.batch reads this flag from the Batch, not the prepared statements.
+    batch.set_is_idempotent(stmt.get_is_idempotent());
     for _ in 0..values.len() {
         batch.append_statement(stmt.clone());
     }
