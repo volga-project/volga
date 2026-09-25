@@ -92,7 +92,10 @@ suites start. `scripts/docker-test-env setup` prefetches testcontainers images
 (LocalStack, Redpanda) before building `volga:latest`. Kube uses the Kind
 cluster named by `VOLGA_KIND_CLUSTER` (default: `kubevolga`), created from
 `kubevolga/hack/kind-multi.yaml` (control-plane + infra + 2 tainted worker
-nodes). A cluster without that topology is deleted and recreated.
+nodes). A cluster without that topology is deleted and recreated. Setup also
+applies `kubevolga/config/test-scylla` (one `scylladb/scylla:5.4` shard on the
+infra node) and exports `VOLGA_KUBE_SCYLLA_CONTACT` to
+`scylla.default.svc.cluster.local:9042`.
 
 ### CI image cache
 

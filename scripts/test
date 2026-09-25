@@ -122,6 +122,8 @@ check_kube() {
     "$ROOT/scripts/kube-test-env" setup
   fi
   export VOLGA_KUBE_CONTEXT="$context"
+  export VOLGA_KUBE_SCYLLA_CONTACT="${VOLGA_KUBE_SCYLLA_CONTACT:-scylla.default.svc.cluster.local:9042}"
+  export VOLGA_KUBE_SCYLLA_DATACENTER="${VOLGA_KUBE_SCYLLA_DATACENTER:-datacenter1}"
 }
 
 cleanup_kube() {

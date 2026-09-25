@@ -18,16 +18,22 @@ async fn wait_for_localstack_ready(addr: &str) {
 async fn create_localstack_bucket(endpoint: &str, bucket: &str) {
     let url = format!("{}/{}", endpoint, bucket);
     let client = reqwest::Client::new();
-    for _ in 0..10 {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut last_error = String::from("no response");
+    loop {
         match client.put(&url).send().await {
             Ok(resp) if resp.status().is_success() || resp.status().as_u16() == 409 => {
                 return;
             }
-            _ => {}
+            Ok(resp) => last_error = format!("HTTP {}", resp.status()),
+            Err(error) => last_error = error.to_string(),
+        }
+        if std::time::Instant::now() >= deadline {
+            break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     }
-    panic!("Failed to create LocalStack bucket at {}", url);
+    panic!("Failed to create LocalStack bucket at {url}: {last_error}");
 }
 
 #[tokio::test]

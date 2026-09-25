@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 
+use crate::api::spec::state::{OperatorStateBackendConfig, ScyllaConfig};
 use crate::test_utils::checkpoint::{
     assert_checkpoint_multi_restore, assert_checkpoint_restore,
     checkpoint_multi_failure_launch_spec, checkpoint_recovery_launch_spec, kube_checkpoint_spec,
@@ -107,7 +108,7 @@ async fn test_kube_mid_flight_checkpoint_kill_after_safe_restores_prior() -> Res
 
 #[tokio::test]
 #[ignore]
-async fn test_kube_single_worker_window_checkpoint_restore() -> Result<()> {
+async fn test_kube_in_mem_single_worker_window_checkpoint_restore() -> Result<()> {
     let report = run_checkpoint_worker_kill_recovery(
         RuntimeEnv::Kube,
         kube_checkpoint_launch(
@@ -122,12 +123,66 @@ async fn test_kube_single_worker_window_checkpoint_restore() -> Result<()> {
 
 #[tokio::test]
 #[ignore]
-async fn test_kube_multi_worker_window_checkpoint_restore() -> Result<()> {
+async fn test_kube_in_mem_multi_worker_window_checkpoint_restore() -> Result<()> {
     let report = run_checkpoint_worker_kill_recovery(
         RuntimeEnv::Kube,
         kube_checkpoint_launch(
             checkpoint_recovery_launch_spec(MULTI_WORKER_PARALLELISM, CheckpointWorkload::Window),
         ),
+        WorkerKillMode::Abrupt,
+        CheckpointWorkload::Window,
+    )
+    .await?;
+    assert_checkpoint_multi_restore(&report, 1, 2)
+}
+
+fn scylla_window_launch(launch: PipelineLaunchSpec) -> Result<PipelineLaunchSpec> {
+    let contact = std::env::var("VOLGA_KUBE_SCYLLA_CONTACT").map_err(|_| {
+        anyhow::anyhow!(
+            "VOLGA_KUBE_SCYLLA_CONTACT must be a Scylla address the worker pods can dial"
+        )
+    })?;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let keyspace = format!(
+        "volga_kube_{}_{}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    );
+    Ok(kube_checkpoint_launch(launch).with_operator_backend(
+        OperatorStateBackendConfig::Scylla(ScyllaConfig {
+            contact_points: vec![contact],
+            keyspace,
+            datacenter: std::env::var("VOLGA_KUBE_SCYLLA_DATACENTER").ok(),
+        }),
+    ))
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_kube_scylla_single_worker_window_checkpoint_restore() -> Result<()> {
+    let report = run_checkpoint_worker_kill_recovery(
+        RuntimeEnv::Kube,
+        scylla_window_launch(checkpoint_recovery_launch_spec(
+            SINGLE_WORKER_PARALLELISM,
+            CheckpointWorkload::Window,
+        ))?,
+        WorkerKillMode::Abrupt,
+        CheckpointWorkload::Window,
+    )
+    .await?;
+    assert_checkpoint_multi_restore(&report, 1, 1)
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_kube_scylla_multi_worker_window_checkpoint_restore() -> Result<()> {
+    let report = run_checkpoint_worker_kill_recovery(
+        RuntimeEnv::Kube,
+        scylla_window_launch(checkpoint_recovery_launch_spec(
+            MULTI_WORKER_PARALLELISM,
+            CheckpointWorkload::Window,
+        ))?,
         WorkerKillMode::Abrupt,
         CheckpointWorkload::Window,
     )
