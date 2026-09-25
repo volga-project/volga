@@ -1,0 +1,243 @@
+{
+  "uid": "flink-bench",
+  "title": "Flink bench",
+  "tags": ["flink", "bench"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "time": {"from": "now-15m", "to": "now"},
+  "links": [
+    {
+      "asDropdown": false,
+      "icon": "dashboard",
+      "keepTime": true,
+      "targetBlank": false,
+      "title": "Volga bench",
+      "type": "link",
+      "url": "/d/volga-bench/volga-bench"
+    }
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "backend",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "prometheus"},
+        "query": "label_values(flink_jobmanager_numRegisteredTaskManagers, state_backend)",
+        "includeAll": true,
+        "multi": false,
+        "allValue": ".*",
+        "current": {"text": "All", "value": "$__all"},
+        "refresh": 2,
+        "sort": 1,
+        "hide": 0,
+        "label": "state backend"
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Flow",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Throughput",
+      "description": "Per-operator numRecordsOut rate. Source is ingest, the OVER aggregate is the window, blackhole is the sink. Do not add the series together.",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 1},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (operator_name) (rate(flink_taskmanager_job_task_operator_numRecordsOut{state_backend=~\"$backend\"}[1m]))",
+          "legendFormat": "{{operator_name}} out / s"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "ops", "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 10, "spanNulls": true}}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}}
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Event-time lag",
+      "description": "time()*1000 minus currentInputWatermark. Watermarks at or below 0 (unset Long.MIN_VALUE) are dropped.",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 1},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "quantile(0.50, time() * 1000 - (flink_taskmanager_job_task_operator_currentInputWatermark{state_backend=~\"$backend\"} > 0))",
+          "legendFormat": "p50"
+        },
+        {
+          "refId": "B",
+          "expr": "quantile(0.99, time() * 1000 - (flink_taskmanager_job_task_operator_currentInputWatermark{state_backend=~\"$backend\"} > 0))",
+          "legendFormat": "p99"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "ms", "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 10, "spanNulls": true}}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}}
+    },
+    {
+      "id": 4,
+      "type": "row",
+      "title": "Checkpoints",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 9},
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Checkpoints completed / failed",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 10},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "flink_jobmanager_job_numberOfCompletedCheckpoints{state_backend=~\"$backend\"}",
+          "legendFormat": "completed"
+        },
+        {
+          "refId": "B",
+          "expr": "flink_jobmanager_job_numberOfFailedCheckpoints{state_backend=~\"$backend\"}",
+          "legendFormat": "failed"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "short", "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 10, "spanNulls": true}}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}}
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Last checkpoint duration and size",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 10},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "flink_jobmanager_job_lastCheckpointDuration{state_backend=~\"$backend\"}",
+          "legendFormat": "duration"
+        },
+        {
+          "refId": "B",
+          "expr": "flink_jobmanager_job_lastCheckpointSize{state_backend=~\"$backend\"}",
+          "legendFormat": "size"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 10, "spanNulls": true}},
+        "overrides": [
+          {"matcher": {"id": "byName", "options": "duration"}, "properties": [{"id": "unit", "value": "ms"}]},
+          {"matcher": {"id": "byName", "options": "size"}, "properties": [{"id": "unit", "value": "bytes"}]}
+        ]
+      },
+      "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}}
+    },
+    {
+      "id": 7,
+      "type": "row",
+      "title": "Resources",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 18},
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "CPU (cAdvisor)",
+      "description": "1.0 = one full core. jobmanager and taskmanager containers.",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 19},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (pod) (rate(container_cpu_usage_seconds_total{container=~\"jobmanager|taskmanager\"}[1m]))",
+          "legendFormat": "{{pod}}"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "cores", "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 10, "spanNulls": true}}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}}
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Memory (cAdvisor working set)",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 19},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (pod) (container_memory_working_set_bytes{container=~\"jobmanager|taskmanager\"})",
+          "legendFormat": "{{pod}}"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "bytes", "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 10, "spanNulls": true}}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}}
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Task time (busy / idle / backpressured)",
+      "description": "Flink task time budget. The three lines for one task should sum to about 1000 ms/s.",
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 27},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "avg by (task_name) (flink_taskmanager_job_task_busyTimeMsPerSecond{state_backend=~\"$backend\"})",
+          "legendFormat": "{{task_name}} busy"
+        },
+        {
+          "refId": "B",
+          "expr": "avg by (task_name) (flink_taskmanager_job_task_idleTimeMsPerSecond{state_backend=~\"$backend\"})",
+          "legendFormat": "{{task_name}} idle"
+        },
+        {
+          "refId": "C",
+          "expr": "avg by (task_name) (flink_taskmanager_job_task_backPressuredTimeMsPerSecond{state_backend=~\"$backend\"})",
+          "legendFormat": "{{task_name}} backpressured"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "ms", "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 10, "spanNulls": true}}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}}
+    },
+    {
+      "id": 11,
+      "type": "row",
+      "title": "RocksDB",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 35},
+      "collapsed": true,
+      "panels": [
+        {
+          "id": 12,
+          "type": "timeseries",
+          "title": "RocksDB block cache and live data",
+          "description": "Empty on hashmap. Names follow the Prometheus reporter; confirm on the first rocksdb scrape.",
+          "gridPos": {"h": 8, "w": 24, "x": 0, "y": 36},
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum(flink_taskmanager_job_task_operator_rocksdb_block_cache_usage{state_backend=~\"$backend\"})",
+              "legendFormat": "block cache"
+            },
+            {
+              "refId": "B",
+              "expr": "sum(flink_taskmanager_job_task_operator_rocksdb_estimate_live_data_size{state_backend=~\"$backend\"})",
+              "legendFormat": "live data"
+            }
+          ],
+          "fieldConfig": {"defaults": {"unit": "bytes", "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 10, "spanNulls": true}}, "overrides": []},
+          "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}}
+        }
+      ]
+    }
+  ]
+}
