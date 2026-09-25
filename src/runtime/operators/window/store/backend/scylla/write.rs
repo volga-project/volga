@@ -14,6 +14,7 @@ use crate::runtime::operators::window::store::backend::codec::{encode_batch, enc
 use crate::runtime::operators::window::store::data::cursors_from_batch;
 
 use super::cql::unlogged_batch;
+use super::observe::{note_bytes, note_rows, note_stmt};
 use super::schema::{align_down, kg_shard, RAW_BUCKET_MS};
 use super::store::ScyllaWindowStoreClient;
 
@@ -27,6 +28,8 @@ pub(super) async fn insert_key_state(
     epoch: i64,
     state: &KeyState,
 ) -> Result<()> {
+    note_stmt();
+    note_rows(1);
     session
         .execute_unpaged(stmt, (ns, kg, key, attempt, epoch, encode_val(state)?))
         .await?;
@@ -116,7 +119,12 @@ async fn commit_events_at(
                 cursor.seq_no as i64,
                 attempt,
                 epoch,
-                encode_batch(&events.slice(*idx, 1))?,
+                {
+                    let payload = encode_batch(&events.slice(*idx, 1))?;
+                    note_rows(1);
+                    note_bytes(payload.len() as u64);
+                    payload
+                },
             ));
         }
         let session = Arc::clone(&session);

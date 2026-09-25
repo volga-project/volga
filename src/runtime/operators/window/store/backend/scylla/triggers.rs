@@ -9,6 +9,7 @@ use crate::runtime::operators::window::model::{
     Cursor, PartitionKey, WindowTrigger, WindowTriggerKind,
 };
 
+use super::observe::{note_rows, note_stmt};
 use super::schema::kg_shard;
 use super::store::ScyllaWindowStoreClient;
 
@@ -86,6 +87,7 @@ pub(super) async fn load_triggers(
         let select = prepared.select_triggers.clone();
         let ns = ns.clone();
         async move {
+            note_stmt();
             let result = session
                 .execute_unpaged(&select, (ns, shard, seek.0, seek.1, through.ts, i64::MAX))
                 .await?;
@@ -100,6 +102,7 @@ pub(super) async fn load_triggers(
             .rows::<(i64, i64, Vec<u8>, i8, i64, i32, i64, i64)>()?
         {
             let (ts, seq, business_key, kind, window_id, key_group, attempt, epoch) = row?;
+            note_rows(1);
             if let Some(trigger) = visible_trigger(
                 client,
                 after,

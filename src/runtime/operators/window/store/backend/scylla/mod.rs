@@ -1,6 +1,7 @@
 mod checkpoint;
 mod cql;
 mod maintain;
+mod observe;
 mod read;
 mod schema;
 mod store;

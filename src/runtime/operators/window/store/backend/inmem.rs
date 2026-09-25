@@ -219,10 +219,10 @@ impl InMemWindowStore {
     ) {
         use crate::runtime::metrics::set_task_gauge;
         use metrics::{
-            METRIC_WO_STATE_KEY_STATES_BYTES, METRIC_WO_STATE_KEY_STATES_COUNT,
-            METRIC_WO_STATE_RAW_BYTES, METRIC_WO_STATE_RAW_COUNT, METRIC_WO_STATE_TILES_BYTES,
-            METRIC_WO_STATE_TILES_COUNT, METRIC_WO_STATE_TRIGGERS_BYTES,
-            METRIC_WO_STATE_TRIGGERS_COUNT,
+            METRIC_WO_INMEM_STATE_KEY_STATES_BYTES, METRIC_WO_INMEM_STATE_KEY_STATES_COUNT,
+            METRIC_WO_INMEM_STATE_RAW_BYTES, METRIC_WO_INMEM_STATE_RAW_COUNT, METRIC_WO_INMEM_STATE_TILES_BYTES,
+            METRIC_WO_INMEM_STATE_TILES_COUNT, METRIC_WO_INMEM_STATE_TRIGGERS_BYTES,
+            METRIC_WO_INMEM_STATE_TRIGGERS_COUNT,
         };
 
         let mut raw_count = 0u64;
@@ -268,14 +268,14 @@ impl InMemWindowStore {
         }
         let labels = Some(labels);
         for (name, value) in [
-            (METRIC_WO_STATE_RAW_COUNT, raw_count),
-            (METRIC_WO_STATE_RAW_BYTES, raw_bytes),
-            (METRIC_WO_STATE_TILES_COUNT, tiles_count),
-            (METRIC_WO_STATE_TILES_BYTES, tiles_bytes),
-            (METRIC_WO_STATE_TRIGGERS_COUNT, triggers_count),
-            (METRIC_WO_STATE_TRIGGERS_BYTES, triggers_bytes),
-            (METRIC_WO_STATE_KEY_STATES_COUNT, key_states_count),
-            (METRIC_WO_STATE_KEY_STATES_BYTES, key_states_bytes),
+            (METRIC_WO_INMEM_STATE_RAW_COUNT, raw_count),
+            (METRIC_WO_INMEM_STATE_RAW_BYTES, raw_bytes),
+            (METRIC_WO_INMEM_STATE_TILES_COUNT, tiles_count),
+            (METRIC_WO_INMEM_STATE_TILES_BYTES, tiles_bytes),
+            (METRIC_WO_INMEM_STATE_TRIGGERS_COUNT, triggers_count),
+            (METRIC_WO_INMEM_STATE_TRIGGERS_BYTES, triggers_bytes),
+            (METRIC_WO_INMEM_STATE_KEY_STATES_COUNT, key_states_count),
+            (METRIC_WO_INMEM_STATE_KEY_STATES_BYTES, key_states_bytes),
         ] {
             set_task_gauge(name, value as f64, task_id, labels);
         }

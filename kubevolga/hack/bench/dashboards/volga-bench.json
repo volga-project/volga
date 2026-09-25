@@ -7,7 +7,7 @@
   ],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 9,
+  "version": 10,
   "refresh": "5s",
   "time": {
     "from": "now-15m",
@@ -456,7 +456,7 @@
     {
       "id": 43,
       "type": "timeseries",
-      "title": "Window batches / late / prune",
+      "title": "Window batches / late",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -503,18 +503,6 @@
           "editorMode": "code",
           "instant": false,
           "range": true
-        },
-        {
-          "refId": "D",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "sum(rate(volga_wo_maintain_pruned_rows{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"}[1m]))",
-          "legendFormat": "pruned rows / s",
-          "editorMode": "code",
-          "instant": false,
-          "range": true
         }
       ],
       "fieldConfig": {
@@ -546,17 +534,30 @@
           "sort": "desc"
         }
       },
-      "description": "Histogram _count is calls, not rows: ingest batches = insert_batch, wm process = process_due. Late/prune are rows. Do not compare batches/s to sink rec/s. Prune should track sink on a caught-up RANGE window."
+      "description": "Histogram _count is calls, not rows: ingest batches = insert_batch, wm process = process_due. Late drops are rows. Do not compare batches/s to sink rec/s."
+    },
+    {
+      "id": 45,
+      "type": "row",
+      "title": "In-memory store",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 29
+      },
+      "collapsed": false,
+      "panels": []
     },
     {
       "id": 42,
       "type": "timeseries",
-      "title": "Window state bytes",
+      "title": "In-memory state bytes",
       "gridPos": {
         "h": 8,
-        "w": 12,
+        "w": 8,
         "x": 0,
-        "y": 29
+        "y": 30
       },
       "datasource": {
         "type": "prometheus",
@@ -569,7 +570,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(volga_wo_state_raw_bytes{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"})",
+          "expr": "sum(volga_wo_inmem_state_raw_bytes{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"})",
           "legendFormat": "raw",
           "editorMode": "code",
           "instant": false,
@@ -581,7 +582,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(volga_wo_state_tiles_bytes{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"})",
+          "expr": "sum(volga_wo_inmem_state_tiles_bytes{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"})",
           "legendFormat": "tiles",
           "editorMode": "code",
           "instant": false,
@@ -593,7 +594,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(volga_wo_state_triggers_bytes{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"})",
+          "expr": "sum(volga_wo_inmem_state_triggers_bytes{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"})",
           "legendFormat": "triggers",
           "editorMode": "code",
           "instant": false,
@@ -605,7 +606,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(volga_wo_state_key_states_bytes{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"})",
+          "expr": "sum(volga_wo_inmem_state_key_states_bytes{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"})",
           "legendFormat": "key states",
           "editorMode": "code",
           "instant": false,
@@ -647,12 +648,12 @@
     {
       "id": 44,
       "type": "timeseries",
-      "title": "Window state counts",
+      "title": "In-memory state counts",
       "gridPos": {
         "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 29
+        "w": 8,
+        "x": 8,
+        "y": 30
       },
       "datasource": {
         "type": "prometheus",
@@ -665,7 +666,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(volga_wo_state_raw_count{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"})",
+          "expr": "sum(volga_wo_inmem_state_raw_count{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"})",
           "legendFormat": "raw",
           "editorMode": "code",
           "instant": false,
@@ -677,7 +678,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(volga_wo_state_tiles_count{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"})",
+          "expr": "sum(volga_wo_inmem_state_tiles_count{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"})",
           "legendFormat": "tiles",
           "editorMode": "code",
           "instant": false,
@@ -689,7 +690,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(volga_wo_state_triggers_count{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"})",
+          "expr": "sum(volga_wo_inmem_state_triggers_count{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"})",
           "legendFormat": "triggers",
           "editorMode": "code",
           "instant": false,
@@ -701,7 +702,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(volga_wo_state_key_states_count{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"})",
+          "expr": "sum(volga_wo_inmem_state_key_states_count{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"})",
           "legendFormat": "key states",
           "editorMode": "code",
           "instant": false,
@@ -740,6 +741,764 @@
       "description": "In-mem backend entry counts (not bytes), summed across selected Window tasks. key_states \u2248 distinct keys. Triggers can dwarf raw rows when process_due lags."
     },
     {
+      "id": 46,
+      "type": "timeseries",
+      "title": "In-memory pruned rows",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 30
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(rate(volga_wo_inmem_pruned_rows{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"}[1m]))",
+          "legendFormat": "pruned rows / s",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Rows dropped by the in-memory maintain tick. Empty when the job runs the Scylla store."
+    },
+    {
+      "id": 80,
+      "type": "row",
+      "title": "Scylla store",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 38
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 81,
+      "type": "timeseries",
+      "title": "Scylla calls",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 39
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (op) (rate(volga_wo_scylla_calls_total{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"}[1m]))",
+          "legendFormat": "{{op}}",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Successful store-trait calls per second. A failed call is not counted here."
+    },
+    {
+      "id": 82,
+      "type": "timeseries",
+      "title": "Scylla failures",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 39
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (op) (rate(volga_wo_scylla_failures_total{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"}[1m]))",
+          "legendFormat": "{{op}}",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Failed store-trait calls per second. A failure does not increment calls."
+    },
+    {
+      "id": 83,
+      "type": "timeseries",
+      "title": "Scylla call latency p99",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 39
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le, op) (rate(volga_wo_scylla_latency_ms_bucket{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"}[1m])))",
+          "legendFormat": "{{op}}",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "One histogram sample per store-trait call, including failures. p99 of the merged selected tasks."
+    },
+    {
+      "id": 84,
+      "type": "timeseries",
+      "title": "Scylla rows",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 47
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (op) (rate(volga_wo_scylla_rows_total{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"}[1m]))",
+          "legendFormat": "{{op}}",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Rows sent or returned by the call. Triggers, key state, and meta stay row counts."
+    },
+    {
+      "id": 85,
+      "type": "timeseries",
+      "title": "Scylla payload bytes",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 47
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (op) (rate(volga_wo_scylla_payload_bytes_total{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"}[1m]))",
+          "legendFormat": "{{op}}",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Raw and tile blobs on load_raw, load_tiles, commit_events, and load_window_data. Not a CQL frame size."
+    },
+    {
+      "id": 86,
+      "type": "timeseries",
+      "title": "Scylla statements",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 47
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (op) (rate(volga_wo_scylla_statements_total{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"}[1m]))",
+          "legendFormat": "{{op}}",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "CQL statements issued inside the call. One unlogged batch counts as one statement."
+    },
+    {
+      "id": 87,
+      "type": "timeseries",
+      "title": "Scylla live rows",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 55
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(volga_wo_scylla_kg_buckets_live{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"})",
+          "legendFormat": "key-minutes",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(volga_wo_scylla_keys{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"})",
+          "legendFormat": "keys",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(volga_wo_scylla_kg_buckets_expired{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"})",
+          "legendFormat": "expired key-minutes",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        },
+        {
+          "refId": "E",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(volga_wo_scylla_tile_version_rows{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"})",
+          "legendFormat": "tile versions",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        },
+        {
+          "refId": "F",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(volga_wo_scylla_key_state_rows{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"})",
+          "legendFormat": "key state kept",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Counts from the scans this maintain tick already did. Not COUNT(*) and not on-disk bytes. Empty on the in-memory backend."
+    },
+    {
+      "id": 88,
+      "type": "timeseries",
+      "title": "Scylla deletes",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 55
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(rate(volga_wo_scylla_raw_partitions_deleted{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"}[1m]))",
+          "legendFormat": "raw partitions",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(rate(volga_wo_scylla_tile_range_deletes{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"}[1m]))",
+          "legendFormat": "tile ranges",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(rate(volga_wo_scylla_trigger_shard_deletes{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"}[1m]))",
+          "legendFormat": "trigger shards",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (table) (rate(volga_wo_scylla_version_rows_deleted{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"}[1m]))",
+          "legendFormat": "versions {{table}}",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Work issued by the tick. Trigger growth shows up as commits continuing while trigger shard deletes stay at zero."
+    },
+    {
+      "id": 89,
+      "type": "timeseries",
+      "title": "Scylla maintain tick",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 63
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(volga_wo_scylla_latency_ms_bucket{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\",op=\"maintain\"}[1m])))",
+          "legendFormat": "p99",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(volga_wo_scylla_latency_ms_bucket{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\",op=\"maintain\"}[1m])))",
+          "legendFormat": "p50",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Wall time of a Scylla maintain tick. Skipped ticks inside 10s are not samples. The worker cleaner stays at 1s."
+    },
+    {
+      "id": 90,
+      "type": "timeseries",
+      "title": "Scylla maintain phases",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 63
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le, phase) (rate(volga_wo_scylla_maintain_phase_ms_bucket{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"}[1m])))",
+          "legendFormat": "{{phase}}",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "p99 of index_scan, key_gc, and trigger_delete."
+    },
+    {
       "id": 10,
       "type": "row",
       "title": "Job",
@@ -747,7 +1506,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 37
+        "y": 71
       },
       "collapsed": false,
       "panels": []
@@ -760,7 +1519,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 38
+        "y": 72
       },
       "datasource": {
         "type": "prometheus",
@@ -831,7 +1590,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 38
+        "y": 72
       },
       "datasource": {
         "type": "prometheus",
@@ -891,7 +1650,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 46
+        "y": 80
       },
       "collapsed": false,
       "panels": []
@@ -904,7 +1663,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 47
+        "y": 81
       },
       "datasource": {
         "type": "prometheus",
@@ -964,7 +1723,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 47
+        "y": 81
       },
       "datasource": {
         "type": "prometheus",
@@ -1036,7 +1795,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 55
+        "y": 89
       },
       "collapsed": false,
       "panels": []
@@ -1049,7 +1808,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 56
+        "y": 90
       },
       "datasource": {
         "type": "prometheus",
@@ -1108,7 +1867,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 56
+        "y": 90
       },
       "datasource": {
         "type": "prometheus",
@@ -1167,7 +1926,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 64
+        "y": 98
       },
       "datasource": {
         "type": "prometheus",
@@ -1227,7 +1986,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 64
+        "y": 98
       },
       "datasource": {
         "type": "prometheus",

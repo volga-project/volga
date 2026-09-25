@@ -217,7 +217,7 @@ pub const EXTRA_PROM_QUERIES: &[PromQuery] = &[
     (
         "wo_maintain_pruned_rate",
         concat!(
-            "sum(rate(volga_wo_maintain_pruned_rows",
+            "sum(rate(volga_wo_inmem_pruned_rows",
             r#"{pipeline_id=~".*"}"#,
             "[1m]))"
         ),
@@ -225,13 +225,13 @@ pub const EXTRA_PROM_QUERIES: &[PromQuery] = &[
     (
         "wo_state_bytes",
         concat!(
-            "sum(volga_wo_state_raw_bytes",
+            "sum(volga_wo_inmem_state_raw_bytes",
             r#"{pipeline_id=~".*"}"#,
-            ") + sum(volga_wo_state_tiles_bytes",
+            ") + sum(volga_wo_inmem_state_tiles_bytes",
             r#"{pipeline_id=~".*"}"#,
-            ") + sum(volga_wo_state_triggers_bytes",
+            ") + sum(volga_wo_inmem_state_triggers_bytes",
             r#"{pipeline_id=~".*"}"#,
-            ") + sum(volga_wo_state_key_states_bytes",
+            ") + sum(volga_wo_inmem_state_key_states_bytes",
             r#"{pipeline_id=~".*"}"#,
             ")"
         ),
@@ -239,13 +239,13 @@ pub const EXTRA_PROM_QUERIES: &[PromQuery] = &[
     (
         "wo_state_counts",
         concat!(
-            "sum(volga_wo_state_raw_count",
+            "sum(volga_wo_inmem_state_raw_count",
             r#"{pipeline_id=~".*"}"#,
-            ") + sum(volga_wo_state_tiles_count",
+            ") + sum(volga_wo_inmem_state_tiles_count",
             r#"{pipeline_id=~".*"}"#,
-            ") + sum(volga_wo_state_triggers_count",
+            ") + sum(volga_wo_inmem_state_triggers_count",
             r#"{pipeline_id=~".*"}"#,
-            ") + sum(volga_wo_state_key_states_count",
+            ") + sum(volga_wo_inmem_state_key_states_count",
             r#"{pipeline_id=~".*"}"#,
             ")"
         ),
