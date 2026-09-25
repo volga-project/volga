@@ -6,6 +6,10 @@ This is not a `scripts/test` profile. Locally it uses the same Kind cluster as t
 
 Job specs live in this directory. The cluster install (Prometheus, Grafana, the dashboard, Scylla Helm values) stays in [`kubevolga/hack/bench`](../kubevolga/hack/bench) because `make -C kubevolga bench` applies that kustomize directory.
 
+## Local prerequisites
+
+Docker, [kind](https://kind.sigs.k8s.io/), kubectl, and make. `scripts/kube-test-env setup` checks those. A Rust toolchain (`cargo`) builds and runs `volga-bench`. Helm is only needed for a Scylla backend (`make -C kubevolga bench-scylla`).
+
 ## What the job is
 
 Streaming mode only, and only a continuously sliding window query. Request mode, batch, and other SQL shapes are not covered.
