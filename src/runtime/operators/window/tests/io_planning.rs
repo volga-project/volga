@@ -9,8 +9,9 @@ use crate::runtime::operators::window::model::{Cursor, RawRun, TileRun, WindowTr
 use crate::runtime::operators::window::operator::WindowOperatorConfig;
 use crate::runtime::operators::window::spec::WindowSpec;
 use crate::runtime::operators::window::store::{
-    InMemWindowStore, KeyState, PartitionKey, StateNamespace, TileMap, WindowBackendSnapshot,
-    WindowData, WindowOperatorStore, WindowRequestStore, WindowStoreTaskScope,
+    InMemWindowStore, KeyState, PartitionKey, ReadOptions, StateNamespace, TileMap,
+    WindowBackendSnapshot, WindowData, WindowOperatorStore, WindowRead, WindowRequestStore,
+    WindowStoreTaskScope,
 };
 use std::any::Any;
 
@@ -109,13 +110,14 @@ impl WindowRequestStore for RecordingWindowStore {
         partition: &PartitionKey,
         raw_runs: &[RawRun],
         tile_runs: &[TileRun],
-    ) -> Result<WindowData> {
+        opts: ReadOptions,
+    ) -> Result<WindowRead> {
         self.request_reads
             .lock()
             .unwrap()
             .push((raw_runs.to_vec(), tile_runs.to_vec()));
         self.inner
-            .load_window_data(partition, raw_runs, tile_runs)
+            .load_window_data(partition, raw_runs, tile_runs, opts)
             .await
     }
 }

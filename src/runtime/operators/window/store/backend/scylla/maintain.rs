@@ -16,11 +16,14 @@
 //! published cut allows is the checkpoint a reader is pinned to. The newest
 //! the previous cut allows is the checkpoint a reader may still be on while
 //! the next one is published. This applies to a tile that still overlaps the
-//! floor, and to key state, which has no time range. Raw rows inside a live
-//! minute are not version-trimmed; the minute delete takes them all.
+//! floor, and to key state, which has no time range. Request mode keeps a
+//! version named by either the in-memory cuts or the `window_kg_meta` pin.
+//! Raw rows inside a live minute are not version-trimmed; the minute delete
+//! takes them all.
 //!
 //! The `window_kg_buckets` row is deleted after the tile trim and the key-state
-//! trim succeed, so a failed tick can find the key again.
+//! trim succeed, so a failed tick can find the key again. `window_kg_meta` is
+//! not deleted.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
@@ -35,6 +38,7 @@ use crate::runtime::operators::window::store::backend::version::{Attempt, CutHis
 use crate::runtime::state::OperatorTaskState;
 
 use super::cql::{unlogged_batch, PreparedGc};
+use super::meta;
 use super::observe::{self, note_rows, note_stmt, CallMeter};
 use super::schema::{align_down, fully_owned_trigger_shards, RAW_BUCKET_MS};
 use super::store::ScyllaWindowStoreClient;
@@ -105,13 +109,33 @@ fn versions_to_drop(versions: &[Version], retention: &Retention) -> Vec<Version>
         .collect()
 }
 
-fn retention_for(client: &ScyllaWindowStoreClient, kg: i32) -> Retention {
-    Retention {
+async fn retention_for(client: &ScyllaWindowStoreClient, kg: i32) -> Result<Retention> {
+    let local = Retention {
         attempt: client.my_attempt(),
         cut: client.cp_cut_for(kg),
         prev_cut: client.prev_cut_for(kg),
         also: None,
+    };
+    if client.scope.request_mode {
+        let session = client.inner.session();
+        let prepared = client.inner.prepared().await?;
+        if let Some(row) = meta::load_row(
+            session.as_ref(),
+            &prepared.select_meta,
+            client.scope.namespace.bytes.as_slice(),
+            kg,
+        )
+        .await?
+        {
+            return Ok(Retention {
+                attempt: row.attempt(),
+                cut: row.cut,
+                prev_cut: row.prev_cut,
+                also: Some(Box::new(local)),
+            });
+        }
     }
+    Ok(local)
 }
 
 pub(super) async fn maintain(
@@ -217,13 +241,13 @@ async fn run_maintain(
         }
         seen.into_iter().collect()
     };
-    let retention_by_kg: HashMap<i32, Retention> = try_join_all(
-        kgs.into_iter()
-            .map(|kg| async move { Ok::<_, anyhow::Error>((kg, retention_for(client, kg))) }),
-    )
-    .await?
-    .into_iter()
-    .collect();
+    let retention_by_kg: HashMap<i32, Retention> =
+        try_join_all(kgs.into_iter().map(|kg| async move {
+            Ok::<_, anyhow::Error>((kg, retention_for(client, kg).await?))
+        }))
+        .await?
+        .into_iter()
+        .collect();
 
     let key_started = Instant::now();
     let mut key_futs = Vec::new();

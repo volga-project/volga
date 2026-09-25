@@ -16,7 +16,8 @@ use crate::runtime::operators::window::model::{
 };
 use crate::runtime::operators::window::state::WindowOperatorState;
 use crate::runtime::operators::window::store::backend::{
-    ScyllaWindowStore, Version, WindowBackendSnapshot, WindowOperatorStore, WindowStoreTaskScope,
+    ReadOptions, ScyllaWindowRequestStore, ScyllaWindowStore, Version, WindowBackendSnapshot,
+    WindowOperatorStore, WindowRequestStore, WindowStoreTaskScope,
 };
 use crate::runtime::operators::window::store::data::cursors_from_batch;
 use crate::runtime::state::OperatorStore;
@@ -418,6 +419,196 @@ async fn window_scylla_store_restore_sees_checkpointed_prefix() {
     assert_eq!(
         other.load_key_state(&partition).await.unwrap(),
         KeyState::default()
+    );
+}
+
+fn request_scope(ns: &StateNamespace, attempt: u64) -> WindowStoreTaskScope {
+    let mut scope = scope(ns, attempt);
+    scope.request_mode = true;
+    scope
+}
+
+async fn meta_attempt_and_checkpoint(
+    store: &ScyllaWindowStore,
+    ns: &[u8],
+    kg: i32,
+) -> Option<(i64, i64)> {
+    let cql = format!(
+        "SELECT cur_attempt, checkpoint_id FROM {}.window_kg_meta WHERE namespace = ? AND key_group = ?",
+        store.keyspace()
+    );
+    let result = store
+        .session()
+        .query_unpaged(cql, (ns.to_vec(), kg))
+        .await
+        .expect("select window_kg_meta");
+    result
+        .into_rows_result()
+        .expect("meta rows")
+        .maybe_first_row::<(Option<i64>, Option<i64>)>()
+        .expect("decode meta")
+        .map(|(attempt, checkpoint_id)| (attempt.unwrap_or(0), checkpoint_id.unwrap_or(0)))
+}
+
+#[tokio::test]
+#[ignore]
+async fn window_scylla_store_request_publish_heal_and_take() {
+    let store = connect("volga_reqmeta").await;
+    let ns = StateNamespace::new(b"op");
+    let partition = partition(&ns);
+
+    let writer = store.client(request_scope(&ns, 1));
+    writer
+        .commit_events(
+            &partition,
+            0,
+            &batch(&[(1_000, 1)]),
+            &TileMap::new(),
+            &KeyState {
+                next_seq: 2,
+                ..Default::default()
+            },
+            &[],
+        )
+        .await
+        .unwrap();
+    let snap = writer.checkpoint().await.unwrap();
+
+    let healed = store.client(request_scope(&ns, 2));
+    healed.restore(&snap).await.unwrap();
+    healed
+        .prepare_attempt(&snap, Some(1_000), Some(0), Some(4))
+        .await
+        .unwrap();
+    assert_eq!(
+        meta_attempt_and_checkpoint(&store, ns.bytes.as_slice(), 0).await,
+        Some((2, 4)),
+        "heal publishes the restored cut when the meta row is absent"
+    );
+
+    healed
+        .on_checkpoint_complete(9, &snap, Some(1_000), Some(0))
+        .await
+        .unwrap();
+    assert_eq!(
+        meta_attempt_and_checkpoint(&store, ns.bytes.as_slice(), 0).await,
+        Some((2, 9)),
+        "complete publishes the newer cut"
+    );
+
+    // Cursor B lands after the published cut. The cut still names only A.
+    healed
+        .commit_events(
+            &partition,
+            0,
+            &batch(&[(2_000, 2)]),
+            &TileMap::new(),
+            &KeyState {
+                next_seq: 3,
+                ..Default::default()
+            },
+            &[],
+        )
+        .await
+        .unwrap();
+
+    let taken = store.client(request_scope(&ns, 3));
+    taken.restore(&snap).await.unwrap();
+    taken
+        .prepare_attempt(&snap, Some(1_000), Some(0), Some(9))
+        .await
+        .unwrap();
+    assert_eq!(
+        meta_attempt_and_checkpoint(&store, ns.bytes.as_slice(), 0).await,
+        Some((3, 9)),
+        "take_attempt moves cur_attempt and leaves the published cut"
+    );
+
+    let requests = ScyllaWindowRequestStore::from_session(store.session(), 1);
+    let runs = [raw_run((0, 0), (4_000, 0))];
+    let committed = requests
+        .load_window_data(&partition, &runs, &[], ReadOptions::Committed)
+        .await
+        .unwrap();
+    assert_eq!(committed.checkpoint_id, Some(9));
+    assert_eq!(
+        sorted(raw_cursors(committed.data.raw_batches())),
+        vec![Cursor::new(1_000, 1)],
+        "committed read returns the published cursor and not the one written after the cut"
+    );
+
+    taken
+        .commit_events(
+            &partition,
+            0,
+            &batch(&[(3_000, 3)]),
+            &TileMap::new(),
+            &KeyState {
+                next_seq: 4,
+                ..Default::default()
+            },
+            &[],
+        )
+        .await
+        .unwrap();
+    let committed = requests
+        .load_window_data(&partition, &runs, &[], ReadOptions::Committed)
+        .await
+        .unwrap();
+    assert_eq!(
+        sorted(raw_cursors(committed.data.raw_batches())),
+        vec![Cursor::new(1_000, 1)],
+        "committed read hides the current attempt's row"
+    );
+    let fresh = requests
+        .load_window_data(&partition, &runs, &[], ReadOptions::Fresh)
+        .await
+        .unwrap();
+    assert_eq!(
+        sorted(raw_cursors(fresh.data.raw_batches())),
+        vec![Cursor::new(1_000, 1), Cursor::new(3_000, 3)],
+        "fresh read returns the current attempt above committed_wm"
+    );
+
+    healed
+        .on_checkpoint_complete(4, &snap, Some(1_000), Some(0))
+        .await
+        .unwrap();
+    assert_eq!(
+        meta_attempt_and_checkpoint(&store, ns.bytes.as_slice(), 0).await,
+        Some((3, 9)),
+        "an older checkpoint id leaves the pin at 9"
+    );
+
+    let task_state = WindowOperatorState::for_test(
+        Arc::new(taken.clone()) as Arc<dyn WindowOperatorStore>,
+        ns.clone(),
+        Arc::from("request-maintain"),
+        0,
+        Arc::new(std::collections::BTreeMap::new()),
+        0,
+        0,
+    );
+    task_state.seed_committed_watermark(60_000);
+    taken.maintain(&ns, &task_state).await.unwrap();
+
+    let ks = store.keyspace();
+    assert!(
+        query::<(i64, i64)>(
+            &store,
+            &format!(
+                "SELECT attempt, epoch FROM {ks}.window_raw WHERE namespace = ? AND key_group = ? AND business_key = ? AND bucket_start = ?"
+            ),
+            (ns.bytes.clone(), 0_i32, partition.business_key.clone(), 0_i64),
+        )
+        .await
+        .is_empty(),
+        "raw partition below the floor is deleted"
+    );
+    assert_eq!(
+        meta_attempt_and_checkpoint(&store, ns.bytes.as_slice(), 0).await,
+        Some((3, 9)),
+        "request-mode maintain leaves window_kg_meta in place"
     );
 }
 

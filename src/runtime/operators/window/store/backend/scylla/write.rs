@@ -110,6 +110,9 @@ async fn commit_events_at(
     for (bucket, rows) in &by_bucket {
         let mut values = Vec::with_capacity(rows.len());
         for (idx, cursor) in rows {
+            let payload = encode_batch(&events.slice(*idx, 1))?;
+            note_rows(1);
+            note_bytes(payload.len() as u64);
             values.push((
                 ns.clone(),
                 kg,
@@ -119,12 +122,7 @@ async fn commit_events_at(
                 cursor.seq_no as i64,
                 attempt,
                 epoch,
-                {
-                    let payload = encode_batch(&events.slice(*idx, 1))?;
-                    note_rows(1);
-                    note_bytes(payload.len() as u64);
-                    payload
-                },
+                payload,
             ));
         }
         let session = Arc::clone(&session);
@@ -135,6 +133,7 @@ async fn commit_events_at(
         let bucket = *bucket;
         raw_futs.push(async move {
             let index = async {
+                note_stmt();
                 session
                     .execute_unpaged(&insert_kg_buckets, (ns, kg, bucket, key))
                     .await?;
@@ -156,6 +155,8 @@ async fn commit_events_at(
     for (gran, part) in tiles_by_gran {
         let mut values = Vec::with_capacity(part.len());
         for (tile_start, payload) in part {
+            note_rows(1);
+            note_bytes(payload.len() as u64);
             values.push((
                 ns.clone(),
                 kg,
@@ -201,6 +202,7 @@ async fn commit_events_at(
     for (shard, part) in triggers_by_shard {
         let mut values = Vec::with_capacity(part.len());
         for (ts, seq, kind, window_id) in part {
+            note_rows(1);
             values.push((
                 ns.clone(),
                 shard,

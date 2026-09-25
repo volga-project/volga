@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::spec::state::{OperatorStateBackendConfig, RequestStoreConfig};
 use crate::common::KeyGroupRange;
+use crate::runtime::metrics::MetricsLabels;
 use crate::runtime::operators::window::model::{
     Cursor, KeyState, PartitionKey, RawRun, StateNamespace, TileMap, TileRun, WindowTrigger,
 };
@@ -21,7 +22,7 @@ mod scylla;
 mod version;
 
 pub use inmem::{InMemWindowStore, InMemWindowStoreClient};
-pub use scylla::{ScyllaWindowStore, ScyllaWindowStoreClient};
+pub use scylla::{ScyllaWindowRequestStore, ScyllaWindowStore, ScyllaWindowStoreClient};
 pub use version::{Attempt, CutHistory, Version};
 
 /// Job-level execution attempt. Durable, never reused (#156).
@@ -39,6 +40,9 @@ pub struct WindowStoreTaskScope {
     pub key_group_range: KeyGroupRange,
     pub writer_id: WriterId,
     pub attempt: Attempt,
+    /// StateOnly with a configured request store. Restore and checkpoint
+    /// completion write `window_kg_meta`. Emit stays false.
+    pub request_mode: bool,
 }
 
 impl WindowStoreTaskScope {
@@ -49,6 +53,7 @@ impl WindowStoreTaskScope {
             key_group_range: KeyGroupRange::full(1),
             writer_id: WriterId(Vec::new()),
             attempt: 1,
+            request_mode: false,
         }
     }
 }
@@ -82,7 +87,8 @@ pub fn open_window_operator_store(
                     None => panic!("Scylla window store requires StateSessionHandle::Scylla"),
                 };
                 Arc::new(
-                    ScyllaWindowStore::new(cfg.clone(), session).with_metrics_labels(labels.clone()),
+                    ScyllaWindowStore::new(cfg.clone(), session)
+                        .with_metrics_labels(labels.clone()),
                 ) as Arc<dyn OperatorStore>
             });
             let store = registered
@@ -97,11 +103,64 @@ pub fn open_window_operator_store(
 
 pub async fn open_window_request_store(
     config: &RequestStoreConfig,
+    session: Option<&StateSessionHandle>,
+    max_parallelism: usize,
+    metrics: Option<(&str, MetricsLabels)>,
 ) -> Result<Arc<dyn WindowRequestStore>> {
-    match *config {}
+    anyhow::ensure!(
+        max_parallelism >= 1,
+        "request store requires max_parallelism >= 1"
+    );
+    match config {
+        RequestStoreConfig::Scylla => {
+            let Some(StateSessionHandle::Scylla(session)) = session else {
+                anyhow::bail!(
+                    "Scylla request store requires an already-open session; do not connect from the store"
+                );
+            };
+            let mut store = scylla::ScyllaWindowRequestStore::from_session(
+                Arc::clone(session),
+                max_parallelism,
+            );
+            if let Some((task_id, labels)) = metrics {
+                store = store.with_metrics(task_id.to_string(), labels);
+            }
+            Ok(Arc::new(store) as Arc<dyn WindowRequestStore>)
+        }
+    }
 }
 
 pub type StateVersion = Version;
+
+/// What a WRO read should see. Freshness is only configurable here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReadOptions {
+    /// Last completed checkpoint. Deterministic, replayable.
+    #[default]
+    Committed,
+    /// Head-scoped best effort: committed tiles plus current-attempt raw above `committed_wm`.
+    Fresh,
+}
+
+/// Point-lookup payload plus the published cut it was answered at.
+#[derive(Debug)]
+pub struct WindowRead {
+    pub data: WindowData,
+    pub committed_wm: Option<i64>,
+    pub checkpoint_id: Option<u64>,
+    pub retention_floor: Option<i64>,
+}
+
+impl WindowRead {
+    pub fn empty() -> Self {
+        Self {
+            data: WindowData::new(Vec::new(), TileMap::new()),
+            committed_wm: None,
+            checkpoint_id: None,
+            retention_floor: None,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WindowBackendSnapshot {
@@ -141,6 +200,22 @@ pub trait WindowOperatorStore: OperatorStore {
     /// Complete all pending writes before capturing the returned snapshot.
     async fn checkpoint(&self) -> Result<WindowBackendSnapshot>;
     async fn restore(&self, snapshot: &WindowBackendSnapshot) -> Result<()>;
+    /// Request mode: heal the published cut or take `cur_attempt` before ingest.
+    async fn prepare_attempt(
+        &self,
+        restored: &WindowBackendSnapshot,
+        committed_wm: Option<i64>,
+        retention_floor: Option<i64>,
+        restored_checkpoint_id: Option<u64>,
+    ) -> Result<()> {
+        let _ = (
+            restored,
+            committed_wm,
+            retention_floor,
+            restored_checkpoint_id,
+        );
+        Ok(())
+    }
     /// Install the barrier snapshot once the checkpoint has committed globally.
     async fn on_checkpoint_complete(
         &self,
@@ -162,5 +237,6 @@ pub trait WindowRequestStore: Send + Sync + std::fmt::Debug {
         partition: &PartitionKey,
         raw_runs: &[RawRun],
         tile_runs: &[TileRun],
-    ) -> Result<WindowData>;
+        opts: ReadOptions,
+    ) -> Result<WindowRead>;
 }

@@ -23,7 +23,10 @@ use crate::runtime::operators::window::model::{Cursor, RawRun, TileRun, WindowTr
 use crate::runtime::operators::window::state::WindowOperatorState;
 use crate::runtime::state::{OperatorStore, OperatorTaskState};
 
-use super::{WindowBackendSnapshot, WindowOperatorStore, WindowRequestStore, WindowStoreTaskScope};
+use super::{
+    ReadOptions, WindowBackendSnapshot, WindowOperatorStore, WindowRead, WindowRequestStore,
+    WindowStoreTaskScope,
+};
 use crate::runtime::operators::window::store::data::cursors_from_batch;
 use crate::runtime::operators::window::store::{
     KeyState, PartitionKey, StateNamespace, TileMap, WindowData,
@@ -220,9 +223,9 @@ impl InMemWindowStore {
         use crate::runtime::metrics::set_task_gauge;
         use metrics::{
             METRIC_WO_INMEM_STATE_KEY_STATES_BYTES, METRIC_WO_INMEM_STATE_KEY_STATES_COUNT,
-            METRIC_WO_INMEM_STATE_RAW_BYTES, METRIC_WO_INMEM_STATE_RAW_COUNT, METRIC_WO_INMEM_STATE_TILES_BYTES,
-            METRIC_WO_INMEM_STATE_TILES_COUNT, METRIC_WO_INMEM_STATE_TRIGGERS_BYTES,
-            METRIC_WO_INMEM_STATE_TRIGGERS_COUNT,
+            METRIC_WO_INMEM_STATE_RAW_BYTES, METRIC_WO_INMEM_STATE_RAW_COUNT,
+            METRIC_WO_INMEM_STATE_TILES_BYTES, METRIC_WO_INMEM_STATE_TILES_COUNT,
+            METRIC_WO_INMEM_STATE_TRIGGERS_BYTES, METRIC_WO_INMEM_STATE_TRIGGERS_COUNT,
         };
 
         let mut raw_count = 0u64;
@@ -630,15 +633,21 @@ impl WindowRequestStore for InMemWindowStore {
         partition: &PartitionKey,
         raw_runs: &[RawRun],
         tile_runs: &[TileRun],
-    ) -> Result<WindowData> {
-        Ok(self
-            .read_part(partition, |state| {
-                WindowData::new(
-                    state.raw.select(raw_runs),
-                    Self::select_tiles(state, tile_runs),
-                )
-            })
-            .unwrap_or_else(|| WindowData::new(Vec::new(), TileMap::new())))
+        _opts: ReadOptions,
+    ) -> Result<WindowRead> {
+        Ok(WindowRead {
+            data: self
+                .read_part(partition, |state| {
+                    WindowData::new(
+                        state.raw.select(raw_runs),
+                        Self::select_tiles(state, tile_runs),
+                    )
+                })
+                .unwrap_or_else(|| WindowData::new(Vec::new(), TileMap::new())),
+            committed_wm: None,
+            checkpoint_id: None,
+            retention_floor: None,
+        })
     }
 }
 
@@ -796,9 +805,10 @@ mod tests {
             .unwrap()
             .is_empty());
         assert!(store
-            .load_window_data(&partition, &raw_runs, &tile_runs)
+            .load_window_data(&partition, &raw_runs, &tile_runs, ReadOptions::Committed)
             .await
             .unwrap()
+            .data
             .raw_batches()
             .is_empty());
 
@@ -1047,9 +1057,11 @@ mod tests {
                     start_ts: 1_000,
                     end_ts_exclusive: 3_000,
                 }],
+                ReadOptions::Committed,
             )
             .await
-            .unwrap();
+            .unwrap()
+            .data;
         assert_eq!(
             raw_cursors(data.raw_batches()),
             vec![Cursor::new(2_000, 2), Cursor::new(3_000, 3)]
@@ -1430,6 +1442,7 @@ mod tests {
                 ),
                 writer_id: WriterId(format!("task-{task_index}").into_bytes()),
                 attempt: 1,
+                request_mode: false,
             })
         };
         let c0 = bind(0);
@@ -1521,6 +1534,7 @@ mod tests {
                 key_group_range: KeyGroupRange::for_subtask(0, parallelism, max_parallelism),
                 writer_id: WriterId(b"task-0".to_vec()),
                 attempt: 1,
+                request_mode: false,
             },
         );
         task0
@@ -1565,6 +1579,7 @@ mod tests {
                 ),
                 writer_id: WriterId(format!("task-{task_index}").into_bytes()),
                 attempt: 1,
+                request_mode: false,
             })
         };
         let c0 = bind(0);
@@ -1610,6 +1625,7 @@ mod tests {
             key_group_range: KeyGroupRange::for_subtask(0, parallelism, max_parallelism),
             writer_id: WriterId(b"task-0".to_vec()),
             attempt: 1,
+            request_mode: false,
         });
         let part1 = partition_for_group(&ns, 2, max_parallelism, b"k1");
         let error = c0.load_key_state(&part1).await.unwrap_err();

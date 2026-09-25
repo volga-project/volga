@@ -223,6 +223,14 @@ impl WindowOperatorState {
                 self.applied_checkpoint_id.store(id, Ordering::Release);
             }
         }
+        self.store
+            .prepare_attempt(
+                &restore.backend,
+                restore.watermark_frontier,
+                self.retention_floor_at(restore.watermark_frontier),
+                restore.checkpoint_id,
+            )
+            .await?;
         Ok(())
     }
 
