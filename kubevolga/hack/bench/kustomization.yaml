@@ -24,5 +24,6 @@ configMapGenerator:
   - name: grafana-dashboards
     files:
       - volga-bench.json=dashboards/volga-bench.json
+      - flink-bench.json=dashboards/flink-bench.json
 generatorOptions:
   disableNameSuffixHash: true
