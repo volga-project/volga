@@ -97,7 +97,7 @@ impl BenchSpec {
             oracles: OracleConfig::default(),
             dump: None,
             prom_url: None,
-            extra_prom_queries: extra_prom_queries(),
+            extra_prom_queries: extra_prom_queries(false),
         }
     }
 

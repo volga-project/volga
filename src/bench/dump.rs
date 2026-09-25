@@ -308,11 +308,69 @@ pub const EXTRA_PROM_QUERIES: &[PromQuery] = &[
     ),
 ];
 
-pub fn extra_prom_queries() -> Vec<(String, String)> {
-    EXTRA_PROM_QUERIES
+const SCYLLA_PROM_QUERIES: &[PromQuery] = &[
+    (
+        "wo_scylla_calls",
+        concat!(
+            "sum(rate(volga_wo_scylla_calls_total",
+            r#"{pipeline_id=~".*"}"#,
+            "[1m]))"
+        ),
+    ),
+    (
+        "wo_scylla_latency_p99",
+        concat!(
+            "histogram_quantile(0.99, sum by (le) (rate(volga_wo_scylla_latency_ms_bucket",
+            r#"{pipeline_id=~".*"}"#,
+            "[1m])))"
+        ),
+    ),
+    (
+        "wo_scylla_maintain_phase_p99",
+        concat!(
+            "histogram_quantile(0.99, sum by (le, phase) (rate(volga_wo_scylla_maintain_phase_ms_bucket",
+            r#"{pipeline_id=~".*"}"#,
+            "[1m])))"
+        ),
+    ),
+    (
+        "wo_scylla_kg_buckets_live",
+        concat!(
+            "sum(volga_wo_scylla_kg_buckets_live",
+            r#"{pipeline_id=~".*"}"#,
+            ")"
+        ),
+    ),
+    (
+        "wo_scylla_raw_partitions_deleted",
+        concat!(
+            "sum(rate(volga_wo_scylla_raw_partitions_deleted",
+            r#"{pipeline_id=~".*"}"#,
+            "[1m]))"
+        ),
+    ),
+];
+
+const INMEM_STATE_QUERIES: &[&str] = &[
+    "wo_maintain_pruned_rate",
+    "wo_state_bytes",
+    "wo_state_counts",
+];
+
+pub fn extra_prom_queries(scylla: bool) -> Vec<(String, String)> {
+    let mut queries: Vec<(String, String)> = EXTRA_PROM_QUERIES
         .iter()
+        .filter(|(name, _)| !scylla || !INMEM_STATE_QUERIES.contains(name))
         .map(|(name, expr)| (name.to_string(), expr.to_string()))
-        .collect()
+        .collect();
+    if scylla {
+        queries.extend(
+            SCYLLA_PROM_QUERIES
+                .iter()
+                .map(|(name, expr)| (name.to_string(), expr.to_string())),
+        );
+    }
+    queries
 }
 
 pub fn prom_queries(extra: &[(String, String)]) -> Vec<(String, String)> {

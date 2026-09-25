@@ -10,6 +10,7 @@ use datafusion::common::ScalarValue;
 use serde::Deserialize;
 
 use crate::api::spec::connectors::{SinkSpec, SourceSpec, SourceSpecKind};
+use crate::api::spec::state::{OperatorStateBackendConfig, ScyllaConfig};
 use crate::api::spec::operators::{OperatorOverride, OperatorTuningSpec};
 use crate::api::spec::pipeline::ExecutionProfile;
 use crate::api::{DatagenSpec, PipelineSpecBuilder, TaskWorkerAssignmentStrategyType};
@@ -70,6 +71,19 @@ pub struct LaunchFile {
     pub datagen: Option<DatagenFile>,
     pub watermark: Option<WatermarkFile>,
     pub window: Option<WindowFile>,
+    /// Omit → in-memory operator state. `kind: scylla` needs contact points and a keyspace.
+    pub backend: Option<BackendFile>,
+}
+
+/// Window operator state backend. The Count sink stays either way.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BackendFile {
+    /// `in_memory` or `scylla`.
+    pub kind: String,
+    pub contact_points: Option<Vec<String>>,
+    pub keyspace: Option<String>,
+    pub datacenter: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -184,7 +198,9 @@ pub fn apply_file(file: &BenchFile) -> Result<BenchSpec> {
             .iter()
             .map(|q| (q.name.clone(), q.query.clone()))
             .collect(),
-        None => extra_prom_queries(),
+        None => extra_prom_queries(file.launch.as_ref().is_some_and(|l| {
+            l.backend.as_ref().is_some_and(|b| b.kind == "scylla")
+        })),
     };
     Ok(BenchSpec {
         env,
@@ -271,8 +287,37 @@ fn compile_launch(launch: Option<&LaunchFile>) -> Result<PipelineLaunchSpec> {
         .with_checkpoint(Some(interval_ms), Some(timeout_ms), Some(retention))
         .build();
 
+    let backend = operator_backend(launch.backend.as_ref())?;
     Ok(PipelineLaunchSpec::new(pipeline, worker_count, None)
-        .with_runtime_consts_profile(RuntimeConstsProfile::Prod))
+        .with_runtime_consts_profile(RuntimeConstsProfile::Prod)
+        .with_operator_backend(backend))
+}
+
+fn operator_backend(file: Option<&BackendFile>) -> Result<OperatorStateBackendConfig> {
+    let Some(file) = file else {
+        return Ok(OperatorStateBackendConfig::InMemory);
+    };
+    match file.kind.as_str() {
+        "in_memory" => Ok(OperatorStateBackendConfig::InMemory),
+        "scylla" => {
+            let contact_points = file
+                .contact_points
+                .clone()
+                .filter(|points| !points.is_empty())
+                .ok_or_else(|| anyhow!("launch.backend scylla requires contact_points"))?;
+            let keyspace = file
+                .keyspace
+                .clone()
+                .filter(|ks| !ks.is_empty())
+                .ok_or_else(|| anyhow!("launch.backend scylla requires keyspace"))?;
+            Ok(OperatorStateBackendConfig::Scylla(ScyllaConfig {
+                contact_points,
+                keyspace,
+                datacenter: file.datacenter.clone(),
+            }))
+        }
+        other => bail!("invalid launch.backend.kind `{other}` (in_memory|scylla)"),
+    }
 }
 
 fn checkpoint_from_file(file: Option<&CheckpointFile>) -> Result<(u64, u64, u64)> {

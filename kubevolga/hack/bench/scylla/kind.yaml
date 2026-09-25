@@ -1,0 +1,30 @@
+# One member for Kind. The infra node is the only untainted place it can land.
+developerMode: true
+cpuset: false
+datacenter: datacenter1
+scyllaImage:
+  repository: scylladb/scylla
+  tag: "5.4"
+scyllaArgs: "--smp 1 --memory 1G --overprovisioned 1"
+racks:
+  - name: rack1
+    members: 1
+    storage:
+      storageClassName: standard
+      capacity: 10Gi
+    resources:
+      requests:
+        cpu: "1"
+        memory: 1Gi
+      limits:
+        cpu: "1"
+        memory: 2Gi
+    placement:
+      nodeAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+          nodeSelectorTerms:
+            - matchExpressions:
+                - key: volga.io/role
+                  operator: In
+                  values:
+                    - infra

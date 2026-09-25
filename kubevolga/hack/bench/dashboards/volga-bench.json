@@ -1643,6 +1643,256 @@
       "description": "Success-only histogram. Sparse on a 2-minute / 30s-checkpoint run \u2014 expect a flat-ish line."
     },
     {
+      "id": 70,
+      "type": "row",
+      "title": "Transport",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 80
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 71,
+      "type": "timeseries",
+      "title": "Tx queue remaining",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 81
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max by (task_id, target_task_id) (volga_stream_task_tx_queue_rem{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"})",
+          "legendFormat": "{{task_id}} \u2192 {{target_task_id}}",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Remaining record credits on each output edge (bound DEFAULT_QUEUE_RECORDS=8192, not message count). 0 = this task is blocked sending to that target."
+    },
+    {
+      "id": 72,
+      "type": "timeseries",
+      "title": "Rx queued records",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 81
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max by (task_id, source_task_id) (volga_stream_task_rx_queued_records{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"})",
+          "legendFormat": "{{source_task_id}} \u2192 {{task_id}}",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Records waiting on each input channel. Full + dest idle = operator not polling. Empty + upstream tx rem 0 = not delivered yet."
+    },
+    {
+      "id": 73,
+      "type": "timeseries",
+      "title": "Pump write-block (ms / s)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 89
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "avg by (task_id, target_task_id) (volga_stream_task_transport_write_block_ms_per_second{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"})",
+          "legendFormat": "{{task_id}} \u2192 {{target_task_id}}",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Per-edge TCP write wait (window / peer not reading). tx_rem\u22480 + dest rx\u22480 + this high \u2192 wire."
+    },
+    {
+      "id": 74,
+      "type": "timeseries",
+      "title": "Transport disconnects",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 89
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "increase(volga_stream_task_transport_disconnects{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"}[5m])",
+          "legendFormat": "{{task_id}} \u2192 {{target_task_id}}",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Trailing 5m increase. Close is fatal. Count so Grafana shows a drop without scraping logs."
+    },
+    {
       "id": 60,
       "type": "row",
       "title": "Process / container",
@@ -1650,7 +1900,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 80
+        "y": 97
       },
       "collapsed": false,
       "panels": []
@@ -1663,7 +1913,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 81
+        "y": 98
       },
       "datasource": {
         "type": "prometheus",
@@ -1723,7 +1973,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 81
+        "y": 98
       },
       "datasource": {
         "type": "prometheus",
@@ -1788,27 +2038,27 @@
       "description": "volga_worker_rss_bytes (process RSS, workers only) vs cAdvisor working set (master + workers). Shapes should match; RSS is often a bit below cgroup."
     },
     {
-      "id": 70,
+      "id": 100,
       "type": "row",
-      "title": "Transport",
+      "title": "Scylla cluster",
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 89
+        "y": 106
       },
       "collapsed": false,
       "panels": []
     },
     {
-      "id": 71,
+      "id": 101,
       "type": "timeseries",
-      "title": "Tx queue remaining",
+      "title": "Disk space",
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 90
+        "y": 107
       },
       "datasource": {
         "type": "prometheus",
@@ -1821,8 +2071,32 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "max by (task_id, target_task_id) (volga_stream_task_tx_queue_rem{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"})",
-          "legendFormat": "{{task_id}} \u2192 {{target_task_id}}",
+          "expr": "sum by (pod) (scylla_column_family_total_disk_space)",
+          "legendFormat": "total {{pod}}",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (pod) (scylla_column_family_live_disk_space)",
+          "legendFormat": "live {{pod}}",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (pod) (scylla_commitlog_disk_active_bytes)",
+          "legendFormat": "commitlog {{pod}}",
           "editorMode": "code",
           "instant": false,
           "range": true
@@ -1842,7 +2116,8 @@
               "mode": "none",
               "group": "A"
             }
-          }
+          },
+          "unit": "bytes"
         },
         "overrides": []
       },
@@ -1857,17 +2132,17 @@
           "sort": "desc"
         }
       },
-      "description": "Remaining record credits on each output edge (bound DEFAULT_QUEUE_RECORDS=8192, not message count). 0 = this task is blocked sending to that target."
+      "description": "Native Scylla gauges. Total should level off once maintain keeps up with ingest. A steady climb means data is accumulating on disk."
     },
     {
-      "id": 72,
+      "id": 102,
       "type": "timeseries",
-      "title": "Rx queued records",
+      "title": "Reactor CPU",
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 90
+        "y": 107
       },
       "datasource": {
         "type": "prometheus",
@@ -1880,8 +2155,20 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "max by (task_id, source_task_id) (volga_stream_task_rx_queued_records{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"})",
-          "legendFormat": "{{source_task_id}} \u2192 {{task_id}}",
+          "expr": "sum by (pod) (scylla_reactor_utilization) / 100",
+          "legendFormat": "busy cores {{pod}}",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max by (pod) (scylla_reactor_utilization)",
+          "legendFormat": "max shard % {{pod}}",
           "editorMode": "code",
           "instant": false,
           "range": true
@@ -1901,9 +2188,23 @@
               "mode": "none",
               "group": "A"
             }
-          }
+          },
+          "unit": "short"
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "B"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "legend": {
@@ -1916,17 +2217,17 @@
           "sort": "desc"
         }
       },
-      "description": "Records waiting on each input channel. Full + dest idle = operator not polling. Empty + upstream tx rem 0 = not delivered yet."
+      "description": "Busy cores are sum(reactor utilization)/100 per node. The gauge is 0\u2013100 per shard, so one saturated shard is 1 core and an 8-shard node can read 8. Max shard % is the hottest shard on that node, 0\u2013100. Not cAdvisor, and not a single-node metric."
     },
     {
-      "id": 73,
+      "id": 103,
       "type": "timeseries",
-      "title": "Pump write-block (ms / s)",
+      "title": "Compaction",
       "gridPos": {
         "h": 8,
-        "w": 12,
+        "w": 8,
         "x": 0,
-        "y": 98
+        "y": 115
       },
       "datasource": {
         "type": "prometheus",
@@ -1939,8 +2240,20 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "avg by (task_id, target_task_id) (volga_stream_task_transport_write_block_ms_per_second{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"})",
-          "legendFormat": "{{task_id}} \u2192 {{target_task_id}}",
+          "expr": "sum by (pod) (scylla_compaction_manager_compactions)",
+          "legendFormat": "active {{pod}}",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (pod) (scylla_compaction_manager_pending_compactions)",
+          "legendFormat": "pending {{pod}}",
           "editorMode": "code",
           "instant": false,
           "range": true
@@ -1961,7 +2274,7 @@
               "group": "A"
             }
           },
-          "unit": "ms"
+          "unit": "short"
         },
         "overrides": []
       },
@@ -1976,17 +2289,17 @@
           "sort": "desc"
         }
       },
-      "description": "Per-edge TCP write wait (window / peer not reading). tx_rem\u22480 + dest rx\u22480 + this high \u2192 wire."
+      "description": "Active and waiting compaction tasks. A pending line that stays above zero means compaction is behind."
     },
     {
-      "id": 74,
+      "id": 104,
       "type": "timeseries",
-      "title": "Transport disconnects",
+      "title": "Compaction backlog",
       "gridPos": {
         "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 98
+        "w": 8,
+        "x": 8,
+        "y": 115
       },
       "datasource": {
         "type": "prometheus",
@@ -1999,8 +2312,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "increase(volga_stream_task_transport_disconnects{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"}[5m])",
-          "legendFormat": "{{task_id}} \u2192 {{target_task_id}}",
+          "expr": "sum by (pod) (scylla_compaction_manager_backlog)",
+          "legendFormat": "backlog {{pod}}",
           "editorMode": "code",
           "instant": false,
           "range": true
@@ -2020,7 +2333,8 @@
               "mode": "none",
               "group": "A"
             }
-          }
+          },
+          "unit": "bytes"
         },
         "overrides": []
       },
@@ -2035,7 +2349,79 @@
           "sort": "desc"
         }
       },
-      "description": "Trailing 5m increase. Close is fatal. Count so Grafana shows a drop without scraping logs."
+      "description": "Sum of compaction backlog. Should return toward zero between bursts."
+    },
+    {
+      "id": 105,
+      "type": "timeseries",
+      "title": "Memory",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 115
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (pod) (scylla_memory_regular_dirty_bytes)",
+          "legendFormat": "dirty {{pod}}",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (pod) (scylla_cache_bytes_used)",
+          "legendFormat": "cache {{pod}}",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Dirty regular memory and row-cache bytes. Dirty should stay bounded under the 1G shard."
     }
   ]
 }

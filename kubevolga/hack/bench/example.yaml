@@ -25,6 +25,12 @@ launch:
   window:
     tiling: [1s, 5s]
     allowed_lateness_ms: 0
+  backend:
+    kind: scylla
+    contact_points:
+      - scylla-client.scylla.svc.cluster.local:9042
+    keyspace: volga_bench
+    datacenter: datacenter1
   sql: |
     SELECT timestamp, key, value,
       SUM(value) OVER w AS sum_val,
