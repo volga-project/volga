@@ -72,11 +72,23 @@ pub(super) async fn restore(
 }
 
 pub(super) async fn on_checkpoint_complete(
-    _client: &ScyllaWindowStoreClient,
+    client: &ScyllaWindowStoreClient,
     _checkpoint_id: u64,
-    _snapshot: &WindowBackendSnapshot,
+    snapshot: &WindowBackendSnapshot,
     _committed_wm: Option<i64>,
     _retention_floor: Option<i64>,
 ) -> Result<()> {
+    let WindowBackendSnapshot::Versioned { range, cuts, .. } = snapshot else {
+        anyhow::bail!("Scylla on_checkpoint_complete requires a Versioned snapshot");
+    };
+    anyhow::ensure!(
+        cuts.len() == range.end.saturating_sub(range.start),
+        "Versioned cuts must be parallel to the bound key-group range"
+    );
+    let mut by_group = HashMap::new();
+    for (offset, cut) in cuts.iter().enumerate() {
+        by_group.insert((range.start + offset) as i32, cut.clone());
+    }
+    client.advance_published_cuts(by_group);
     Ok(())
 }

@@ -5,17 +5,19 @@
 //! `connect` allocates a fresh keyspace so a rerun does not see prior epochs.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use crate::api::spec::state::ScyllaConfig;
 use crate::runtime::operators::window::model::{
     Cursor, KeyState, PartitionKey, RawRun, StateNamespace, TileMap, TileRun, TimeGranularity,
     WindowTiles, WindowTrigger, WindowTriggerKind,
 };
+use crate::runtime::operators::window::state::WindowOperatorState;
 use crate::runtime::operators::window::store::backend::{
     ScyllaWindowStore, Version, WindowBackendSnapshot, WindowOperatorStore, WindowStoreTaskScope,
 };
 use crate::runtime::operators::window::store::data::cursors_from_batch;
+use crate::runtime::state::OperatorStore;
 use crate::test_utils::window_aggs as test_utils;
 use arrow::array::RecordBatch;
 use testcontainers::core::WaitFor;
@@ -446,6 +448,246 @@ where
 fn sorted<T: Ord>(mut rows: Vec<T>) -> Vec<T> {
     rows.sort();
     rows
+}
+
+/// Maintain against Scylla: drop an expired minute, range-delete tiles that
+/// end at or below the floor (including the `tile_keep_from` boundary), trim
+/// tile and key-state versions to three versions, and delete triggers at or
+/// below the committed watermark. A second tick keeps those rows.
+#[tokio::test]
+#[ignore]
+async fn window_scylla_store_maintain_gc() {
+    let store = connect("volga_maintain").await;
+    let ns = StateNamespace::new(b"op");
+    let partition = partition(&ns);
+    let writer = store.client(scope(&ns, 1));
+    let live = (120_000_i64, 1_u64);
+
+    for epoch in 0_u64..=10 {
+        let mut cursors = vec![live];
+        let mut tile_entries = vec![
+            (TimeGranularity::Seconds(1), 119_000, 1),
+            (TimeGranularity::Seconds(1), 119_001, 1),
+        ];
+        let mut triggers = Vec::new();
+        if epoch == 0 {
+            cursors.push((1_000, 1));
+            tile_entries.push((TimeGranularity::Seconds(1), 1_000, 1));
+            triggers.push(WindowTrigger {
+                fire_at: Cursor::new(120_000, 1),
+                partition: partition.clone(),
+                kind: WindowTriggerKind::RowEmit,
+            });
+        }
+        if epoch == 10 {
+            triggers.push(WindowTrigger {
+                fire_at: Cursor::new(180_000, 1),
+                partition: partition.clone(),
+                kind: WindowTriggerKind::RowEmit,
+            });
+        }
+        writer
+            .commit_events(
+                &partition,
+                0,
+                &batch(&cursors),
+                &tiles(&tile_entries),
+                &KeyState {
+                    next_seq: epoch + 2,
+                    ..Default::default()
+                },
+                &triggers,
+            )
+            .await
+            .unwrap();
+        if epoch == 2 || epoch == 4 {
+            let snap = writer.checkpoint().await.unwrap();
+            writer
+                .on_checkpoint_complete(epoch, &snap, Some(120_000), Some(120_000))
+                .await
+                .unwrap();
+        }
+    }
+
+    let expired_only = PartitionKey {
+        namespace: ns.bytes.clone(),
+        business_key: 1u64.to_le_bytes().to_vec(),
+    };
+    for _ in 0..3 {
+        writer
+            .commit_events(
+                &expired_only,
+                0,
+                &batch(&[(1_000, 1)]),
+                &TileMap::new(),
+                &KeyState {
+                    next_seq: 1,
+                    ..Default::default()
+                },
+                &[],
+            )
+            .await
+            .unwrap();
+    }
+
+    let task_state = WindowOperatorState::for_test(
+        Arc::new(writer.clone()) as Arc<dyn WindowOperatorStore>,
+        ns.clone(),
+        Arc::from("maintain-task"),
+        0,
+        Arc::new(std::collections::BTreeMap::new()),
+        0,
+        0,
+    )
+    .with_tile_granularities(vec![TimeGranularity::Seconds(1).to_millis()]);
+    task_state.seed_committed_watermark(120_000);
+
+    let key = partition.business_key.clone();
+    let ns_bytes = ns.bytes.clone();
+    let ks = store.keyspace();
+    for _ in 0..2 {
+        writer.maintain(&ns, &task_state).await.unwrap();
+        assert_eq!(
+        sorted(
+            query::<(i64,)>(
+                &store,
+                &format!(
+                    "SELECT bucket_start FROM {ks}.window_kg_buckets WHERE namespace = ? AND key_group = ?"
+                ),
+                (ns_bytes.clone(), 0_i32),
+            )
+            .await,
+        ),
+        vec![(120_000,)],
+        "expired minute leaves window_kg_buckets"
+    );
+        assert!(
+        query::<(i64, i64)>(
+            &store,
+            &format!(
+                "SELECT attempt, epoch FROM {ks}.window_raw WHERE namespace = ? AND key_group = ? AND business_key = ? AND bucket_start = ?"
+            ),
+            (ns_bytes.clone(), 0_i32, key.clone(), 0_i64),
+        )
+        .await
+        .is_empty(),
+        "raw partition below the floor is deleted"
+    );
+        assert_eq!(
+        sorted(
+            query::<(i64, i64)>(
+                &store,
+                &format!(
+                    "SELECT attempt, epoch FROM {ks}.window_raw WHERE namespace = ? AND key_group = ? AND business_key = ? AND bucket_start = ?"
+                ),
+                (ns_bytes.clone(), 0_i32, key.clone(), 120_000_i64),
+            )
+            .await,
+        ),
+        (0_i64..=10).map(|epoch| (1, epoch)).collect::<Vec<_>>(),
+        "a live minute keeps every cursor version"
+    );
+        assert_eq!(
+        sorted(
+            query::<(i64, i64, i64)>(
+                &store,
+                &format!(
+                    "SELECT tile_start, attempt, epoch FROM {ks}.window_tiles WHERE namespace = ? AND key_group = ? AND business_key = ? AND granularity_ms = ?"
+                ),
+                (ns_bytes.clone(), 0_i32, key.clone(), 1_000_i64),
+            )
+            .await,
+        ),
+        vec![
+            (119_001, 1, 2),
+            (119_001, 1, 4),
+            (119_001, 1, 10),
+        ],
+        "119_000 is below tile_keep_from and is gone; 119_001 keeps three versions"
+    );
+        assert_eq!(
+        sorted(
+            query::<(i64, i64)>(
+                &store,
+                &format!(
+                    "SELECT attempt, epoch FROM {ks}.window_key_states WHERE namespace = ? AND key_group = ? AND business_key = ?"
+                ),
+                (ns_bytes.clone(), 0_i32, key.clone()),
+            )
+            .await,
+        ),
+        vec![(1, 2), (1, 4), (1, 10)],
+        "key state keeps the three versions"
+    );
+        assert_eq!(
+        sorted(
+            query::<(i64, i64)>(
+                &store,
+                &format!(
+                    "SELECT attempt, epoch FROM {ks}.window_key_states WHERE namespace = ? AND key_group = ? AND business_key = ?"
+                ),
+                (ns_bytes.clone(), 0_i32, expired_only.business_key.clone()),
+            )
+            .await,
+        ),
+        vec![(1, 13)],
+        "a key whose minutes all expired still drops versions outside the three versions"
+    );
+        assert_eq!(
+            query::<(i64,)>(
+                &store,
+                &format!(
+                    "SELECT fire_ts FROM {ks}.window_triggers WHERE namespace = ? AND kg_shard = ?"
+                ),
+                (ns_bytes.clone(), 0_i32),
+            )
+            .await,
+            vec![(180_000,)],
+            "triggers at or below the committed watermark are deleted"
+        );
+
+        assert!(writer
+            .load_raw(&partition, &[raw_run((0, 0), (60_000, 0))])
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            raw_cursors(
+                &writer
+                    .load_raw(&partition, &[raw_run((120_000, 0), (180_000, 0))])
+                    .await
+                    .unwrap()
+            ),
+            vec![Cursor::new(120_000, 1)]
+        );
+        assert_eq!(
+            tile_keys(
+                &writer
+                    .load_tiles(
+                        &partition,
+                        &[TileRun {
+                            granularity: TimeGranularity::Seconds(1),
+                            start_ts: 0,
+                            end_ts_exclusive: 200_000,
+                        }],
+                    )
+                    .await
+                    .unwrap()
+            ),
+            vec![(TimeGranularity::Seconds(1), 119_001)]
+        );
+        assert_eq!(
+            writer
+                .load_triggers(None, Cursor::new(200_000, u64::MAX))
+                .await
+                .unwrap(),
+            vec![WindowTrigger {
+                fire_at: Cursor::new(180_000, 1),
+                partition: partition.clone(),
+                kind: WindowTriggerKind::RowEmit,
+            }],
+        );
+    }
 }
 
 async fn stored_versions(

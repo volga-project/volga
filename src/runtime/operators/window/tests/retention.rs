@@ -96,6 +96,8 @@ async fn consumed_triggers_are_removed_after_completed_watermark() {
 
     let _ = h.watermark_and_output(2_000).await;
     let _ = h.drain_passthrough_watermark().await;
+    h.complete_checkpoint(1).await;
+    h.run_maintenance().await;
     assert_eq!(due_trigger_count(&h, 2_000).await, 0);
     assert_eq!(due_trigger_count(&h, 8_000).await, 1);
 }
@@ -116,11 +118,15 @@ async fn future_triggers_remain_across_partial_watermarks() {
 
     let partial = h.watermark_and_output(2_000).await;
     let _ = h.drain_passthrough_watermark().await;
+    h.complete_checkpoint(1).await;
+    h.run_maintenance().await;
     assert_eq!(partial.num_rows(), 2);
     assert_eq!(due_trigger_count(&h, 5_000).await, 1);
 
     let rest = h.watermark_and_output(5_000).await;
     let _ = h.drain_passthrough_watermark().await;
+    h.complete_checkpoint(2).await;
+    h.run_maintenance().await;
     assert_eq!(rest.num_rows(), 1);
     assert_eq!(due_trigger_count(&h, 5_000).await, 0);
 }
@@ -146,6 +152,8 @@ async fn raw_and_tiles_are_retained_through_wo_floor() {
 
     let _ = h.watermark_and_output(10_000).await;
     let _ = h.drain_passthrough_watermark().await;
+    h.complete_checkpoint(1).await;
+    h.run_maintenance().await;
 
     // floor = 10000 - 5000 - 0 = 5000; keep ts >= 5000
     assert_eq!(raw_timestamps(&h, "A").await, vec![5_000, 10_000]);
@@ -178,6 +186,8 @@ async fn lateness_extends_retention_floor() {
 
     let _ = h.watermark_and_output(10_000).await;
     let _ = h.drain_passthrough_watermark().await;
+    h.complete_checkpoint(1).await;
+    h.run_maintenance().await;
 
     // floor = 10000 - 5000 - 2000 = 3000
     assert_eq!(raw_timestamps(&h, "A").await, vec![3_000, 5_000, 10_000]);
@@ -202,6 +212,8 @@ async fn checkpoint_before_cleanup_restores_pre_prune_state() {
 
     let _ = original.watermark_and_output(10_000).await;
     let _ = original.drain_passthrough_watermark().await;
+    original.complete_checkpoint(2).await;
+    original.run_maintenance().await;
     // floor = 10000 - 5000 = 5000 → only ts=10000 remains
     assert_eq!(raw_timestamps(&original, "A").await, vec![10_000]);
     assert_eq!(due_trigger_count(&original, 10_000).await, 0);
@@ -251,6 +263,7 @@ async fn state_only_prunes_without_triggers_or_evaluation_state() {
     )
     .await
     .expect("watermark");
+    h.complete_checkpoint(1).await;
     h.run_maintenance().await;
 
     assert_eq!(raw_timestamps(&h, "A").await, vec![5_000, 10_000]);
@@ -259,4 +272,58 @@ async fn state_only_prunes_without_triggers_or_evaluation_state() {
     let meta = h.store.load_key_state(&partition).await.expect("meta");
     assert_eq!(meta.next_seq, 3);
     assert!(meta.evaluation.is_none());
+}
+
+#[tokio::test]
+async fn state_only_admits_late_rows_above_retention_floor() {
+    let exec = window_exec_from_sql(SQL).await;
+    let mut cfg = WindowOperatorConfig::new(exec);
+    cfg.output_mode = WindowOutputMode::StateOnly;
+    cfg.spec = WindowSpec {
+        lateness: 0,
+        tiling: Some(TileConfig::new(vec![TimeGranularity::Seconds(1)]).unwrap()),
+    };
+    let mut h = Harness::new(cfg).await;
+    h.ingest(
+        batch(
+            vec![1_000, 5_000, 10_000],
+            vec![1.0, 2.0, 3.0],
+            vec!["A", "A", "A"],
+        ),
+        "A",
+    )
+    .await;
+    let mut out = VecOutput::default();
+    h.op.handle_watermark(
+        match watermark_message(10_000) {
+            crate::common::message::Message::Watermark(w) => w,
+            other => panic!("expected watermark, got {other:?}"),
+        },
+        &mut out,
+    )
+    .await
+    .expect("watermark");
+    h.complete_checkpoint(1).await;
+    // floor = 10000 - 5000 = 5000. Live watermark is 10000.
+    // GC keeps ts >= floor, so an event exactly on the floor is admitted.
+    h.ingest(
+        batch(vec![6_000, 4_000], vec![4.0, 5.0], vec!["A", "A"]),
+        "A",
+    )
+    .await;
+    h.ingest(
+        batch(vec![5_000, 4_000], vec![6.0, 7.0], vec!["B", "B"]),
+        "B",
+    )
+    .await;
+    let ts = raw_timestamps(&h, "A").await;
+    assert!(
+        ts.contains(&6_000),
+        "late row above floor must be stored, got {ts:?}"
+    );
+    assert!(
+        !ts.contains(&4_000),
+        "row behind floor must be dropped, got {ts:?}"
+    );
+    assert_eq!(raw_timestamps(&h, "B").await, vec![5_000]);
 }

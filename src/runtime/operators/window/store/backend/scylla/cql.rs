@@ -13,6 +13,16 @@ pub(super) const SELECT_KEY_STATE: &str = "SELECT attempt, epoch, key_state FROM
 pub(super) const SELECT_RAW: &str = "SELECT event_ts, seq_no, attempt, epoch, payload FROM window_raw WHERE namespace = ? AND key_group = ? AND business_key = ? AND bucket_start = ? AND event_ts >= ? AND event_ts <= ?";
 pub(super) const SELECT_TILES: &str = "SELECT tile_start, attempt, epoch, payload FROM window_tiles WHERE namespace = ? AND key_group = ? AND business_key = ? AND granularity_ms = ? AND tile_start >= ? AND tile_start < ?";
 pub(super) const SELECT_TRIGGERS: &str = "SELECT fire_ts, fire_seq, business_key, trigger_kind, window_id, key_group, attempt, epoch FROM window_triggers WHERE namespace = ? AND kg_shard = ? AND (fire_ts, fire_seq) > (?, ?) AND (fire_ts, fire_seq) <= (?, ?)";
+pub(super) const SELECT_KG_BUCKETS: &str = "SELECT bucket_start, business_key FROM window_kg_buckets WHERE namespace = ? AND key_group = ?";
+pub(super) const SELECT_KEY_STATE_VERSIONS: &str = "SELECT attempt, epoch FROM window_key_states WHERE namespace = ? AND key_group = ? AND business_key = ?";
+pub(super) const SELECT_TILE_VERSIONS: &str = "SELECT tile_start, attempt, epoch FROM window_tiles WHERE namespace = ? AND key_group = ? AND business_key = ? AND granularity_ms = ?";
+pub(super) const DELETE_RAW: &str = "DELETE FROM window_raw WHERE namespace = ? AND key_group = ? AND business_key = ? AND bucket_start = ?";
+pub(super) const DELETE_TILES: &str = "DELETE FROM window_tiles WHERE namespace = ? AND key_group = ? AND business_key = ? AND granularity_ms = ? AND tile_start < ?";
+pub(super) const DELETE_KG_BUCKETS: &str = "DELETE FROM window_kg_buckets WHERE namespace = ? AND key_group = ? AND bucket_start = ? AND business_key = ?";
+pub(super) const DELETE_KEY_STATE_VERSION: &str = "DELETE FROM window_key_states WHERE namespace = ? AND key_group = ? AND business_key = ? AND attempt = ? AND epoch = ?";
+pub(super) const DELETE_TILE_VERSION: &str = "DELETE FROM window_tiles WHERE namespace = ? AND key_group = ? AND business_key = ? AND granularity_ms = ? AND tile_start = ? AND attempt = ? AND epoch = ?";
+pub(super) const DELETE_TRIGGERS: &str =
+    "DELETE FROM window_triggers WHERE namespace = ? AND kg_shard = ? AND fire_ts <= ?";
 
 pub(super) struct PreparedDml {
     pub(super) insert_raw: PreparedStatement,
@@ -24,6 +34,19 @@ pub(super) struct PreparedDml {
     pub(super) select_raw: PreparedStatement,
     pub(super) select_tiles: PreparedStatement,
     pub(super) select_triggers: PreparedStatement,
+}
+
+#[derive(Clone)]
+pub(super) struct PreparedGc {
+    pub(super) select_kg_buckets: PreparedStatement,
+    pub(super) select_key_state_versions: PreparedStatement,
+    pub(super) select_tile_versions: PreparedStatement,
+    pub(super) delete_raw: PreparedStatement,
+    pub(super) delete_tiles: PreparedStatement,
+    pub(super) delete_kg_buckets: PreparedStatement,
+    pub(super) delete_key_state_version: PreparedStatement,
+    pub(super) delete_tile_version: PreparedStatement,
+    pub(super) delete_triggers: PreparedStatement,
 }
 
 pub(super) async fn prepare_stmts<const N: usize>(

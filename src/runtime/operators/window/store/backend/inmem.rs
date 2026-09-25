@@ -656,7 +656,7 @@ impl OperatorStore for InMemWindowStore {
         let Some(wo) = state.as_any().downcast_ref::<WindowOperatorState>() else {
             return Ok(());
         };
-        let Some((watermark, floor)) = wo.retention_cutoff() else {
+        let Some((watermark, floor)) = wo.committed_retention_cutoff() else {
             return Ok(());
         };
         self.maintain_cutoff(wo.scope(), watermark, floor, state.task_id())?;
@@ -1216,6 +1216,7 @@ mod tests {
         task_state
             .watermark_frontier
             .store(5_000, std::sync::atomic::Ordering::Release);
+        task_state.seed_committed_watermark(5_000);
         store.maintain(&namespace, &task_state).await.unwrap();
 
         let work = client
@@ -1525,6 +1526,7 @@ mod tests {
         task0
             .watermark_frontier
             .store(5_000, std::sync::atomic::Ordering::Release);
+        task0.seed_committed_watermark(5_000);
         store.maintain(&ns, &task0).await.unwrap();
 
         assert!(c0
