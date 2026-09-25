@@ -1,0 +1,102 @@
+# Same as volga_v1alpha1_pipeline.yaml with operator state on an existing Scylla
+# cluster. kubevolga does not deploy Scylla.
+apiVersion: volga.io/v1alpha1
+kind: VolgaPipeline
+metadata:
+  name: sample-pipeline-scylla
+  namespace: default
+spec:
+  workers:
+    replicas: 3
+  image: volga:latest
+  imagePullPolicy: IfNotPresent
+  master:
+    nodeSelector:
+      volga.io/role: infra
+    resources:
+      requests:
+        cpu: "500m"
+        memory: "512Mi"
+      limits:
+        cpu: "2"
+        memory: "2Gi"
+  worker:
+    nodeSelector:
+      volga.io/role: worker
+    tolerations:
+      - key: volga.io/role
+        operator: Equal
+        value: worker
+        effect: NoSchedule
+    affinity:
+      podAntiAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchLabels:
+                  volga.io/component: worker
+              topologyKey: kubernetes.io/hostname
+    resources:
+      requests:
+        cpu: "500m"
+        memory: "512Mi"
+      limits:
+        cpu: "2"
+        memory: "2Gi"
+  holdOnFinish: true
+  pipelineSpec:
+    execution_mode: Streaming
+    parallelism: 6
+    execution_profile:
+      MasterWorker:
+        num_threads_per_task: 4
+    state:
+      checkpoint_store: in_memory
+      operator_backend:
+        scylla:
+          contact_points:
+            - scylla.default.svc.cluster.local:9042
+          keyspace: volga_window
+          datacenter: datacenter1
+      maintenance_enabled: true
+      maintenance_interval_ms: 1000
+      checkpoint:
+        interval_ms: 2000
+        timeout_ms: 60000
+        retention: 2
+    task_assignment_strategy:
+      Pipelined:
+        slots_per_node: 2
+    sources:
+      - table_name: test_table
+        schema_json: |
+          {
+            "fields": [
+              {
+                "name": "value",
+                "nullable": false,
+                "type": { "name": "utf8" },
+                "children": []
+              }
+            ]
+          }
+        source:
+          Datagen: |
+            {
+              "rate": null,
+              "limit": 60,
+              "run_for_s": null,
+              "batch_size": 5,
+              "fields": {
+                "value": { "Key": { "num_unique_keys": 6 } }
+              },
+              "replayable": true
+            }
+    sink:
+      InMemoryStorageGrpc: |
+        {
+          "create": true,
+          "server_addr": "http://sample-pipeline-scylla-storage.default.svc.cluster.local:50071"
+        }
+    sql: "SELECT value FROM test_table"
