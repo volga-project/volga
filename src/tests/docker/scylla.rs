@@ -548,6 +548,10 @@ async fn window_scylla_store_maintain_gc() {
     )
     .with_tile_granularities(vec![TimeGranularity::Seconds(1).to_millis()]);
     task_state.seed_committed_watermark(120_000);
+    // Maintain returns before any delete when the live frontier is unset.
+    task_state
+        .watermark_frontier
+        .store(120_000, Ordering::Release);
 
     let key = partition.business_key.clone();
     let ns_bytes = ns.bytes.clone();
