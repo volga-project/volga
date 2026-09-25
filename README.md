@@ -168,6 +168,23 @@ scripts/test kube
 scripts/test stress --env kube --all --runs-per-shard 10 --shards 2 --fresh-cluster
 ```
 
+# Benchmarks
+
+`volga-bench` runs a datagen window pipeline on Kind or a real Kubernetes cluster and records it in Grafana. The job spec is YAML. The CLI only overrides `--env` and `--duration-secs`.
+
+Benchmarks are streaming mode only, and only a continuously sliding window query, on an in-memory or Scylla backend. Request mode, batch, and other SQL shapes are not covered.
+
+Setup, configs, and what each graph tracks: [bench/README.md](bench/README.md).
+
+```bash
+scripts/kube-test-env setup
+make -C kubevolga bench
+cargo run --bin volga-bench -- \
+  --config bench/example.yaml \
+  --env kube \
+  --duration-secs 120
+```
+
 # Running locally
 
 ```bash
