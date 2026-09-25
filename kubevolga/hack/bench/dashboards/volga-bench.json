@@ -800,545 +800,6 @@
       "description": "Rows dropped by the in-memory maintain tick. Empty when the job runs the Scylla store."
     },
     {
-      "id": 10,
-      "type": "row",
-      "title": "Job",
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 38
-      },
-      "collapsed": false,
-      "panels": []
-    },
-    {
-      "id": 11,
-      "type": "timeseries",
-      "title": "Checkpoints",
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 39
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "increase(volga_checkpoint_completed{pipeline_id=~\"$pipeline\"}[5m])",
-          "legendFormat": "{{pipeline_id}} completed",
-          "editorMode": "code",
-          "instant": false,
-          "range": true
-        },
-        {
-          "refId": "B",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "increase(volga_checkpoint_failed{pipeline_id=~\"$pipeline\"}[5m])",
-          "legendFormat": "{{pipeline_id}} failed",
-          "editorMode": "code",
-          "instant": false,
-          "range": true
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "smooth",
-            "fillOpacity": 10,
-            "lineWidth": 2,
-            "pointSize": 5,
-            "showPoints": "never",
-            "spanNulls": true,
-            "stacking": {
-              "mode": "none",
-              "group": "A"
-            }
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "description": "Trailing 5m increase of master counters (not a per-second rate). metrics crate does not add _total. Empty if scrape missed the master."
-    },
-    {
-      "id": 12,
-      "type": "timeseries",
-      "title": "Checkpoint duration p99",
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 39
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(volga_checkpoint_duration_ms_bucket{pipeline_id=~\"$pipeline\"}[1m])))",
-          "legendFormat": "duration p99",
-          "editorMode": "code",
-          "instant": false,
-          "range": true
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "smooth",
-            "fillOpacity": 10,
-            "lineWidth": 2,
-            "pointSize": 5,
-            "showPoints": "never",
-            "spanNulls": true,
-            "stacking": {
-              "mode": "none",
-              "group": "A"
-            }
-          },
-          "unit": "ms"
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "description": "Success-only histogram. Sparse on a 2-minute / 30s-checkpoint run \u2014 expect a flat-ish line."
-    },
-    {
-      "id": 70,
-      "type": "row",
-      "title": "Transport",
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 47
-      },
-      "collapsed": false,
-      "panels": []
-    },
-    {
-      "id": 71,
-      "type": "timeseries",
-      "title": "Tx queue remaining",
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 48
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "max by (task_id, target_task_id) (volga_stream_task_tx_queue_rem{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"})",
-          "legendFormat": "{{task_id}} \u2192 {{target_task_id}}",
-          "editorMode": "code",
-          "instant": false,
-          "range": true
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "smooth",
-            "fillOpacity": 10,
-            "lineWidth": 2,
-            "pointSize": 5,
-            "showPoints": "never",
-            "spanNulls": true,
-            "stacking": {
-              "mode": "none",
-              "group": "A"
-            }
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "description": "Remaining record credits on each output edge (bound DEFAULT_QUEUE_RECORDS=8192, not message count). 0 = this task is blocked sending to that target."
-    },
-    {
-      "id": 72,
-      "type": "timeseries",
-      "title": "Rx queued records",
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 48
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "max by (task_id, source_task_id) (volga_stream_task_rx_queued_records{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"})",
-          "legendFormat": "{{source_task_id}} \u2192 {{task_id}}",
-          "editorMode": "code",
-          "instant": false,
-          "range": true
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "smooth",
-            "fillOpacity": 10,
-            "lineWidth": 2,
-            "pointSize": 5,
-            "showPoints": "never",
-            "spanNulls": true,
-            "stacking": {
-              "mode": "none",
-              "group": "A"
-            }
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "description": "Records waiting on each input channel. Full + dest idle = operator not polling. Empty + upstream tx rem 0 = not delivered yet."
-    },
-    {
-      "id": 73,
-      "type": "timeseries",
-      "title": "Pump write-block (ms / s)",
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 56
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "avg by (task_id, target_task_id) (volga_stream_task_transport_write_block_ms_per_second{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"})",
-          "legendFormat": "{{task_id}} \u2192 {{target_task_id}}",
-          "editorMode": "code",
-          "instant": false,
-          "range": true
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "smooth",
-            "fillOpacity": 10,
-            "lineWidth": 2,
-            "pointSize": 5,
-            "showPoints": "never",
-            "spanNulls": true,
-            "stacking": {
-              "mode": "none",
-              "group": "A"
-            }
-          },
-          "unit": "ms"
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "description": "Per-edge TCP write wait (window / peer not reading). tx_rem\u22480 + dest rx\u22480 + this high \u2192 wire."
-    },
-    {
-      "id": 74,
-      "type": "timeseries",
-      "title": "Transport disconnects",
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 56
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "increase(volga_stream_task_transport_disconnects{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"}[5m])",
-          "legendFormat": "{{task_id}} \u2192 {{target_task_id}}",
-          "editorMode": "code",
-          "instant": false,
-          "range": true
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "smooth",
-            "fillOpacity": 10,
-            "lineWidth": 2,
-            "pointSize": 5,
-            "showPoints": "never",
-            "spanNulls": true,
-            "stacking": {
-              "mode": "none",
-              "group": "A"
-            }
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "description": "Trailing 5m increase. Close is fatal. Count so Grafana shows a drop without scraping logs."
-    },
-    {
-      "id": 60,
-      "type": "row",
-      "title": "Process / container",
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 64
-      },
-      "collapsed": false,
-      "panels": []
-    },
-    {
-      "id": 61,
-      "type": "timeseries",
-      "title": "CPU (cAdvisor)",
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 65
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "sum by (pod) (rate(container_cpu_usage_seconds_total{container=~\"master|worker\"}[1m]))",
-          "legendFormat": "{{pod}}",
-          "editorMode": "code",
-          "instant": false,
-          "range": true
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "smooth",
-            "fillOpacity": 10,
-            "lineWidth": 2,
-            "pointSize": 5,
-            "showPoints": "never",
-            "spanNulls": true,
-            "stacking": {
-              "mode": "none",
-              "group": "A"
-            }
-          },
-          "unit": "cores"
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "description": "Kubelet cAdvisor. 1.0 = one full core. Not labeled by pipeline_id \u2014 shows every master/worker container still running."
-    },
-    {
-      "id": 62,
-      "type": "timeseries",
-      "title": "Memory: Volga RSS vs cgroup working set",
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 65
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "sum by (worker_id) (volga_worker_rss_bytes{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\"})",
-          "legendFormat": "rss {{worker_id}}",
-          "editorMode": "code",
-          "instant": false,
-          "range": true
-        },
-        {
-          "refId": "B",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "sum by (pod) (container_memory_working_set_bytes{container=~\"master|worker\"})",
-          "legendFormat": "cgroup {{pod}}",
-          "editorMode": "code",
-          "instant": false,
-          "range": true
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "smooth",
-            "fillOpacity": 10,
-            "lineWidth": 2,
-            "pointSize": 5,
-            "showPoints": "never",
-            "spanNulls": true,
-            "stacking": {
-              "mode": "none",
-              "group": "A"
-            }
-          },
-          "unit": "bytes"
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "description": "volga_worker_rss_bytes (process RSS, workers only) vs cAdvisor working set (master + workers). Shapes should match; RSS is often a bit below cgroup."
-    },
-    {
       "id": 80,
       "type": "row",
       "title": "Scylla store",
@@ -1346,7 +807,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 73
+        "y": 38
       },
       "collapsed": false,
       "panels": []
@@ -1359,7 +820,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 74
+        "y": 39
       },
       "datasource": {
         "type": "prometheus",
@@ -1418,7 +879,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 74
+        "y": 39
       },
       "datasource": {
         "type": "prometheus",
@@ -1477,7 +938,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 74
+        "y": 39
       },
       "datasource": {
         "type": "prometheus",
@@ -1536,7 +997,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 82
+        "y": 47
       },
       "datasource": {
         "type": "prometheus",
@@ -1595,7 +1056,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 82
+        "y": 47
       },
       "datasource": {
         "type": "prometheus",
@@ -1654,7 +1115,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 82
+        "y": 47
       },
       "datasource": {
         "type": "prometheus",
@@ -1713,7 +1174,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 90
+        "y": 55
       },
       "datasource": {
         "type": "prometheus",
@@ -1820,7 +1281,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 90
+        "y": 55
       },
       "datasource": {
         "type": "prometheus",
@@ -1915,7 +1376,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 98
+        "y": 63
       },
       "datasource": {
         "type": "prometheus",
@@ -1986,7 +1447,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 98
+        "y": 63
       },
       "datasource": {
         "type": "prometheus",
@@ -2038,9 +1499,548 @@
       "description": "p99 of index_scan, key_gc, and trigger_delete."
     },
     {
+      "id": 10,
+      "type": "row",
+      "title": "Job",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 71
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Checkpoints",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 72
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "increase(volga_checkpoint_completed{pipeline_id=~\"$pipeline\"}[5m])",
+          "legendFormat": "{{pipeline_id}} completed",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "increase(volga_checkpoint_failed{pipeline_id=~\"$pipeline\"}[5m])",
+          "legendFormat": "{{pipeline_id}} failed",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Trailing 5m increase of master counters (not a per-second rate). metrics crate does not add _total. Empty if scrape missed the master."
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Checkpoint duration p99",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 72
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(volga_checkpoint_duration_ms_bucket{pipeline_id=~\"$pipeline\"}[1m])))",
+          "legendFormat": "duration p99",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Success-only histogram. Sparse on a 2-minute / 30s-checkpoint run \u2014 expect a flat-ish line."
+    },
+    {
+      "id": 70,
+      "type": "row",
+      "title": "Transport",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 80
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 71,
+      "type": "timeseries",
+      "title": "Tx queue remaining",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 81
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max by (task_id, target_task_id) (volga_stream_task_tx_queue_rem{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"})",
+          "legendFormat": "{{task_id}} \u2192 {{target_task_id}}",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Remaining record credits on each output edge (bound DEFAULT_QUEUE_RECORDS=8192, not message count). 0 = this task is blocked sending to that target."
+    },
+    {
+      "id": 72,
+      "type": "timeseries",
+      "title": "Rx queued records",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 81
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max by (task_id, source_task_id) (volga_stream_task_rx_queued_records{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"})",
+          "legendFormat": "{{source_task_id}} \u2192 {{task_id}}",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Records waiting on each input channel. Full + dest idle = operator not polling. Empty + upstream tx rem 0 = not delivered yet."
+    },
+    {
+      "id": 73,
+      "type": "timeseries",
+      "title": "Pump write-block (ms / s)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 89
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "avg by (task_id, target_task_id) (volga_stream_task_transport_write_block_ms_per_second{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"})",
+          "legendFormat": "{{task_id}} \u2192 {{target_task_id}}",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Per-edge TCP write wait (window / peer not reading). tx_rem\u22480 + dest rx\u22480 + this high \u2192 wire."
+    },
+    {
+      "id": 74,
+      "type": "timeseries",
+      "title": "Transport disconnects",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 89
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "increase(volga_stream_task_transport_disconnects{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\",task_id=~\"$task\"}[5m])",
+          "legendFormat": "{{task_id}} \u2192 {{target_task_id}}",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Trailing 5m increase. Close is fatal. Count so Grafana shows a drop without scraping logs."
+    },
+    {
+      "id": 60,
+      "type": "row",
+      "title": "Process / container",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 97
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 61,
+      "type": "timeseries",
+      "title": "CPU (cAdvisor)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 98
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (pod) (rate(container_cpu_usage_seconds_total{container=~\"master|worker\"}[1m]))",
+          "legendFormat": "{{pod}}",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "unit": "cores"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Kubelet cAdvisor. 1.0 = one full core. Not labeled by pipeline_id \u2014 shows every master/worker container still running."
+    },
+    {
+      "id": 62,
+      "type": "timeseries",
+      "title": "Memory: Volga RSS vs cgroup working set",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 98
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (worker_id) (volga_worker_rss_bytes{pipeline_id=~\"$pipeline\",worker_id=~\"$worker\"})",
+          "legendFormat": "rss {{worker_id}}",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (pod) (container_memory_working_set_bytes{container=~\"master|worker\"})",
+          "legendFormat": "cgroup {{pod}}",
+          "editorMode": "code",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "volga_worker_rss_bytes (process RSS, workers only) vs cAdvisor working set (master + workers). Shapes should match; RSS is often a bit below cgroup."
+    },
+    {
       "id": 100,
       "type": "row",
-      "title": "Scylla node",
+      "title": "Scylla cluster",
       "gridPos": {
         "h": 1,
         "w": 24,
@@ -2071,8 +2071,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(scylla_column_family_total_disk_space)",
-          "legendFormat": "total",
+          "expr": "sum by (pod) (scylla_column_family_total_disk_space)",
+          "legendFormat": "total {{pod}}",
           "editorMode": "code",
           "instant": false,
           "range": true
@@ -2083,8 +2083,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(scylla_column_family_live_disk_space)",
-          "legendFormat": "live",
+          "expr": "sum by (pod) (scylla_column_family_live_disk_space)",
+          "legendFormat": "live {{pod}}",
           "editorMode": "code",
           "instant": false,
           "range": true
@@ -2095,8 +2095,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(scylla_commitlog_disk_active_bytes)",
-          "legendFormat": "commitlog",
+          "expr": "sum by (pod) (scylla_commitlog_disk_active_bytes)",
+          "legendFormat": "commitlog {{pod}}",
           "editorMode": "code",
           "instant": false,
           "range": true
@@ -2155,8 +2155,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "avg(scylla_reactor_utilization)",
-          "legendFormat": "avg",
+          "expr": "sum by (pod) (scylla_reactor_utilization) / 100",
+          "legendFormat": "busy cores {{pod}}",
           "editorMode": "code",
           "instant": false,
           "range": true
@@ -2167,8 +2167,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "max(scylla_reactor_utilization)",
-          "legendFormat": "max",
+          "expr": "max by (pod) (scylla_reactor_utilization)",
+          "legendFormat": "max shard % {{pod}}",
           "editorMode": "code",
           "instant": false,
           "range": true
@@ -2189,9 +2189,22 @@
               "group": "A"
             }
           },
-          "unit": "percent"
+          "unit": "short"
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "B"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "legend": {
@@ -2204,7 +2217,7 @@
           "sort": "desc"
         }
       },
-      "description": "Scylla reactor utilization, 1.0 = the shard is busy. This is Scylla's own CPU, not the cAdvisor core count."
+      "description": "Busy cores are sum(reactor utilization)/100 per node. The gauge is 0\u2013100 per shard, so one saturated shard is 1 core and an 8-shard node can read 8. Max shard % is the hottest shard on that node, 0\u2013100. Not cAdvisor, and not a single-node metric."
     },
     {
       "id": 103,
@@ -2227,8 +2240,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(scylla_compaction_manager_compactions)",
-          "legendFormat": "active",
+          "expr": "sum by (pod) (scylla_compaction_manager_compactions)",
+          "legendFormat": "active {{pod}}",
           "editorMode": "code",
           "instant": false,
           "range": true
@@ -2239,8 +2252,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(scylla_compaction_manager_pending_compactions)",
-          "legendFormat": "pending",
+          "expr": "sum by (pod) (scylla_compaction_manager_pending_compactions)",
+          "legendFormat": "pending {{pod}}",
           "editorMode": "code",
           "instant": false,
           "range": true
@@ -2299,8 +2312,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(scylla_compaction_manager_backlog)",
-          "legendFormat": "backlog",
+          "expr": "sum by (pod) (scylla_compaction_manager_backlog)",
+          "legendFormat": "backlog {{pod}}",
           "editorMode": "code",
           "instant": false,
           "range": true
@@ -2359,8 +2372,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(scylla_memory_regular_dirty_bytes)",
-          "legendFormat": "dirty",
+          "expr": "sum by (pod) (scylla_memory_regular_dirty_bytes)",
+          "legendFormat": "dirty {{pod}}",
           "editorMode": "code",
           "instant": false,
           "range": true
@@ -2371,8 +2384,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(scylla_cache_bytes_used)",
-          "legendFormat": "cache",
+          "expr": "sum by (pod) (scylla_cache_bytes_used)",
+          "legendFormat": "cache {{pod}}",
           "editorMode": "code",
           "instant": false,
           "range": true
