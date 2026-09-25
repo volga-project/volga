@@ -8,6 +8,8 @@ Job specs live in this directory. The cluster install (Prometheus, Grafana, the 
 
 ## What the job is
 
+Streaming mode only, and only a continuously sliding window query. Request mode, batch, and other SQL shapes are not covered.
+
 Parallelism 4, two slots per worker, two workers plus a master. The source is datagen (`timestamp`, `key`, `value`). The SQL is a 10s `RANGE` window: `SUM`, `COUNT`, `AVG`, `MIN`, `MAX` partitioned by `key`. Tiles are 1s and 5s. The sink counts rows. It does not write them out.
 
 | `launch.backend` | State |
