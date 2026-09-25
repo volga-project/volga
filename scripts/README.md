@@ -195,16 +195,18 @@ export VOLGA_KUBE_CONTEXT="${VOLGA_KUBE_CONTEXT:-kind-kubevolga}"
 kubectl --context "$VOLGA_KUBE_CONTEXT" -n volga-bench port-forward svc/prometheus 9090:9090 &
 kubectl --context "$VOLGA_KUBE_CONTEXT" -n volga-bench port-forward svc/grafana 3000:3000 &
 
-# 5) Short Kind smoke (example.yaml is a 1h kill scenario; override duration).
+# 5) Short Kind smoke. The spec is a 1h kill scenario; override duration.
+#    Graphs and knobs: bench/README.md
 cargo run --bin volga-bench -- \
-  --config kubevolga/hack/bench/example.yaml \
+  --config bench/example.yaml \
   --env kube \
   --duration-secs 120
 ```
 
 Grafana: http://localhost:3000 (anonymous viewer; Volga bench is the home
 dashboard). Prom dump/oracles need `prom_url` in the YAML (example uses
-`http://127.0.0.1:9090` after the port-forward).
+`http://127.0.0.1:9090` after the port-forward). What each row tracks is
+[bench/README.md](../bench/README.md).
 
 | | Kind (local / CI wiring) | Remote cluster |
 | --- | --- | --- |

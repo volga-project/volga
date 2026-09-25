@@ -168,6 +168,23 @@ scripts/test kube
 scripts/test stress --env kube --all --runs-per-shard 10 --shards 2 --fresh-cluster
 ```
 
+# Benchmarks
+
+`volga-bench` runs a datagen window pipeline on Kind or a real cluster and records it in Grafana. The job spec is YAML. The CLI only overrides `--env` and `--duration-secs`.
+
+The default spec is [bench/example.yaml](bench/example.yaml): 200 rows/s, checkpoints on, one worker kill after the first checkpoint. [bench/unlimited.yaml](bench/unlimited.yaml) is the optional max-throughput run (unlimited datagen, no interval checkpoints, in-memory). A Scylla job is the same pipeline with `launch.backend.kind: scylla`.
+
+Setup, configs, and what each graph tracks: [bench/README.md](bench/README.md).
+
+```bash
+scripts/kube-test-env setup
+make -C kubevolga bench
+cargo run --bin volga-bench -- \
+  --config bench/example.yaml \
+  --env kube \
+  --duration-secs 120
+```
+
 # Running locally
 
 ```bash
