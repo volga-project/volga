@@ -1,6 +1,33 @@
 pub const RAW_BUCKET_MS: i64 = 60_000;
 pub const TRIGGER_SHARD_COUNT: usize = 32;
 
+/// Largest step at most `window / 10`, so a window spans about 10–100 buckets.
+/// 1ms is the floor.
+const RAW_BUCKET_STEPS_MS: &[i64] = &[
+    1,
+    10,
+    100,
+    1_000,
+    10_000,
+    60_000,
+    600_000,
+    3_600_000,
+    86_400_000,
+];
+
+pub fn choose_raw_bucket_ms(max_window_ms: i64) -> i64 {
+    if max_window_ms <= 0 {
+        return RAW_BUCKET_MS;
+    }
+    let target = max_window_ms / 10;
+    RAW_BUCKET_STEPS_MS
+        .iter()
+        .rev()
+        .copied()
+        .find(|&width| width <= target)
+        .unwrap_or(RAW_BUCKET_STEPS_MS[0])
+}
+
 pub const TABLES: &[&str] = &[
     r#"CREATE TABLE IF NOT EXISTS window_kg_buckets (
         namespace blob,
@@ -41,6 +68,10 @@ pub const TABLES: &[&str] = &[
         key_state blob,
         PRIMARY KEY ((namespace, key_group, business_key), attempt, epoch)
     ) WITH CLUSTERING ORDER BY (attempt DESC, epoch DESC)"#,
+    r#"CREATE TABLE IF NOT EXISTS window_layout (
+        id int PRIMARY KEY,
+        raw_bucket_ms bigint
+    )"#,
     r#"CREATE TABLE IF NOT EXISTS window_triggers (
         namespace blob,
         kg_shard int,
@@ -123,6 +154,19 @@ pub fn last_included_ts(to: crate::runtime::operators::window::model::Cursor) ->
 mod bucket_tests {
     use super::*;
     use crate::runtime::operators::window::model::Cursor;
+
+    #[test]
+    fn bucket_width_follows_the_longest_window() {
+        assert_eq!(choose_raw_bucket_ms(5), 1);
+        assert_eq!(choose_raw_bucket_ms(100), 10);
+        assert_eq!(choose_raw_bucket_ms(500), 10);
+        assert_eq!(choose_raw_bucket_ms(10_000), 1_000);
+        assert_eq!(choose_raw_bucket_ms(120_000), 10_000);
+        assert_eq!(choose_raw_bucket_ms(900_000), 60_000);
+        assert_eq!(choose_raw_bucket_ms(3_600_000), 60_000);
+        assert_eq!(choose_raw_bucket_ms(86_400_000), 3_600_000);
+        assert_eq!(choose_raw_bucket_ms(0), RAW_BUCKET_MS);
+    }
 
     #[test]
     fn bucket_partition_keys() {

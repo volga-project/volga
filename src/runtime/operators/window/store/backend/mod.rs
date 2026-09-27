@@ -21,7 +21,7 @@ mod scylla;
 mod version;
 
 pub use inmem::{InMemWindowStore, InMemWindowStoreClient};
-pub use scylla::{ScyllaWindowStore, ScyllaWindowStoreClient};
+pub use scylla::{choose_raw_bucket_ms, ScyllaWindowStore, ScyllaWindowStoreClient};
 pub use version::{Attempt, CutHistory, Version};
 
 /// Job-level execution attempt. Durable, never reused (#156).

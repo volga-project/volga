@@ -84,6 +84,9 @@ pub struct BackendFile {
     pub contact_points: Option<Vec<String>>,
     pub keyspace: Option<String>,
     pub datacenter: Option<String>,
+    /// Raw partition width in milliseconds. Omitted → derived from the window.
+    #[serde(default)]
+    pub raw_bucket_ms: Option<i64>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -314,6 +317,7 @@ fn operator_backend(file: Option<&BackendFile>) -> Result<OperatorStateBackendCo
                 contact_points,
                 keyspace,
                 datacenter: file.datacenter.clone(),
+                raw_bucket_ms: file.raw_bucket_ms.filter(|ms| *ms > 0),
             }))
         }
         other => bail!("invalid launch.backend.kind `{other}` (in_memory|scylla)"),

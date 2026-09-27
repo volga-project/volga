@@ -36,7 +36,7 @@ use crate::runtime::state::OperatorTaskState;
 
 use super::cql::{unlogged_batch, PreparedGc};
 use super::observe::{self, note_rows, note_stmt, CallMeter};
-use super::schema::{align_down, fully_owned_trigger_shards, RAW_BUCKET_MS};
+use super::schema::{align_down, fully_owned_trigger_shards};
 use super::store::ScyllaWindowStoreClient;
 
 pub(super) fn keep_versions(
@@ -153,8 +153,9 @@ async fn run_maintain(
     let session = client.inner.session();
     let gc = client.inner.prepared_gc().await?;
     let range = wo.scope().key_group_range;
-    let floor_bucket = align_down(live_floor, RAW_BUCKET_MS);
-    let committed_floor_bucket = committed.map(|(_, floor)| align_down(floor, RAW_BUCKET_MS));
+    let bucket_ms = client.inner.raw_bucket_ms();
+    let floor_bucket = align_down(live_floor, bucket_ms);
+    let committed_floor_bucket = committed.map(|(_, floor)| align_down(floor, bucket_ms));
     let granularities = wo.tile_granularity_ms();
 
     let started = Instant::now();

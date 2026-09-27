@@ -154,6 +154,7 @@ fn scylla_window_launch(launch: PipelineLaunchSpec) -> Result<PipelineLaunchSpec
             contact_points: vec![contact],
             keyspace,
             datacenter: std::env::var("VOLGA_KUBE_SCYLLA_DATACENTER").ok(),
+            raw_bucket_ms: None,
         }),
     ))
 }

@@ -15,7 +15,7 @@ use crate::runtime::operators::window::store::data::cursors_from_batch;
 
 use super::cql::unlogged_batch;
 use super::observe::{note_bytes, note_rows, note_stmt};
-use super::schema::{align_down, kg_shard, RAW_BUCKET_MS};
+use super::schema::{align_down, kg_shard};
 use super::store::ScyllaWindowStoreClient;
 
 pub(super) async fn insert_key_state(
@@ -93,6 +93,7 @@ async fn commit_events_at(
     let key = partition.business_key.clone();
     let attempt = client.my_attempt() as i64;
     let epoch = epoch as i64;
+    let bucket_ms = client.inner.raw_bucket_ms();
 
     let cursors = if events.num_rows() > 0 {
         cursors_from_batch(events, ts_column_index)?
@@ -102,7 +103,7 @@ async fn commit_events_at(
     let mut by_bucket: BTreeMap<i64, Vec<(usize, Cursor)>> = BTreeMap::new();
     for (i, cursor) in cursors.iter().enumerate() {
         by_bucket
-            .entry(align_down(cursor.ts, RAW_BUCKET_MS))
+            .entry(align_down(cursor.ts, bucket_ms))
             .or_default()
             .push((i, *cursor));
     }
