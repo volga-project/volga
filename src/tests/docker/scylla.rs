@@ -141,6 +141,7 @@ async fn connect(prefix: &str) -> ScyllaWindowStore {
         contact_points: vec![contact()],
         keyspace: unique_keyspace(prefix),
         datacenter: None,
+        raw_bucket_ms: None,
     })
     .await
     .expect("scylla connect via StateSessionHandle")
@@ -875,6 +876,7 @@ async fn test_docker_scylla_local_worker_window_checkpoint_restore() -> Result<(
                 contact_points: vec![contact()],
                 keyspace: unique_keyspace("volga_local_window"),
                 datacenter: None,
+                raw_bucket_ms: None,
             }));
     let report = run_checkpoint_worker_kill_recovery(
         RuntimeEnv::Local,

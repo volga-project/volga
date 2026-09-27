@@ -1,6 +1,22 @@
 pub const RAW_BUCKET_MS: i64 = 60_000;
 pub const TRIGGER_SHARD_COUNT: usize = 32;
 
+/// Largest step that still fits in the window. Shorter windows get a smaller
+/// partition; longer ones get fewer partitions per read.
+const RAW_BUCKET_LADDER_MS: &[i64] = &[1_000, 5_000, 10_000, 30_000, 60_000, 300_000, 3_600_000];
+
+pub fn choose_raw_bucket_ms(max_window_ms: i64) -> i64 {
+    if max_window_ms <= 0 {
+        return RAW_BUCKET_MS;
+    }
+    RAW_BUCKET_LADDER_MS
+        .iter()
+        .rev()
+        .copied()
+        .find(|&width| width <= max_window_ms)
+        .unwrap_or(RAW_BUCKET_LADDER_MS[0])
+}
+
 pub const TABLES: &[&str] = &[
     r#"CREATE TABLE IF NOT EXISTS window_kg_buckets (
         namespace blob,
@@ -41,6 +57,10 @@ pub const TABLES: &[&str] = &[
         key_state blob,
         PRIMARY KEY ((namespace, key_group, business_key), attempt, epoch)
     ) WITH CLUSTERING ORDER BY (attempt DESC, epoch DESC)"#,
+    r#"CREATE TABLE IF NOT EXISTS window_layout (
+        id int PRIMARY KEY,
+        raw_bucket_ms bigint
+    )"#,
     r#"CREATE TABLE IF NOT EXISTS window_triggers (
         namespace blob,
         kg_shard int,
@@ -123,6 +143,15 @@ pub fn last_included_ts(to: crate::runtime::operators::window::model::Cursor) ->
 mod bucket_tests {
     use super::*;
     use crate::runtime::operators::window::model::Cursor;
+
+    #[test]
+    fn bucket_width_follows_the_longest_window() {
+        assert_eq!(choose_raw_bucket_ms(10_000), 10_000);
+        assert_eq!(choose_raw_bucket_ms(7_000), 5_000);
+        assert_eq!(choose_raw_bucket_ms(500), 1_000);
+        assert_eq!(choose_raw_bucket_ms(3_600_000), 3_600_000);
+        assert_eq!(choose_raw_bucket_ms(0), RAW_BUCKET_MS);
+    }
 
     #[test]
     fn bucket_partition_keys() {

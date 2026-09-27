@@ -379,7 +379,17 @@ impl OperatorTrait for WindowOperator {
                 writer_id: WriterId(context.vertex_id().as_bytes().to_vec()),
                 attempt,
             };
-            let store = open_window_operator_store(registry, backend, &scope)?;
+            let mut backend = backend.clone();
+            if let crate::api::spec::state::OperatorStateBackendConfig::Scylla(cfg) = &mut backend {
+                if cfg.raw_bucket_ms.is_none() {
+                    cfg.raw_bucket_ms = Some(
+                        crate::runtime::operators::window::store::backend::choose_raw_bucket_ms(
+                            self.max_window_length_ms,
+                        ),
+                    );
+                }
+            }
+            let store = open_window_operator_store(registry, &backend, &scope)?;
             let task_id = context.vertex_id_arc();
             let state = Arc::new(
                 WindowOperatorState::new(

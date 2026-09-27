@@ -25,6 +25,10 @@ pub struct ScyllaConfig {
     pub keyspace: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub datacenter: Option<String>,
+    /// Raw partition width in milliseconds. Omitted → derived from the longest
+    /// window when the operator opens. Stored in the keyspace and then fixed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_bucket_ms: Option<i64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

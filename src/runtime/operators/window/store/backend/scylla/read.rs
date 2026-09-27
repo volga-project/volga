@@ -13,7 +13,7 @@ use crate::runtime::operators::window::store::backend::codec::{decode_batch, dec
 use crate::runtime::operators::window::store::backend::{Attempt, Version};
 
 use super::observe::{note_bytes, note_rows, note_stmt};
-use super::schema::{last_included_ts, time_buckets, RAW_BUCKET_MS};
+use super::schema::{last_included_ts, time_buckets};
 use super::store::ScyllaWindowStoreClient;
 
 fn row_version(attempt: i64, epoch: i64) -> Version {
@@ -60,9 +60,10 @@ pub(super) async fn load_raw(
     let kg = client.key_group(partition)?;
     let session = client.inner.session();
     let prepared = client.inner.prepared().await?;
+    let bucket_ms = client.inner.raw_bucket_ms();
     let mut pages = Vec::new();
     for run in runs {
-        for bucket in time_buckets(run.from.ts, last_included_ts(run.to), RAW_BUCKET_MS) {
+        for bucket in time_buckets(run.from.ts, last_included_ts(run.to), bucket_ms) {
             let session = Arc::clone(&session);
             let select_raw = prepared.select_raw.clone();
             let ns = client.scope.namespace.bytes.clone();

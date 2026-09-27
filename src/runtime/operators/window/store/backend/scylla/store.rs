@@ -21,14 +21,13 @@ use crate::runtime::state::{OperatorStore, OperatorTaskState, StateSessionHandle
 
 use super::cql::{
     mark_idempotent, prepare_stmts, PreparedDml, PreparedGc, DELETE_KEY_STATE_VERSION,
-    DELETE_KG_BUCKETS,
-    DELETE_RAW, DELETE_TILES, DELETE_TILE_VERSION, DELETE_TRIGGERS, INSERT_KEY_STATES,
-    INSERT_KG_BUCKETS, INSERT_RAW, INSERT_TILES, INSERT_TRIGGERS, SELECT_KEY_STATE,
-    SELECT_KEY_STATE_VERSIONS, SELECT_KG_BUCKETS, SELECT_RAW, SELECT_TILES, SELECT_TILE_VERSIONS,
-    SELECT_TRIGGERS,
+    DELETE_KG_BUCKETS, DELETE_RAW, DELETE_TILES, DELETE_TILE_VERSION, DELETE_TRIGGERS,
+    INSERT_KEY_STATES, INSERT_KG_BUCKETS, INSERT_RAW, INSERT_TILES, INSERT_TRIGGERS,
+    SELECT_KEY_STATE, SELECT_KEY_STATE_VERSIONS, SELECT_KG_BUCKETS, SELECT_RAW, SELECT_TILES,
+    SELECT_TILE_VERSIONS, SELECT_TRIGGERS,
 };
 use super::observe::{self, CallMeter};
-use super::schema::TABLES;
+use super::schema::{RAW_BUCKET_MS, TABLES};
 use super::{checkpoint, maintain, read, triggers, write};
 
 #[derive(Default)]
@@ -41,6 +40,7 @@ struct GroupClock {
 pub struct ScyllaWindowStore {
     pub(super) config: ScyllaConfig,
     session: Arc<Session>,
+    raw_bucket_ms: Arc<OnceCell<i64>>,
     prepared: Arc<OnceCell<PreparedDml>>,
     prepared_gc: Arc<OnceCell<PreparedGc>>,
     metrics_labels: Option<MetricsLabels>,
@@ -54,11 +54,42 @@ impl std::fmt::Debug for ScyllaWindowStore {
     }
 }
 
+const LAYOUT_ID: i32 = 0;
+
+async fn ensure_raw_bucket_ms(session: &Session, desired: i64) -> Result<i64> {
+    session
+        .query_unpaged(
+            "INSERT INTO window_layout (id, raw_bucket_ms) VALUES (?, ?) IF NOT EXISTS",
+            (LAYOUT_ID, desired),
+        )
+        .await?;
+    let result = session
+        .query_unpaged(
+            "SELECT raw_bucket_ms FROM window_layout WHERE id = ?",
+            (LAYOUT_ID,),
+        )
+        .await?;
+    let stored = result
+        .into_rows_result()?
+        .rows::<(i64,)>()?
+        .next()
+        .transpose()?
+        .map(|(ms,)| ms)
+        .ok_or_else(|| anyhow!("window_layout row missing"))?;
+    if stored != desired {
+        anyhow::bail!(
+            "raw bucket width {desired}ms does not match {stored}ms already stored for this keyspace"
+        );
+    }
+    Ok(stored)
+}
+
 impl ScyllaWindowStore {
     pub fn new(config: ScyllaConfig, session: Arc<Session>) -> Self {
         Self {
             config,
             session,
+            raw_bucket_ms: Arc::new(OnceCell::new()),
             prepared: Arc::new(OnceCell::new()),
             prepared_gc: Arc::new(OnceCell::new()),
             metrics_labels: None,
@@ -91,7 +122,17 @@ impl ScyllaWindowStore {
         &self.config.keyspace
     }
 
+    pub(super) fn raw_bucket_ms(&self) -> i64 {
+        self.raw_bucket_ms.get().copied().unwrap_or(RAW_BUCKET_MS)
+    }
+
     pub(super) async fn prepared(&self) -> Result<&PreparedDml> {
+        let desired = self
+            .config
+            .raw_bucket_ms
+            .filter(|ms| *ms > 0)
+            .unwrap_or(RAW_BUCKET_MS);
+        let bucket_cell = Arc::clone(&self.raw_bucket_ms);
         self.prepared
             .get_or_try_init(|| async {
                 let session = self.session();
@@ -99,6 +140,8 @@ impl ScyllaWindowStore {
                     TABLES.iter().map(|table| session.query_unpaged(*table, &[])),
                 )
                 .await?;
+                let width = ensure_raw_bucket_ms(session.as_ref(), desired).await?;
+                let _ = bucket_cell.set(width);
                 let [
                     insert_raw,
                     insert_kg_buckets,
