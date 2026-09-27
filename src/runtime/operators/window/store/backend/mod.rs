@@ -82,8 +82,7 @@ pub fn open_window_operator_store(
                     None => panic!("Scylla window store requires StateSessionHandle::Scylla"),
                 };
                 Arc::new(
-                    ScyllaWindowStore::new(cfg.clone(), session)
-                        .with_metrics_labels(labels.clone()),
+                    ScyllaWindowStore::new(cfg.clone(), session).with_metrics_labels(labels.clone()),
                 ) as Arc<dyn OperatorStore>
             });
             let store = registered

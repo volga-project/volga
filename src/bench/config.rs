@@ -10,9 +10,9 @@ use datafusion::common::ScalarValue;
 use serde::Deserialize;
 
 use crate::api::spec::connectors::{SinkSpec, SourceSpec, SourceSpecKind};
+use crate::api::spec::state::{OperatorStateBackendConfig, ScyllaConfig};
 use crate::api::spec::operators::{OperatorOverride, OperatorTuningSpec};
 use crate::api::spec::pipeline::ExecutionProfile;
-use crate::api::spec::state::{OperatorStateBackendConfig, ScyllaConfig};
 use crate::api::{DatagenSpec, PipelineSpecBuilder, TaskWorkerAssignmentStrategyType};
 use crate::runtime::consts::RuntimeConstsProfile;
 use crate::runtime::functions::source::datagen_source::{FieldGenerator, KeyDistribution};
@@ -201,11 +201,9 @@ pub fn apply_file(file: &BenchFile) -> Result<BenchSpec> {
             .iter()
             .map(|q| (q.name.clone(), q.query.clone()))
             .collect(),
-        None => extra_prom_queries(
-            file.launch
-                .as_ref()
-                .is_some_and(|l| l.backend.as_ref().is_some_and(|b| b.kind == "scylla")),
-        ),
+        None => extra_prom_queries(file.launch.as_ref().is_some_and(|l| {
+            l.backend.as_ref().is_some_and(|b| b.kind == "scylla")
+        })),
     };
     Ok(BenchSpec {
         env,
@@ -411,19 +409,15 @@ fn datagen_from_file(file: Option<&DatagenFile>, parallelism: usize) -> Result<D
     })
 }
 
-fn resolve_step_ms(
-    explicit: Option<u64>,
-    rate: Option<f32>,
-    num_unique_keys: usize,
-) -> Result<u64> {
+fn resolve_step_ms(explicit: Option<u64>, rate: Option<f32>, num_unique_keys: usize) -> Result<u64> {
     match (rate, explicit) {
         (Some(_), Some(_)) => bail!(
             "launch.datagen.step_ms is only valid when rate is null (unlimited); \
              finite rate derives step from num_unique_keys/rate so event time tracks wall"
         ),
-        (Some(r), None) => Ok(((num_unique_keys as f64) / f64::from(r) * 1000.0)
-            .round()
-            .max(1.0) as u64),
+        (Some(r), None) => {
+            Ok(((num_unique_keys as f64) / f64::from(r) * 1000.0).round().max(1.0) as u64)
+        }
         (None, None) => Ok(1),
         (None, Some(0)) => bail!("launch.datagen.step_ms must be >= 1"),
         (None, Some(n)) => Ok(n),
