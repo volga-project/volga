@@ -1,0 +1,23 @@
+# Rendered by bench/flink/run.sh. __STATE_BACKEND__ is hashmap or rocksdb.
+jobmanager.rpc.address: flink-jobmanager
+jobmanager.rpc.port: 6123
+blob.server.port: 6124
+rest.address: flink-jobmanager
+rest.port: 8081
+rest.bind-address: 0.0.0.0
+
+taskmanager.numberOfTaskSlots: 2
+parallelism.default: 4
+
+jobmanager.memory.process.size: 1024m
+taskmanager.memory.process.size: 1600m
+
+state.backend.type: __STATE_BACKEND__
+state.backend.rocksdb.localdir: /tmp/flink-rocksdb
+
+execution.checkpointing.interval: 30 s
+execution.checkpointing.timeout: 60 s
+pipeline.auto-watermark-interval: 200 ms
+
+metrics.reporter.prom.factory.class: org.apache.flink.metrics.prometheus.PrometheusReporterFactory
+metrics.reporter.prom.port: 9249

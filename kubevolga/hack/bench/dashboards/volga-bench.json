@@ -7,7 +7,18 @@
   ],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 10,
+  "version": 11,
+  "links": [
+    {
+      "asDropdown": false,
+      "icon": "dashboard",
+      "keepTime": true,
+      "targetBlank": false,
+      "title": "Flink bench",
+      "type": "link",
+      "url": "/d/flink-bench/flink-bench"
+    }
+  ],
   "refresh": "5s",
   "time": {
     "from": "now-15m",

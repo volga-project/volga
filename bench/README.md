@@ -188,3 +188,16 @@ Scylla's own metrics, one line per pod. A multi-node cluster shows up as several
 **Compaction** and **compaction backlog.** Active and waiting compactions, and the backlog in bytes, per node. Pending work that never returns to zero means compaction is behind on that node.
 
 **Memory.** Dirty regular memory and cache bytes, per node. On the Kind one-shard pod, dirty memory should stay inside the 1G shard.
+
+## Flink datagen
+
+Same cluster, namespace `flink-bench`. Not `volga-bench`. The header link on the Volga board opens the Flink board.
+
+```bash
+make -C kubevolga bench
+export VOLGA_KUBE_CONTEXT="${VOLGA_KUBE_CONTEXT:-kind-kubevolga}"
+bench/flink/run.sh hashmap
+# bench/flink/run.sh rocksdb
+```
+
+`run.sh` applies a session cluster (JobManager on the infra node, two TaskManagers on the worker taint, 2 slots each), then submits [`flink/job.sql`](flink/job.sql): datagen at 200 rows/s, 10s `RANGE` `OVER` (`SUM` / `COUNT` / `AVG` / `MIN` / `MAX`), blackhole sink, checkpoint every 30s. `state.backend.type` is the argument. Stop with `kubectl delete ns flink-bench`.

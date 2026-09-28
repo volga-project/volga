@@ -1,0 +1,73 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flink-taskmanager
+  namespace: flink-bench
+  labels:
+    app.kubernetes.io/name: flink
+    app.kubernetes.io/component: taskmanager
+    app.kubernetes.io/part-of: flink-bench
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: flink
+      app.kubernetes.io/component: taskmanager
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: flink
+        app.kubernetes.io/component: taskmanager
+        app.kubernetes.io/part-of: flink-bench
+        state-backend: __STATE_BACKEND__
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9249"
+        prometheus.io/path: "/metrics"
+    spec:
+      nodeSelector:
+        volga.io/role: worker
+      tolerations:
+        - key: volga.io/role
+          operator: Equal
+          value: worker
+          effect: NoSchedule
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/component: taskmanager
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - name: taskmanager
+          image: flink:1.20.1
+          imagePullPolicy: IfNotPresent
+          args: ["taskmanager"]
+          ports:
+            - name: metrics
+              containerPort: 9249
+          env:
+            - name: ENABLE_BUILT_IN_PLUGINS
+              value: flink-metrics-prometheus;flink-statebackend-rocksdb
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          volumeMounts:
+            - name: flink-config
+              mountPath: /opt/flink/conf/config.yaml
+              subPath: config.yaml
+            - name: rocksdb
+              mountPath: /tmp/flink-rocksdb
+      volumes:
+        - name: flink-config
+          configMap:
+            name: flink-config
+        - name: rocksdb
+          emptyDir: {}

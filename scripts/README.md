@@ -218,3 +218,7 @@ dashboard). Prom dump/oracles need `prom_url` in the YAML (example uses
 
 `make -C kubevolga unbench` removes Prom/Grafana. `scripts/kube-test-env destroy`
 deletes the Kind cluster. Overnight soaks belong on a real cluster, not Kind.
+
+Flink datagen (same Kind cluster, separate namespace) is
+[`bench/flink/run.sh`](../bench/flink/run.sh). Re-apply `make -C kubevolga bench`
+so Grafana loads the Flink board. Tracker: issue 318.
